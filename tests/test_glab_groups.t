@@ -113,6 +113,28 @@ sub run_cmd {
 }
 
 {
+    my $policy = GlabGroups::_merge_policy(
+        {
+            additional_branches => [],
+            additional_tags => [],
+            force_lfs => JSON::PP::false,
+            visibility => "public",
+        },
+        {
+            additional_branches => [],
+            additional_tags => [],
+            visibility => undef,
+        },
+        {
+            additional_branches => [],
+            additional_tags => [],
+            visibility => undef,
+        },
+    );
+    is( $policy->{visibility}, "public", "merge keeps default visibility when overlays omit it" );
+}
+
+{
     my $dir = tempdir( CLEANUP => 1 );
     my $blob_path = File::Spec->catfile( $dir, "blob.bin" );
     open( my $blob, ">:raw", $blob_path ) or die "unable to write blob";

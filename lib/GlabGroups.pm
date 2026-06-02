@@ -842,16 +842,18 @@ sub _normalize_namespace {
     return {
         additional_branches => _normalize_ref_specs( $payload->{additional_branches}, "$label.additional_branches" ),
         additional_tags => _normalize_ref_specs( $payload->{additional_tags}, "$label.additional_tags" ),
-        allow_blob_rewrite => _bool_or_default( $payload->{allow_blob_rewrite}, 1 ),
-        force_lfs => _bool_or_default( $payload->{force_lfs}, 0 ),
+        allow_blob_rewrite => _optional_bool( $payload->{allow_blob_rewrite} ),
+        force_lfs => _optional_bool( $payload->{force_lfs} ),
         git_timeout_seconds => $payload->{git_timeout_seconds},
-        mirror_pristine_tar => _bool_or_default( $payload->{mirror_pristine_tar}, 1 ),
+        mirror_pristine_tar => _optional_bool( $payload->{mirror_pristine_tar} ),
         name => _required_string( $payload->{name}, "$label.name" ),
         size_limit_bytes => $payload->{size_limit_bytes},
         max_blob_bytes => $payload->{max_blob_bytes},
         source_group_url => _required_https_url( $payload->{source_group_url}, "$label.source_group_url" ),
         target_namespace_path => _required_relative_namespace_path( $payload->{target_namespace_path}, "$label.target_namespace_path" ),
-        visibility => _coalesce_visibility( $payload->{visibility}, $DEFAULTS{visibility} ),
+        visibility => defined $payload->{visibility}
+          ? _coalesce_visibility( $payload->{visibility}, $DEFAULTS{visibility} )
+          : undef,
     };
 }
 
@@ -861,10 +863,10 @@ sub _normalize_override {
     return {
         additional_branches => _normalize_ref_specs( $payload->{additional_branches}, "$label.additional_branches" ),
         additional_tags => _normalize_ref_specs( $payload->{additional_tags}, "$label.additional_tags" ),
-        allow_blob_rewrite => _bool_or_default( $payload->{allow_blob_rewrite}, 1 ),
-        force_lfs => _bool_or_default( $payload->{force_lfs}, 0 ),
+        allow_blob_rewrite => _optional_bool( $payload->{allow_blob_rewrite} ),
+        force_lfs => _optional_bool( $payload->{force_lfs} ),
         git_timeout_seconds => $payload->{git_timeout_seconds},
-        mirror_pristine_tar => _bool_or_default( $payload->{mirror_pristine_tar}, 1 ),
+        mirror_pristine_tar => _optional_bool( $payload->{mirror_pristine_tar} ),
         size_limit_bytes => $payload->{size_limit_bytes},
         max_blob_bytes => $payload->{max_blob_bytes},
         target_project_path => _required_relative_project_path( $payload->{target_project_path}, "$label.target_project_path" ),
@@ -874,11 +876,23 @@ sub _normalize_override {
 
 sub _merge_policy {
     my ( $defaults, $namespace, $override ) = @_;
-    my $policy = {
-        %{$defaults},
-        %{$namespace},
-        %{$override},
-    };
+    my $policy = { %{$defaults} };
+    for my $overlay ( $namespace, $override ) {
+        next unless ref($overlay) eq "HASH";
+        for my $key (qw(
+          allow_blob_rewrite
+          force_lfs
+          git_timeout_seconds
+          max_blob_bytes
+          mirror_pristine_tar
+          size_limit_bytes
+          visibility
+        )) {
+            next unless exists $overlay->{$key};
+            next unless defined $overlay->{$key};
+            $policy->{$key} = $overlay->{$key};
+        }
+    }
     $policy->{additional_branches} = [
         @{ $defaults->{additional_branches} || [] },
         @{ $namespace->{additional_branches} || [] },
@@ -892,6 +906,7 @@ sub _merge_policy {
     $policy->{git_timeout_seconds} ||= $DEFAULTS{git_timeout_seconds};
     $policy->{size_limit_bytes} ||= $DEFAULTS{size_limit_bytes};
     $policy->{max_blob_bytes} ||= $DEFAULTS{max_blob_bytes};
+    $policy->{visibility} = $DEFAULTS{visibility} unless defined $policy->{visibility};
     return $policy;
 }
 
@@ -1407,6 +1422,12 @@ sub _positive_int {
 sub _bool_or_default {
     my ( $value, $default ) = @_;
     return $default ? JSON::PP::true : JSON::PP::false if !defined $value;
+    return $value ? JSON::PP::true : JSON::PP::false;
+}
+
+sub _optional_bool {
+    my ($value) = @_;
+    return undef if !defined $value;
     return $value ? JSON::PP::true : JSON::PP::false;
 }
 
