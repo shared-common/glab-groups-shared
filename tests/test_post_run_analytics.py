@@ -21,14 +21,14 @@ class PostRunAnalyticsTests(unittest.TestCase):
         }
         rows = [
             {
-                "target_full_path": "glab-forks/kalilinux/demo",
+                "target_full_path": "glab-owners/kalilinux/demo",
                 "planned_action": "create_project",
                 "status": "mirrored",
                 "selected_refs": {"branches": ["main"], "tags": []},
                 "size": {"total_bytes": 42, "oversized_blobs": []},
             },
             {
-                "target_full_path": "glab-forks/debian/demo",
+                "target_full_path": "glab-owners/debian/demo",
                 "planned_action": "mirror_only",
                 "status": "skipped",
                 "reason": "Repository above permitted size limit.",

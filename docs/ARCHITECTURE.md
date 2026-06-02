@@ -7,6 +7,10 @@ wrapper repositories. The shared workflow checks out this repository and the
 shared config repository, fetches target GitLab credentials from BWS, and then
 runs the Perl and Python tooling in a deterministic order.
 
+Target paths in config are stored relative to the target owner group. The
+runtime composes full paths from `GL_BASE_URL`, `GL_GROUP_TOP_GLAB_OWNER`, and
+the configured relative namespace path.
+
 ## Execution order
 
 1. `plan`

@@ -56,7 +56,7 @@ sub run_cmd {
                 {
                     name => "kali",
                     source_group_url => "https://gitlab.com/kalilinux",
-                    target_namespace_path => "glab-forks/kalilinux",
+                    target_namespace_path => "kalilinux",
                 },
             ],
         }

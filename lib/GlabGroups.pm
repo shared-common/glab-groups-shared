@@ -140,7 +140,7 @@ sub load_config_dir {
             for my $index ( 0 .. $#{$projects} ) {
                 my $item = $projects->[$index];
                 ref($item) eq "HASH" or die "$file.projects[$index] must be an object\n";
-                my $path = _required_project_path( $item->{target_project_path}, "$file.projects[$index].target_project_path" );
+                my $path = _required_relative_project_path( $item->{target_project_path}, "$file.projects[$index].target_project_path" );
                 my $reason = _required_string( $item->{reason} || "Excluded by config", "$file.projects[$index].reason" );
                 $config{exclusions}->{$path} = $reason;
             }
@@ -532,7 +532,9 @@ sub _normalize_inventory {
 sub _build_plan {
     my ( $config, $inventory, $batch_size ) = @_;
     my $target_client = _load_target_client();
+    my $target_root_path = _load_target_root_group_path();
     my %group_cache;
+    my %project_index_cache;
     my @plan;
     my %counts = (
         create_project => 0,
@@ -545,18 +547,23 @@ sub _build_plan {
     for my $bucket ( @{ $inventory->{inventory} || [] } ) {
         my $namespace = $bucket->{namespace};
         my $source_group_path = $bucket->{group_path};
+        my $target_namespace_root_path = _join_path( $target_root_path, $namespace->{target_namespace_path} );
+        my $target_projects_by_path =
+          $project_index_cache{$target_namespace_root_path}
+          ||= _build_target_project_index( $target_client, $target_namespace_root_path );
 
         for my $source_project ( @{ $bucket->{projects} || [] } ) {
             my $source_full_path = _required_string( $source_project->{path_with_namespace}, "path_with_namespace" );
             next if $source_full_path eq $source_group_path;
             my $relative_path = _relative_path( $source_group_path, $source_full_path );
-            my $target_full_path = _join_path( $namespace->{target_namespace_path}, $relative_path );
+            my $target_relative_project_path = _join_path( $namespace->{target_namespace_path}, $relative_path );
+            my $target_full_path = _join_path( $target_root_path, $target_relative_project_path );
             my $target_namespace_path = dirname($target_full_path);
-            my $override = $config->{overrides}->{$target_full_path} || {};
+            my $override = $config->{overrides}->{$target_relative_project_path} || {};
             my $policy = _merge_policy( $config->{defaults}, $namespace, $override );
             my $target_namespace_id = _ensure_group_path( $target_client, $target_namespace_path, \%group_cache, $policy->{visibility} );
-            my $target_project = _get_project( $target_client, $target_full_path );
-            my $skip_reason = $config->{exclusions}->{$target_full_path};
+            my $target_project = $target_projects_by_path->{$target_full_path};
+            my $skip_reason = $config->{exclusions}->{$target_relative_project_path};
             my $action = classify_plan_action(
                 $source_project,
                 $target_project,
@@ -582,6 +589,7 @@ sub _build_plan {
                 source_ssh_url => $source_project->{ssh_url_to_repo},
                 source_visibility => $source_project->{visibility},
                 target_full_path => $target_full_path,
+                target_relative_project_path => $target_relative_project_path,
                 target_namespace_id => $target_namespace_id,
                 target_namespace_path => $target_namespace_path,
                 target_project_id => $target_project ? $target_project->{id} : undef,
@@ -843,7 +851,7 @@ sub _normalize_namespace {
         size_limit_bytes => $payload->{size_limit_bytes},
         max_blob_bytes => $payload->{max_blob_bytes},
         source_group_url => _required_https_url( $payload->{source_group_url}, "$label.source_group_url" ),
-        target_namespace_path => _required_project_path( $payload->{target_namespace_path}, "$label.target_namespace_path" ),
+        target_namespace_path => _required_relative_namespace_path( $payload->{target_namespace_path}, "$label.target_namespace_path" ),
         visibility => _coalesce_visibility( $payload->{visibility}, $DEFAULTS{visibility} ),
     };
 }
@@ -860,7 +868,7 @@ sub _normalize_override {
         mirror_pristine_tar => _bool_or_default( $payload->{mirror_pristine_tar}, 1 ),
         size_limit_bytes => $payload->{size_limit_bytes},
         max_blob_bytes => $payload->{max_blob_bytes},
-        target_project_path => _required_project_path( $payload->{target_project_path}, "$label.target_project_path" ),
+        target_project_path => _required_relative_project_path( $payload->{target_project_path}, "$label.target_project_path" ),
         visibility => $payload->{visibility} ? _coalesce_visibility( $payload->{visibility}, $DEFAULTS{visibility} ) : undef,
     };
 }
@@ -890,10 +898,14 @@ sub _merge_policy {
 
 sub _load_target_client {
     return _make_gitlab_client(
-        _required_https_url( _required_env_file("GL_GROUPS_TARGET_BASE_URL"), "GL_GROUPS_TARGET_BASE_URL" ),
-        _required_env_file("GL_GROUPS_TARGET_USERNAME"),
-        _required_env_file("GL_GROUPS_TARGET_TOKEN"),
+        _required_https_url( _required_env_file("GL_BASE_URL"), "GL_BASE_URL" ),
+        _required_env_file("GL_BRIDGE_FORK_USER_GLAB"),
+        _required_env_file("GL_PAT_FORK_GLAB_SVC"),
     );
+}
+
+sub _load_target_root_group_path {
+    return _required_group_path_min_segments( _required_env_file("GL_GROUP_TOP_GLAB_OWNER"), "GL_GROUP_TOP_GLAB_OWNER", 1 );
 }
 
 sub _load_source_auth {
@@ -1058,6 +1070,21 @@ sub _list_group_projects {
         $page++;
     }
     return \@projects;
+}
+
+sub _build_target_project_index {
+    my ( $client, $group_path ) = @_;
+    my $group = _get_group( $client, $group_path );
+    return {} unless $group;
+
+    my %index;
+    for my $project ( @{ _list_group_projects( $client, $group_path ) } ) {
+        next unless ref($project) eq "HASH";
+        my $path = $project->{path_with_namespace};
+        next unless defined $path && !ref($path) && length $path;
+        $index{$path} = $project;
+    }
+    return \%index;
 }
 
 sub _discover_remote_refs {
@@ -1290,8 +1317,26 @@ sub _required_string {
 
 sub _required_project_path {
     my ( $value, $label ) = @_;
+    return _required_group_path_min_segments( $value, $label, 2 );
+}
+
+sub _required_relative_namespace_path {
+    my ( $value, $label ) = @_;
+    return _required_group_path_min_segments( $value, $label, 1 );
+}
+
+sub _required_relative_project_path {
+    my ( $value, $label ) = @_;
+    return _required_group_path_min_segments( $value, $label, 2 );
+}
+
+sub _required_group_path_min_segments {
+    my ( $value, $label, $minimum_segments ) = @_;
     $value = _required_string( $value, $label );
-    $value =~ /\A[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)+\z/
+    my @segments = split m{/}, $value;
+    @segments >= $minimum_segments
+      or die "$label must contain at least $minimum_segments path segment(s)\n";
+    $value =~ /\A[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*\z/
       or die "$label must be a namespace path\n";
     return $value;
 }

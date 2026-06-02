@@ -21,6 +21,20 @@ Wrapper repositories call `.github/workflows/group-sync-core.yml` and pass:
 The shared workflow uploads plan, result, report, CSV, JSON, and optional
 Parquet artifacts on every run.
 
+## Target namespace contract
+
+Config files store relative target namespace paths. The runtime resolves the
+real destination as:
+
+- `GL_BASE_URL`
+- `GL_GROUP_TOP_GLAB_OWNER`
+- config `target_namespace_path`
+
+and authenticates with:
+
+- `GL_BRIDGE_FORK_USER_GLAB`
+- `GL_PAT_FORK_GLAB_SVC`
+
 ## Validation
 
 ```sh
