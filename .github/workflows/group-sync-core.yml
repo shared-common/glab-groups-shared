@@ -1,0 +1,198 @@
+---
+name: group-sync-core
+
+"on":
+  workflow_call:
+    inputs:
+      shared-repo:
+        required: true
+        type: string
+      shared-ref:
+        required: true
+        type: string
+      config-repo:
+        required: true
+        type: string
+      config-ref:
+        required: true
+        type: string
+      config-path:
+        required: true
+        type: string
+      batch-size:
+        required: false
+        type: number
+        default: 25
+      emit-parquet:
+        required: false
+        type: boolean
+        default: false
+      bws-version:
+        required: false
+        type: string
+        default: ""
+      bws-sha256:
+        required: false
+        type: string
+        default: ""
+    secrets:
+      BWS_ACCESS_TOKEN:
+        required: true
+      BWS_PROJECT_ID:
+        required: true
+
+permissions: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    steps:
+      - name: Validate workflow inputs
+        shell: bash
+        env:
+          CONFIG_PATH: ${{ inputs.config-path }}
+          SHARED_REF: ${{ inputs.shared-ref }}
+          SHARED_REPO: ${{ inputs.shared-repo }}
+          CONFIG_REPO: ${{ inputs.config-repo }}
+          CONFIG_REF: ${{ inputs.config-ref }}
+        run: |
+          set -euo pipefail
+          case "${CONFIG_PATH}" in
+            ""|*..*|/*)
+              printf '%s\n' "invalid config-path: ${CONFIG_PATH}" >&2
+              exit 1
+              ;;
+          esac
+          for value in "${SHARED_REPO}" "${SHARED_REF}" "${CONFIG_REPO}" "${CONFIG_REF}"; do
+            if [ -z "${value}" ]; then
+              printf '%s\n' "shared/config repo inputs must be set" >&2
+              exit 1
+            fi
+          done
+
+      - name: Checkout shared workflow repository
+        # actions/checkout v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: ${{ inputs.shared-repo }}
+          ref: ${{ inputs.shared-ref }}
+          path: shared
+          persist-credentials: false
+
+      - name: Checkout shared config repository
+        # actions/checkout v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: ${{ inputs.config-repo }}
+          ref: ${{ inputs.config-ref }}
+          path: gh-actions-cfg
+          persist-credentials: false
+
+      - name: Resolve BWS secret list
+        id: config_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' "secrets=GL_GROUPS_TARGET_BASE_URL,GL_GROUPS_TARGET_USERNAME,GL_GROUPS_TARGET_TOKEN" >> "${GITHUB_OUTPUT}"
+
+      - name: Fetch target secrets from BWS
+        uses: >-
+          shared-common/gh-actions-shared/.github/actions/bws-fetch@v0.0.41
+        with:
+          access-token: ${{ secrets.BWS_ACCESS_TOKEN }}
+          project-id: ${{ secrets.BWS_PROJECT_ID }}
+          bws-version: ${{ inputs.bws-version }}
+          bws-sha256: ${{ inputs.bws-sha256 }}
+          secrets: ${{ steps.config_meta.outputs.secrets }}
+          output-dir: .secrets
+
+      - name: Mask fetched secrets
+        shell: bash
+        env:
+          SECRET_NAMES: ${{ steps.config_meta.outputs.secrets }}
+        run: |
+          set -euo pipefail
+          python3 shared/.github/scripts/mask_secret_files.py
+
+      - name: Build deterministic plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          perl shared/.github/scripts/glab_groups.pl \
+            plan \
+            --config-dir "gh-actions-cfg/${{ inputs.config-path }}" \
+            --batch-size "${{ inputs.batch-size }}" \
+            --output plan.json \
+            --summary plan.md
+
+      - name: Mirror selected repositories
+        shell: bash
+        run: |
+          set -euo pipefail
+          perl shared/.github/scripts/glab_groups.pl \
+            mirror \
+            --plan plan.json \
+            --batch-size "${{ inputs.batch-size }}" \
+            --output results.json \
+            --jsonl results.jsonl
+
+      - name: Build report
+        shell: bash
+        run: |
+          set -euo pipefail
+          perl shared/.github/scripts/glab_groups.pl \
+            report \
+            --plan plan.json \
+            --results results.json \
+            --output report.json \
+            --summary report.md
+
+      - name: Build analytics outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          parquet_args=()
+          if [ "${{ inputs.emit-parquet }}" = "true" ]; then
+            parquet_args+=(--parquet results.parquet)
+          fi
+          python3 shared/.github/scripts/post_run_analytics.py \
+            --report report.json \
+            --jsonl results.jsonl \
+            --csv results.csv \
+            --json analytics.json \
+            "${parquet_args[@]}"
+
+      - name: Publish markdown summaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat plan.md >> "${GITHUB_STEP_SUMMARY}"
+          printf '\n' >> "${GITHUB_STEP_SUMMARY}"
+          cat report.md >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload run artifacts
+        # actions/upload-artifact v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: glab-groups-${{ inputs.config-path }}-${{ github.run_id }}
+          if-no-files-found: error
+          path: |
+            plan.json
+            plan.md
+            results.json
+            results.jsonl
+            report.json
+            report.md
+            results.csv
+            analytics.json
+            results.parquet
+
+      - name: Cleanup secrets
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .secrets

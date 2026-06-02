@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/glab-groups/config.schema.json",
+  "type": "object",
+  "required": [
+    "kind",
+    "version"
+  ],
+  "properties": {
+    "kind": {
+      "type": "string",
+      "enum": [
+        "glab-groups/defaults",
+        "glab-groups/namespaces",
+        "glab-groups/project-overrides",
+        "glab-groups/project-exclusions"
+      ]
+    },
+    "version": {
+      "type": "integer",
+      "const": 1
+    }
+  }
+}
