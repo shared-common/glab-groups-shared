@@ -356,6 +356,7 @@ sub _cmd_mirror {
         jsonl => "results.jsonl",
         batch_size => 25,
         batch_start => 0,
+        batch_stride => 1,
         batch_limit => 0,
     );
     GetOptionsFromArray(
@@ -365,8 +366,14 @@ sub _cmd_mirror {
         "jsonl=s" => \$opt{jsonl},
         "batch-size=i" => \$opt{batch_size},
         "batch-start=i" => \$opt{batch_start},
+        "batch-stride=i" => \$opt{batch_stride},
         "batch-limit=i" => \$opt{batch_limit},
     ) or die _usage();
+
+    $opt{batch_size} > 0 or die "batch-size must be greater than zero\n";
+    $opt{batch_start} >= 0 or die "batch-start must be zero or greater\n";
+    $opt{batch_stride} > 0 or die "batch-stride must be greater than zero\n";
+    $opt{batch_limit} >= 0 or die "batch-limit must be zero or greater\n";
 
     my $plan = _read_json( $opt{plan} );
     my $target_client = _load_target_client();
@@ -374,13 +381,13 @@ sub _cmd_mirror {
     my @entries = @{ $plan->{plan} || [] };
     my $total = scalar @entries;
     my $total_batches = _ceil_div( $total, $opt{batch_size} );
-    my $batch_end = $opt{batch_limit} > 0 ? $opt{batch_start} + $opt{batch_limit} : $total_batches;
-    $batch_end = $total_batches if $batch_end > $total_batches;
 
     my @results;
+    my $processed_batches = 0;
     open( my $jsonl_fh, ">:encoding(UTF-8)", $opt{jsonl} ) or die "unable to write $opt{jsonl}\n";
 
-    for my $batch_index ( $opt{batch_start} .. $batch_end - 1 ) {
+    for ( my $batch_index = $opt{batch_start}; $batch_index < $total_batches; $batch_index += $opt{batch_stride} ) {
+        last if $opt{batch_limit} > 0 && $processed_batches >= $opt{batch_limit};
         my $start = $batch_index * $opt{batch_size};
         my $end = $start + $opt{batch_size} - 1;
         $end = $#entries if $end > $#entries;
@@ -393,13 +400,15 @@ sub _cmd_mirror {
                 $result = {
                     target_full_path => $entry->{target_full_path},
                     planned_action => $entry->{action},
-                    status => "failed",
+                    status => "skipped",
+                    reason => "Repository skipped after unrecoverable error.",
                     error => _trim_error($@),
                 };
             }
             push @results, $result;
             print {$jsonl_fh} $JSON->encode($result), "\n";
         }
+        $processed_batches++;
     }
     close $jsonl_fh;
 
@@ -409,7 +418,10 @@ sub _cmd_mirror {
         {
             batch_size => $opt{batch_size},
             batch_start => $opt{batch_start},
+            batch_stride => $opt{batch_stride},
             batch_limit => $opt{batch_limit},
+            processed_batches => $processed_batches,
+            total_batches => $total_batches,
             counts => $aggregate,
             results => \@results,
         }
@@ -442,21 +454,28 @@ sub _cmd_report {
         output => "report.json",
         summary => "report.md",
     );
+    my @result_files;
     GetOptionsFromArray(
         \@argv,
         "plan=s" => \$opt{plan},
-        "results=s" => \$opt{results},
+        "results=s@" => \@result_files,
         "output=s" => \$opt{output},
         "summary=s" => \$opt{summary},
     ) or die _usage();
 
     my $plan = _read_json( $opt{plan} );
-    my $results = _read_json( $opt{results} );
+    @result_files or die "at least one --results file is required\n";
+
+    my @rows;
+    for my $file (@result_files) {
+        my $results = _read_json($file);
+        push @rows, grep { ref($_) eq "HASH" } @{ $results->{results} || [] };
+    }
     my $report = {
         generated_at => _timestamp(),
         plan_counts => $plan->{counts},
-        result_counts => $results->{counts},
-        results => $results->{results},
+        result_counts => _aggregate_results( \@rows ),
+        results => \@rows,
     };
     _write_json( $opt{output}, $report );
     _write_text( $opt{summary}, _render_report_summary($report) );
@@ -649,12 +668,12 @@ sub _mirror_entry {
     _run_command( [ "git", "-C", $repo_dir, "remote", "add", "source", $source_url ], { timeout => 60 } );
     _run_command( [ "git", "-C", $repo_dir, "remote", "add", "target", $target_url ], { timeout => 60 } );
 
-    my $available = _discover_remote_refs( $source_url, $entry->{policy}->{git_timeout_seconds} );
+    my $available = _discover_remote_refs( $source_url, $entry->{policy} );
     my $default_branch = $entry->{source_default_branch} || $available->{default_branch} || "";
     my $selected = resolve_selected_refs( $default_branch, $entry->{policy}, $available );
     @{ $selected->{branches} } or die "no source branches resolved for $entry->{source_full_path}\n";
 
-    _fetch_selected_refs( $repo_dir, $selected, $entry->{policy}->{git_timeout_seconds} );
+    _fetch_selected_refs( $repo_dir, $selected, $entry->{policy} );
     _run_command( [ "git", "-C", $repo_dir, "checkout", "-f", $selected->{branches}->[0] ], { timeout => 300 } );
 
     my $size_before = analyze_selected_refs( $repo_dir, $selected, $entry->{policy}->{max_blob_bytes} );
@@ -671,12 +690,21 @@ sub _mirror_entry {
 
     my $lfs_rewrite_attempted = JSON::PP::false;
     my $size_after = $size_before;
+    my $lfs_rewrite_error = "";
     if ( @{ $size_before->{oversized_blobs} } && $entry->{policy}->{allow_blob_rewrite} ) {
         $lfs_rewrite_attempted = JSON::PP::true;
-        _rewrite_large_blobs_to_lfs( $repo_dir, $selected, $entry->{policy}->{max_blob_bytes}, $entry->{policy}->{git_timeout_seconds} );
-        $size_after = analyze_selected_refs( $repo_dir, $selected, $entry->{policy}->{max_blob_bytes} );
+        my $ok = eval {
+            _rewrite_large_blobs_to_lfs( $repo_dir, $selected, $entry->{policy}->{max_blob_bytes}, $entry->{policy} );
+            1;
+        };
+        if ($ok) {
+            $size_after = analyze_selected_refs( $repo_dir, $selected, $entry->{policy}->{max_blob_bytes} );
+        }
+        else {
+            $lfs_rewrite_error = _trim_error($@);
+        }
     }
-    if ( @{ $size_after->{oversized_blobs} } ) {
+    if ( @{ $size_after->{oversized_blobs} } || $lfs_rewrite_error ) {
         return {
             target_full_path => $entry->{target_full_path},
             planned_action => $entry->{action},
@@ -685,28 +713,32 @@ sub _mirror_entry {
             lfs_rewrite_attempted => $lfs_rewrite_attempted,
             status => "skipped",
             reason => "Large blobs exceed 100 MiB and could not be remediated.",
+            error => $lfs_rewrite_error,
         };
     }
 
     my $needs_lfs = $entry->{policy}->{force_lfs} || $entry->{source_lfs_enabled} || _repo_has_lfs_files($repo_dir);
     if ($needs_lfs) {
-        _prepare_lfs( $repo_dir, $entry->{policy}->{git_timeout_seconds} );
+        _prepare_lfs( $repo_dir, $entry->{policy} );
         for my $branch ( @{ $selected->{branches} || [] } ) {
             _run_command(
                 [ "git", "-C", $repo_dir, "lfs", "fetch", "source", "refs/heads/$branch" ],
-                { timeout => $entry->{policy}->{git_timeout_seconds}, retryable => 1 }
+                _git_command_options( $entry->{policy}, JSON::PP::true )
             );
         }
         for my $tag ( @{ $selected->{tags} || [] } ) {
             _run_command(
                 [ "git", "-C", $repo_dir, "lfs", "fetch", "source", "refs/tags/$tag" ],
-                { timeout => $entry->{policy}->{git_timeout_seconds}, retryable => 1 }
+                _git_command_options( $entry->{policy}, JSON::PP::true )
             );
         }
-        _run_command( [ "git", "-C", $repo_dir, "lfs", "push", "--all", "target" ], { timeout => $entry->{policy}->{git_timeout_seconds}, retryable => 1 } );
+        _run_command(
+            [ "git", "-C", $repo_dir, "lfs", "push", "--all", "target" ],
+            _git_command_options( $entry->{policy}, JSON::PP::true )
+        );
     }
 
-    _push_selected_refs( $repo_dir, $selected, $entry->{policy}->{git_timeout_seconds} );
+    _push_selected_refs( $repo_dir, $selected, $entry->{policy} );
     _finalize_target_project( $target_client, $prepared->{project_id}, $default_branch, $entry );
     my $verified = _verify_entry( $target_client, $entry, $selected );
 
@@ -824,14 +856,14 @@ sub _normalize_defaults_payload {
         additional_branches => _normalize_ref_specs( $payload->{additional_branches}, "$label.defaults.additional_branches" ),
         additional_tags => _normalize_ref_specs( $payload->{additional_tags}, "$label.defaults.additional_tags" ),
         allow_blob_rewrite => _bool_or_default( $payload->{allow_blob_rewrite}, 1 ),
-        batch_size => _positive_int( $payload->{batch_size} || $DEFAULTS{batch_size}, "$label.defaults.batch_size" ),
+        batch_size => _defaulted_positive_int( $payload->{batch_size}, $DEFAULTS{batch_size}, "$label.defaults.batch_size" ),
         force_lfs => _bool_or_default( $payload->{force_lfs}, 0 ),
-        git_timeout_seconds => _positive_int( $payload->{git_timeout_seconds} || $DEFAULTS{git_timeout_seconds}, "$label.defaults.git_timeout_seconds" ),
-        max_blob_bytes => _positive_int( $payload->{max_blob_bytes} || $DEFAULTS{max_blob_bytes}, "$label.defaults.max_blob_bytes" ),
+        git_timeout_seconds => _defaulted_positive_int( $payload->{git_timeout_seconds}, $DEFAULTS{git_timeout_seconds}, "$label.defaults.git_timeout_seconds" ),
+        max_blob_bytes => _defaulted_bounded_positive_int( $payload->{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, "$label.defaults.max_blob_bytes" ),
         mirror_pristine_tar => _bool_or_default( $payload->{mirror_pristine_tar}, 1 ),
-        retry_attempts => _positive_int( $payload->{retry_attempts} || $DEFAULTS{retry_attempts}, "$label.defaults.retry_attempts" ),
-        retry_backoff_seconds => _positive_int( $payload->{retry_backoff_seconds} || $DEFAULTS{retry_backoff_seconds}, "$label.defaults.retry_backoff_seconds" ),
-        size_limit_bytes => _positive_int( $payload->{size_limit_bytes} || $DEFAULTS{size_limit_bytes}, "$label.defaults.size_limit_bytes" ),
+        retry_attempts => _defaulted_positive_int( $payload->{retry_attempts}, $DEFAULTS{retry_attempts}, "$label.defaults.retry_attempts" ),
+        retry_backoff_seconds => _defaulted_positive_int( $payload->{retry_backoff_seconds}, $DEFAULTS{retry_backoff_seconds}, "$label.defaults.retry_backoff_seconds" ),
+        size_limit_bytes => _defaulted_bounded_positive_int( $payload->{size_limit_bytes}, $DEFAULTS{size_limit_bytes}, $DEFAULTS{size_limit_bytes}, "$label.defaults.size_limit_bytes" ),
         visibility => _coalesce_visibility( $payload->{visibility}, $DEFAULTS{visibility} ),
     };
 }
@@ -847,8 +879,10 @@ sub _normalize_namespace {
         git_timeout_seconds => $payload->{git_timeout_seconds},
         mirror_pristine_tar => _optional_bool( $payload->{mirror_pristine_tar} ),
         name => _required_string( $payload->{name}, "$label.name" ),
-        size_limit_bytes => $payload->{size_limit_bytes},
-        max_blob_bytes => $payload->{max_blob_bytes},
+        retry_attempts => _optional_positive_int( $payload->{retry_attempts}, "$label.retry_attempts" ),
+        retry_backoff_seconds => _optional_positive_int( $payload->{retry_backoff_seconds}, "$label.retry_backoff_seconds" ),
+        size_limit_bytes => _optional_bounded_positive_int( $payload->{size_limit_bytes}, $DEFAULTS{size_limit_bytes}, "$label.size_limit_bytes" ),
+        max_blob_bytes => _optional_bounded_positive_int( $payload->{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, "$label.max_blob_bytes" ),
         source_group_url => _required_https_url( $payload->{source_group_url}, "$label.source_group_url" ),
         target_namespace_path => _required_relative_namespace_path( $payload->{target_namespace_path}, "$label.target_namespace_path" ),
         visibility => defined $payload->{visibility}
@@ -867,8 +901,10 @@ sub _normalize_override {
         force_lfs => _optional_bool( $payload->{force_lfs} ),
         git_timeout_seconds => $payload->{git_timeout_seconds},
         mirror_pristine_tar => _optional_bool( $payload->{mirror_pristine_tar} ),
-        size_limit_bytes => $payload->{size_limit_bytes},
-        max_blob_bytes => $payload->{max_blob_bytes},
+        retry_attempts => _optional_positive_int( $payload->{retry_attempts}, "$label.retry_attempts" ),
+        retry_backoff_seconds => _optional_positive_int( $payload->{retry_backoff_seconds}, "$label.retry_backoff_seconds" ),
+        size_limit_bytes => _optional_bounded_positive_int( $payload->{size_limit_bytes}, $DEFAULTS{size_limit_bytes}, "$label.size_limit_bytes" ),
+        max_blob_bytes => _optional_bounded_positive_int( $payload->{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, "$label.max_blob_bytes" ),
         target_project_path => _required_relative_project_path( $payload->{target_project_path}, "$label.target_project_path" ),
         visibility => $payload->{visibility} ? _coalesce_visibility( $payload->{visibility}, $DEFAULTS{visibility} ) : undef,
     };
@@ -885,6 +921,8 @@ sub _merge_policy {
           git_timeout_seconds
           max_blob_bytes
           mirror_pristine_tar
+          retry_attempts
+          retry_backoff_seconds
           size_limit_bytes
           visibility
         )) {
@@ -904,6 +942,8 @@ sub _merge_policy {
         @{ $override->{additional_tags} || [] },
     ];
     $policy->{git_timeout_seconds} ||= $DEFAULTS{git_timeout_seconds};
+    $policy->{retry_attempts} ||= $DEFAULTS{retry_attempts};
+    $policy->{retry_backoff_seconds} ||= $DEFAULTS{retry_backoff_seconds};
     $policy->{size_limit_bytes} ||= $DEFAULTS{size_limit_bytes};
     $policy->{max_blob_bytes} ||= $DEFAULTS{max_blob_bytes};
     $policy->{visibility} = $DEFAULTS{visibility} unless defined $policy->{visibility};
@@ -1102,13 +1142,10 @@ sub _build_target_project_index {
 }
 
 sub _discover_remote_refs {
-    my ( $source_url, $timeout ) = @_;
+    my ( $source_url, $policy ) = @_;
     my $result = _run_command(
         [ "git", "ls-remote", "--heads", "--tags", "--symref", $source_url ],
-        {
-            timeout => $timeout,
-            retryable => 1,
-        }
+        _git_command_options( $policy, JSON::PP::true )
     );
     $result->{status} == 0 or die "git ls-remote failed: $result->{output}\n";
 
@@ -1138,17 +1175,14 @@ sub _discover_remote_refs {
 }
 
 sub _fetch_selected_refs {
-    my ( $repo_dir, $selected, $timeout ) = @_;
+    my ( $repo_dir, $selected, $policy ) = @_;
     for my $branch ( @{ $selected->{branches} || [] } ) {
         _run_command(
             [
                 "git", "-C", $repo_dir, "fetch", "--no-tags", "source",
                 "+refs/heads/$branch:refs/heads/$branch"
             ],
-            {
-                timeout => $timeout,
-                retryable => 1,
-            }
+            _git_command_options( $policy, JSON::PP::true )
         );
     }
     for my $tag ( @{ $selected->{tags} || [] } ) {
@@ -1157,38 +1191,32 @@ sub _fetch_selected_refs {
                 "git", "-C", $repo_dir, "fetch", "--no-tags", "source",
                 "+refs/tags/$tag:refs/tags/$tag"
             ],
-            {
-                timeout => $timeout,
-                retryable => 1,
-            }
+            _git_command_options( $policy, JSON::PP::true )
         );
     }
 }
 
 sub _push_selected_refs {
-    my ( $repo_dir, $selected, $timeout ) = @_;
+    my ( $repo_dir, $selected, $policy ) = @_;
     for my $branch ( @{ $selected->{branches} || [] } ) {
         my $result = _run_command(
             [
                 "git", "-C", $repo_dir, "push", "--force", "target",
                 "refs/heads/$branch:refs/heads/$branch"
             ],
-            {
-                timeout => $timeout,
-                retryable => 1,
-            }
+            _git_command_options( $policy, JSON::PP::true )
         );
         if ( $result->{status} != 0 && $result->{output} =~ /LFS objects are missing/i ) {
-            _run_command( [ "git", "-C", $repo_dir, "lfs", "push", "--all", "target" ], { timeout => $timeout, retryable => 1 } );
+            _run_command(
+                [ "git", "-C", $repo_dir, "lfs", "push", "--all", "target" ],
+                _git_command_options( $policy, JSON::PP::true )
+            );
             $result = _run_command(
                 [
                     "git", "-C", $repo_dir, "push", "--force", "target",
                     "refs/heads/$branch:refs/heads/$branch"
                 ],
-                {
-                    timeout => $timeout,
-                    retryable => 1,
-                }
+                _git_command_options( $policy, JSON::PP::true )
             );
         }
         $result->{status} == 0 or die "git push failed for branch $branch: $result->{output}\n";
@@ -1199,22 +1227,32 @@ sub _push_selected_refs {
                 "git", "-C", $repo_dir, "push", "--force", "target",
                 "refs/tags/$tag:refs/tags/$tag"
             ],
-            {
-                timeout => $timeout,
-                retryable => 1,
-            }
+            _git_command_options( $policy, JSON::PP::true )
         );
+        if ( $result->{status} != 0 && $result->{output} =~ /LFS objects are missing/i ) {
+            _run_command(
+                [ "git", "-C", $repo_dir, "lfs", "push", "--all", "target" ],
+                _git_command_options( $policy, JSON::PP::true )
+            );
+            $result = _run_command(
+                [
+                    "git", "-C", $repo_dir, "push", "--force", "target",
+                    "refs/tags/$tag:refs/tags/$tag"
+                ],
+                _git_command_options( $policy, JSON::PP::true )
+            );
+        }
         $result->{status} == 0 or die "git push failed for tag $tag: $result->{output}\n";
     }
 }
 
 sub _prepare_lfs {
-    my ( $repo_dir, $timeout ) = @_;
-    _run_command( [ "git", "-C", $repo_dir, "lfs", "install", "--local" ], { timeout => $timeout } );
+    my ( $repo_dir, $policy ) = @_;
+    _run_command( [ "git", "-C", $repo_dir, "lfs", "install", "--local" ], _git_command_options( $policy, JSON::PP::false ) );
 }
 
 sub _rewrite_large_blobs_to_lfs {
-    my ( $repo_dir, $selected, $max_blob_bytes, $timeout ) = @_;
+    my ( $repo_dir, $selected, $max_blob_bytes, $policy ) = @_;
     my @cmd = (
         "git", "-C", $repo_dir, "lfs", "migrate", "import",
         "--above", $max_blob_bytes . "B",
@@ -1225,7 +1263,7 @@ sub _rewrite_large_blobs_to_lfs {
     for my $tag ( @{ $selected->{tags} || [] } ) {
         push @cmd, "--include-ref", "refs/tags/$tag";
     }
-    my $result = _run_command( \@cmd, { timeout => $timeout, retryable => 1 } );
+    my $result = _run_command( \@cmd, _git_command_options( $policy, JSON::PP::true ) );
     $result->{status} == 0 or die "git lfs migrate failed: $result->{output}\n";
 }
 
@@ -1419,6 +1457,32 @@ sub _positive_int {
     return 0 + $value;
 }
 
+sub _optional_positive_int {
+    my ( $value, $label ) = @_;
+    return undef unless defined $value;
+    return _positive_int( $value, $label );
+}
+
+sub _defaulted_positive_int {
+    my ( $value, $default, $label ) = @_;
+    return _positive_int( defined $value ? $value : $default, $label );
+}
+
+sub _optional_bounded_positive_int {
+    my ( $value, $maximum, $label ) = @_;
+    return undef unless defined $value;
+    my $resolved = _positive_int( $value, $label );
+    $resolved <= $maximum or die "$label must be less than or equal to $maximum\n";
+    return $resolved;
+}
+
+sub _defaulted_bounded_positive_int {
+    my ( $value, $default, $maximum, $label ) = @_;
+    my $resolved = _defaulted_positive_int( $value, $default, $label );
+    $resolved <= $maximum or die "$label must be less than or equal to $maximum\n";
+    return $resolved;
+}
+
 sub _bool_or_default {
     my ( $value, $default ) = @_;
     return $default ? JSON::PP::true : JSON::PP::false if !defined $value;
@@ -1542,8 +1606,8 @@ sub _run_command {
     my ( $args, $opt ) = @_;
     $opt ||= {};
     my $timeout = $opt->{timeout} || 300;
-    my $attempts = $opt->{retryable} ? $DEFAULTS{retry_attempts} : 1;
-    my $backoff = $DEFAULTS{retry_backoff_seconds};
+    my $attempts = $opt->{retryable} ? ( $opt->{retry_attempts} || $DEFAULTS{retry_attempts} ) : 1;
+    my $backoff = $opt->{retry_backoff_seconds} || $DEFAULTS{retry_backoff_seconds};
 
     my $command = join q{ }, map { _shell_quote($_) } @{$args};
     my $wrapped = "timeout --signal=KILL ${timeout}s $command 2>&1";
@@ -1559,6 +1623,20 @@ sub _run_command {
         sleep( $backoff * $attempt );
     }
     return $last_result;
+}
+
+sub _git_command_options {
+    my ( $policy, $retryable ) = @_;
+    $policy ||= {};
+    my %opt = (
+        timeout => $policy->{git_timeout_seconds} || $DEFAULTS{git_timeout_seconds},
+    );
+    if ($retryable) {
+        $opt{retryable} = 1;
+        $opt{retry_attempts} = $policy->{retry_attempts} || $DEFAULTS{retry_attempts};
+        $opt{retry_backoff_seconds} = $policy->{retry_backoff_seconds} || $DEFAULTS{retry_backoff_seconds};
+    }
+    return \%opt;
 }
 
 sub _run_shell_command {

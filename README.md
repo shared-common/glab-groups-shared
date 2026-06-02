@@ -21,6 +21,10 @@ Wrapper repositories call `.github/workflows/group-sync-core.yml` and pass:
 The shared workflow uploads plan, result, report, CSV, JSON, and optional
 Parquet artifacts on every run.
 
+Mirroring runs in five parallel lanes. The deterministic plan is split into
+batches of 25 repositories, and each lane processes every fifth batch so a
+single slow or skipped repository does not block the entire run.
+
 ## Target namespace contract
 
 Config files store relative target namespace paths. The runtime resolves the
@@ -34,6 +38,16 @@ and authenticates with:
 
 - `GL_BRIDGE_FORK_USER_GLAB`
 - `GL_PAT_FORK_GLAB_SVC`
+
+## Ref selection
+
+Each config directory exposes these defaults:
+
+- `mirror_pristine_tar`: always mirror detected `pristine-tar` branch or tag
+- `additional_branches`: extra branch names to mirror on every run when present
+- `additional_tags`: extra tag names to mirror on every run when present
+- `size_limit_bytes`: selected-ref budget, defaulting to 10 GiB
+- `max_blob_bytes`: blob limit, defaulting to 100 MiB
 
 ## Validation
 

@@ -64,6 +64,7 @@ sub run_cmd {
     my $config = load_config_dir($dir);
     is( scalar @{ $config->{namespaces} }, 1, "loads namespace roots" );
     is( $config->{defaults}->{additional_branches}->[0]->{name}, "release", "normalizes default branches" );
+    is( $config->{defaults}->{batch_size}, 25, "keeps default batch size at 25" );
 }
 
 {
@@ -159,6 +160,63 @@ sub run_cmd {
     );
     cmp_ok( $analysis->{total_bytes}, ">", 1024 * 1024, "counts selected object bytes" );
     is( scalar @{ $analysis->{oversized_blobs} }, 1, "detects oversize blob" );
+}
+
+{
+    my $dir = tempdir( CLEANUP => 1 );
+    my $plan_path = File::Spec->catfile( $dir, "plan.json" );
+    my $results_0 = File::Spec->catfile( $dir, "results-0.json" );
+    my $results_1 = File::Spec->catfile( $dir, "results-1.json" );
+    my $report_path = File::Spec->catfile( $dir, "report.json" );
+    my $summary_path = File::Spec->catfile( $dir, "report.md" );
+    write_json_file(
+        $plan_path,
+        {
+            counts => { create_project => 1, fail => 0, mirror_only => 1, skip => 0, update_project => 0 },
+        }
+    );
+    write_json_file(
+        $results_0,
+        {
+            results => [
+                {
+                    target_full_path => "owner/debian/demo",
+                    planned_action => "create_project",
+                    status => "mirrored",
+                },
+            ],
+        }
+    );
+    write_json_file(
+        $results_1,
+        {
+            results => [
+                {
+                    target_full_path => "owner/kali/demo",
+                    planned_action => "mirror_only",
+                    reason => "Repository above permitted size limit.",
+                    status => "skipped",
+                },
+            ],
+        }
+    );
+
+    is(
+        GlabGroups::run_cli(
+            "report",
+            "--plan", $plan_path,
+            "--results", $results_0,
+            "--results", $results_1,
+            "--output", $report_path,
+            "--summary", $summary_path,
+        ),
+        0,
+        "report merges multiple lane result files",
+    );
+    my $report = JSON::PP->new->decode( do { open( my $fh, "<:encoding(UTF-8)", $report_path ) or die $!; local $/; <$fh> } );
+    is( scalar @{ $report->{results} }, 2, "merged report preserves all lane rows" );
+    is( $report->{result_counts}->{mirrored}, 1, "merged report counts mirrored rows" );
+    is( $report->{result_counts}->{skipped}, 1, "merged report counts skipped rows" );
 }
 
 done_testing();

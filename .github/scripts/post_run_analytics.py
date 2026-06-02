@@ -10,7 +10,7 @@ from typing import Any
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--report", required=True)
-    parser.add_argument("--jsonl", required=True)
+    parser.add_argument("--jsonl", action="append", required=True)
     parser.add_argument("--csv", required=True)
     parser.add_argument("--json", required=True)
     parser.add_argument("--parquet")
@@ -27,6 +27,13 @@ def load_jsonl(path: str) -> list[dict[str, Any]]:
         if not line.strip():
             continue
         rows.append(json.loads(line))
+    return rows
+
+
+def load_jsonl_files(paths: list[str]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for path in paths:
+        rows.extend(load_jsonl(path))
     return rows
 
 
@@ -83,7 +90,7 @@ def write_parquet(path: str, rows: list[dict[str, Any]]) -> str:
 def main() -> int:
     args = parse_args()
     report = load_json(args.report)
-    raw_rows = load_jsonl(args.jsonl)
+    raw_rows = load_jsonl_files(args.jsonl)
     rows = [flatten_row(row) for row in raw_rows]
 
     write_csv(args.csv, rows)

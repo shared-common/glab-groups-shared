@@ -44,9 +44,9 @@ name: group-sync-core
 permissions: {}
 
 jobs:
-  sync:
+  plan:
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    timeout-minutes: 120
     permissions:
       contents: read
     steps:
@@ -128,7 +128,78 @@ jobs:
             --output plan.json \
             --summary plan.md
 
-      - name: Mirror selected repositories
+      - name: Upload plan artifact
+        # actions/upload-artifact v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: glab-groups-plan-${{ github.run_id }}
+          if-no-files-found: error
+          path: |
+            plan.json
+            plan.md
+
+      - name: Cleanup secrets
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .secrets
+
+  mirror:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        lane: [0, 1, 2, 3, 4]
+    steps:
+      - name: Checkout shared workflow repository
+        # actions/checkout v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: ${{ inputs.shared-repo }}
+          ref: ${{ inputs.shared-ref }}
+          path: shared
+          persist-credentials: false
+
+      - name: Download plan artifact
+        # actions/download-artifact v4
+        uses: actions/download-artifact@v4
+        with:
+          name: glab-groups-plan-${{ github.run_id }}
+          path: .
+
+      - name: Resolve BWS secret list
+        id: config_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' "secrets=GL_BASE_URL,GL_BRIDGE_FORK_USER_GLAB,GL_PAT_FORK_GLAB_SVC,GL_GROUP_TOP_GLAB_OWNER" >> "${GITHUB_OUTPUT}"
+
+      - name: Fetch target secrets from BWS
+        uses: >-
+          shared-common/gh-actions-shared/.github/actions/bws-fetch@v0.0.41
+        with:
+          access-token: ${{ secrets.BWS_ACCESS_TOKEN }}
+          project-id: ${{ secrets.BWS_PROJECT_ID }}
+          bws-version: ${{ inputs.bws-version }}
+          bws-sha256: ${{ inputs.bws-sha256 }}
+          secrets: ${{ steps.config_meta.outputs.secrets }}
+          output-dir: .secrets
+
+      - name: Mask fetched secrets
+        shell: bash
+        env:
+          SECRET_NAMES: ${{ steps.config_meta.outputs.secrets }}
+        run: |
+          set -euo pipefail
+          python3 shared/.github/scripts/mask_secret_files.py
+
+      - name: Mirror selected repositories for lane
         shell: bash
         run: |
           set -euo pipefail
@@ -136,17 +207,76 @@ jobs:
             mirror \
             --plan plan.json \
             --batch-size "${{ inputs.batch-size }}" \
-            --output results.json \
-            --jsonl results.jsonl
+            --batch-start "${{ matrix.lane }}" \
+            --batch-stride 5 \
+            --output "results-${{ matrix.lane }}.json" \
+            --jsonl "results-${{ matrix.lane }}.jsonl"
+
+      - name: Upload lane result artifacts
+        # actions/upload-artifact v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: glab-groups-results-${{ inputs.config-path }}-${{ matrix.lane }}-${{ github.run_id }}
+          if-no-files-found: error
+          path: |
+            results-${{ matrix.lane }}.json
+            results-${{ matrix.lane }}.jsonl
+
+      - name: Cleanup secrets
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .secrets
+
+  report:
+    needs: [plan, mirror]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout shared workflow repository
+        # actions/checkout v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: ${{ inputs.shared-repo }}
+          ref: ${{ inputs.shared-ref }}
+          path: shared
+          persist-credentials: false
+
+      - name: Download plan artifact
+        # actions/download-artifact v4
+        uses: actions/download-artifact@v4
+        with:
+          name: glab-groups-plan-${{ github.run_id }}
+          path: .
+
+      - name: Download lane result artifacts
+        # actions/download-artifact v4
+        uses: actions/download-artifact@v4
+        with:
+          pattern: glab-groups-results-${{ inputs.config-path }}-*-${{ github.run_id }}
+          path: results-artifacts
+          merge-multiple: true
 
       - name: Build report
         shell: bash
         run: |
           set -euo pipefail
+          results_args=()
+          shopt -s nullglob
+          for file in results-artifacts/results-*.json; do
+            results_args+=(--results "${file}")
+          done
+          if [ "${#results_args[@]}" -eq 0 ]; then
+            printf '%s\n' "no lane result JSON files found" >&2
+            exit 1
+          fi
           perl shared/.github/scripts/glab_groups.pl \
             report \
             --plan plan.json \
-            --results results.json \
+            "${results_args[@]}" \
             --output report.json \
             --summary report.md
 
@@ -154,13 +284,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          jsonl_args=()
+          shopt -s nullglob
+          for file in results-artifacts/results-*.jsonl; do
+            jsonl_args+=(--jsonl "${file}")
+          done
+          if [ "${#jsonl_args[@]}" -eq 0 ]; then
+            printf '%s\n' "no lane result JSONL files found" >&2
+            exit 1
+          fi
           parquet_args=()
           if [ "${{ inputs.emit-parquet }}" = "true" ]; then
             parquet_args+=(--parquet results.parquet)
           fi
           python3 shared/.github/scripts/post_run_analytics.py \
             --report report.json \
-            --jsonl results.jsonl \
+            "${jsonl_args[@]}" \
             --csv results.csv \
             --json analytics.json \
             "${parquet_args[@]}"
@@ -182,17 +321,9 @@ jobs:
           path: |
             plan.json
             plan.md
-            results.json
-            results.jsonl
+            results-artifacts/**
             report.json
             report.md
             results.csv
             analytics.json
             results.parquet
-
-      - name: Cleanup secrets
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf .secrets

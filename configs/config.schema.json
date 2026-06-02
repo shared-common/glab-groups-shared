@@ -20,5 +20,252 @@
       "type": "integer",
       "const": 1
     }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "glab-groups/defaults"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "defaults"
+        ],
+        "properties": {
+          "defaults": {
+            "$ref": "#/$defs/policy"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "glab-groups/namespaces"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "namespaces"
+        ],
+        "properties": {
+          "namespaces": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/$defs/namespace"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "glab-groups/project-overrides"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "projects"
+        ],
+        "properties": {
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/projectOverride"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "glab-groups/project-exclusions"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "projects"
+        ],
+        "properties": {
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/projectExclusion"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "httpsUrl": {
+      "type": "string",
+      "pattern": "^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[^?#]+)?$"
+    },
+    "namespacePath": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
+    },
+    "projectPath": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
+    },
+    "refSpec": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9A-Za-z._/-]+$"
+        },
+        {
+          "type": "object",
+          "required": [
+            "name"
+          ],
+          "properties": {
+            "name": {
+              "type": "string",
+              "pattern": "^[0-9A-Za-z._/-]+$"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "policy": {
+      "type": "object",
+      "properties": {
+        "allow_blob_rewrite": {
+          "type": "boolean"
+        },
+        "additional_branches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/refSpec"
+          }
+        },
+        "additional_tags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/refSpec"
+          }
+        },
+        "batch_size": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 25
+        },
+        "force_lfs": {
+          "type": "boolean"
+        },
+        "git_timeout_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_blob_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 104857600
+        },
+        "mirror_pristine_tar": {
+          "type": "boolean",
+          "default": true
+        },
+        "retry_attempts": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "retry_backoff_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "size_limit_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10737418240
+        },
+        "visibility": {
+          "type": "string",
+          "enum": [
+            "private",
+            "internal",
+            "public"
+          ]
+        }
+      }
+    },
+    "namespace": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/policy"
+        },
+        {
+          "type": "object",
+          "required": [
+            "name",
+            "source_group_url",
+            "target_namespace_path"
+          ],
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source_group_url": {
+              "$ref": "#/$defs/httpsUrl"
+            },
+            "target_namespace_path": {
+              "$ref": "#/$defs/namespacePath"
+            }
+          }
+        }
+      ]
+    },
+    "projectOverride": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/policy"
+        },
+        {
+          "type": "object",
+          "required": [
+            "target_project_path"
+          ],
+          "properties": {
+            "target_project_path": {
+              "$ref": "#/$defs/projectPath"
+            }
+          }
+        }
+      ]
+    },
+    "projectExclusion": {
+      "type": "object",
+      "required": [
+        "target_project_path",
+        "reason"
+      ],
+      "properties": {
+        "target_project_path": {
+          "$ref": "#/$defs/projectPath"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    }
   }
 }
