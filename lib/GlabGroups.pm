@@ -9,7 +9,6 @@ use File::Path qw(make_path);
 use File::Spec;
 use File::Temp qw(tempdir tempfile);
 use Getopt::Long qw(GetOptionsFromArray);
-use HTTP::Tiny;
 use JSON::PP;
 use POSIX qw(strftime);
 use Time::HiRes qw(sleep);
@@ -1226,34 +1225,82 @@ sub _gitlab_request {
     my ( $client, $method, $path, $payload, $opt ) = @_;
     $opt ||= {};
     my $url = $client->{base_url} . "/api/v4" . $path;
-    my $http = HTTP::Tiny->new(
-        default_headers => {
-            "Content-Type" => "application/json",
-            ( $client->{token} ? ( "PRIVATE-TOKEN" => $client->{token} ) : () ),
-        },
-        timeout => 60,
-    );
     my $attempts = $DEFAULTS{retry_attempts};
     my $backoff = $DEFAULTS{retry_backoff_seconds};
     my $content = defined $payload ? $JSON->encode($payload) : undef;
     for my $attempt ( 1 .. $attempts ) {
-        my $response = $http->request(
+        my @command = (
+            "curl",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--max-time",
+            "60",
+            "--request",
             $method,
+            "--header",
+            "Content-Type: application/json",
+            "--write-out",
+            "\n%{http_code}",
             $url,
-            defined $content ? { content => $content } : {},
         );
-        if ( $response->{success} ) {
-            return undef if !defined $response->{content} || $response->{content} eq q{};
-            return $JSON->decode( $response->{content} );
+        if ( $client->{token} ) {
+            push @command, "--header", "PRIVATE-TOKEN: $client->{token}";
         }
-        return undef if $opt->{allow_missing} && $response->{status} == 404;
-        if ( ( $response->{status} == 429 || $response->{status} >= 500 ) && $attempt < $attempts ) {
+        if ( defined $content ) {
+            push @command, "--data", $content;
+        }
+
+        my $response = _run_command(
+            \@command,
+            {
+                timeout => 90,
+            }
+        );
+
+        my ( $http_status, $body ) = _split_curl_response( $response->{output} );
+        if ( $response->{status} == 0 && $http_status >= 200 && $http_status < 300 ) {
+            return undef if !defined $body || $body eq q{};
+            return _decode_json_response( $body, $method, $path );
+        }
+        return undef if $opt->{allow_missing} && $http_status == 404;
+
+        if (
+            (
+                $response->{status} != 0
+                || $http_status == 429
+                || $http_status >= 500
+            )
+            && $attempt < $attempts
+          )
+        {
             sleep( $backoff * $attempt );
             next;
         }
-        die "gitlab request failed [$response->{status}] $method $path: " . ( $response->{content} || "unknown error" ) . "\n";
+
+        my $status_label = $http_status || $response->{status};
+        my $message = defined $body && length $body ? $body : ( $response->{output} || "unknown error" );
+        die "gitlab request failed [$status_label] $method $path: $message\n";
     }
     die "gitlab request exhausted retries for $method $path\n";
+}
+
+sub _split_curl_response {
+    my ($text) = @_;
+    defined $text or return ( 0, q{} );
+    if ( $text =~ /\n(\d{3})\s*\z/s ) {
+        my $status = 0 + $1;
+        my $body = substr( $text, 0, length($text) - length($1) - 1 );
+        $body =~ s/\s+\z//;
+        return ( $status, $body );
+    }
+    return ( 0, $text );
+}
+
+sub _decode_json_response {
+    my ( $text, $method, $path ) = @_;
+    return undef if !defined $text || $text eq q{};
+    return $JSON->decode($text);
 }
 
 sub _required_env_file {
