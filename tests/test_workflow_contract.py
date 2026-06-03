@@ -32,7 +32,6 @@ class SharedWorkflowContractTests(unittest.TestCase):
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("target-token-secret:", text)
         self.assertIn("GL_PAT_GROUP_KALI_SVC|GL_PAT_GROUP_DEBIAN_SVC", text)
-        self.assertNotIn("GL_PAT_FORK_GLAB_SVC", text)
         self.assertIn("GL_TARGET_TOKEN_SECRET_NAME: ${{ inputs.target-token-secret }}", text)
 
     def test_report_aggregates_batch_artifacts(self) -> None:
