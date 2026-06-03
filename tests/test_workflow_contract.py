@@ -7,6 +7,17 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "group-sync-core.yml"
 
 
 class SharedWorkflowContractTests(unittest.TestCase):
+    def test_artifact_actions_are_pinned_to_node24_releases(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn(
+            "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
+            text,
+        )
+        self.assertIn(
+            "actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131",
+            text,
+        )
+
     def test_uses_five_parallel_mirror_lanes(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("max-parallel: 5", text)

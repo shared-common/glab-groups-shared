@@ -997,12 +997,77 @@ sub _ensure_group_path {
                 visibility => $visibility,
             );
             $payload{parent_id} = $parent_id if defined $parent_id;
-            $group = _gitlab_request( $client, "POST", "/groups", \%payload );
+            my $create_ok = eval {
+                $group = _gitlab_request( $client, "POST", "/groups", \%payload );
+                1;
+            };
+            if ( !$create_ok ) {
+                my $create_error = $@ || "unknown group creation error\n";
+                if ( _is_gitlab_path_conflict_error($create_error) ) {
+                    $group = _get_group( $client, $current )
+                      || _find_group_by_parent_and_path( $client, $parent_id, $current, $part );
+                    die "gitlab group path conflict for $current: $create_error" unless $group;
+                }
+                die $create_error unless $group;
+            }
         }
         $parent_id = $group->{id};
         $cache->{$current} = $parent_id;
     }
     return $cache->{$group_path};
+}
+
+sub _find_group_by_parent_and_path {
+    my ( $client, $parent_id, $group_path, $path_segment ) = @_;
+    my $expected_path = lc($path_segment);
+    my $expected_full_path = lc($group_path);
+    my $page = 1;
+
+    while (1) {
+        my $path;
+        my $search = uri_escape_utf8($path_segment);
+        if ( defined $parent_id ) {
+            $path = sprintf(
+                "/groups/%d/subgroups?per_page=100&page=%d&search=%s",
+                $parent_id,
+                $page,
+                $search,
+            );
+        }
+        else {
+            $path = sprintf(
+                "/groups?top_level_only=true&per_page=100&page=%d&search=%s",
+                $page,
+                $search,
+            );
+        }
+
+        my $groups = _gitlab_request( $client, "GET", $path, undef );
+        ref($groups) eq "ARRAY" or die "group search response must be a list\n";
+        last unless @{$groups};
+
+        for my $group ( @{$groups} ) {
+            next unless ref($group) eq "HASH";
+            my $candidate_full_path = lc( $group->{full_path} || q{} );
+            return $group if $candidate_full_path eq $expected_full_path;
+        }
+        for my $group ( @{$groups} ) {
+            next unless ref($group) eq "HASH";
+            my $candidate_path = lc( $group->{path} || q{} );
+            return $group if $candidate_path eq $expected_path;
+        }
+
+        last if @{$groups} < 100;
+        $page++;
+    }
+
+    return undef;
+}
+
+sub _is_gitlab_path_conflict_error {
+    my ($error) = @_;
+    return 0 unless defined $error && !ref($error);
+    return $error =~ /path has already been taken/i ? 1 : 0;
 }
 
 sub _ensure_target_project {

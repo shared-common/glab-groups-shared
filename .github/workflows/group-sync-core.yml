@@ -129,8 +129,8 @@ jobs:
             --summary plan.md
 
       - name: Upload plan artifact
-        # actions/upload-artifact v4
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        # actions/upload-artifact v6.0.0
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: glab-groups-plan-${{ github.run_id }}
           if-no-files-found: error
@@ -167,8 +167,8 @@ jobs:
           persist-credentials: false
 
       - name: Download plan artifact
-        # actions/download-artifact v4
-        uses: actions/download-artifact@v4
+        # actions/download-artifact v7.0.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
           name: glab-groups-plan-${{ github.run_id }}
           path: .
@@ -213,8 +213,8 @@ jobs:
             --jsonl "results-${{ matrix.lane }}.jsonl"
 
       - name: Upload lane result artifacts
-        # actions/upload-artifact v4
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        # actions/upload-artifact v6.0.0
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: glab-groups-results-${{ inputs.config-path }}-${{ matrix.lane }}-${{ github.run_id }}
           if-no-files-found: error
@@ -246,15 +246,15 @@ jobs:
           persist-credentials: false
 
       - name: Download plan artifact
-        # actions/download-artifact v4
-        uses: actions/download-artifact@v4
+        # actions/download-artifact v7.0.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
           name: glab-groups-plan-${{ github.run_id }}
           path: .
 
       - name: Download lane result artifacts
-        # actions/download-artifact v4
-        uses: actions/download-artifact@v4
+        # actions/download-artifact v7.0.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
           pattern: glab-groups-results-${{ inputs.config-path }}-*-${{ github.run_id }}
           path: results-artifacts
@@ -313,8 +313,8 @@ jobs:
           cat report.md >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Upload run artifacts
-        # actions/upload-artifact v4
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        # actions/upload-artifact v6.0.0
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: glab-groups-${{ inputs.config-path }}-${{ github.run_id }}
           if-no-files-found: error

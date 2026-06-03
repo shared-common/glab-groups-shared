@@ -219,4 +219,66 @@ sub run_cmd {
     is( $report->{result_counts}->{skipped}, 1, "merged report counts skipped rows" );
 }
 
+{
+    no warnings 'redefine';
+    my %cache = ( owner => 7 );
+
+    local *GlabGroups::_get_group = sub {
+        my ( $client, $group_path ) = @_;
+        return undef if $group_path eq "owner/MixedCase-team";
+        die "unexpected group lookup: $group_path";
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        if ( $method eq "POST" && $path eq "/groups" ) {
+            die "gitlab request failed [400] POST /groups: {\"message\":\"Failed to save group {:base=>[\\\"path has already been taken\\\"]}\"}\n";
+        }
+        if ( $method eq "GET" && $path eq "/groups/7/subgroups?per_page=100&page=1&search=MixedCase-team" ) {
+            return [
+                {
+                    id => 42,
+                    full_path => "owner/MixedCase-team",
+                    path => "MixedCase-team",
+                },
+            ];
+        }
+        die "unexpected gitlab request: $method $path";
+    };
+
+    my $group_id = GlabGroups::_ensure_group_path( {}, "owner/MixedCase-team", \%cache, "private" );
+    is( $group_id, 42, "reuses existing group after path conflict" );
+    is( $cache{"owner/MixedCase-team"}, 42, "caches resolved group id after conflict lookup" );
+}
+
+{
+    no warnings 'redefine';
+    my %cache = ( owner => 7 );
+
+    local *GlabGroups::_get_group = sub {
+        my ( $client, $group_path ) = @_;
+        return undef if $group_path eq "owner/Missing-team";
+        die "unexpected group lookup: $group_path";
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        if ( $method eq "POST" && $path eq "/groups" ) {
+            die "gitlab request failed [400] POST /groups: {\"message\":\"Failed to save group {:base=>[\\\"path has already been taken\\\"]}\"}\n";
+        }
+        if ( $method eq "GET" && $path eq "/groups/7/subgroups?per_page=100&page=1&search=Missing-team" ) {
+            return [];
+        }
+        die "unexpected gitlab request: $method $path";
+    };
+
+    my $error = eval {
+        GlabGroups::_ensure_group_path( {}, "owner/Missing-team", \%cache, "private" );
+        1;
+    };
+    ok( !$error, "conflict without resolvable group still fails" );
+    like( $@, qr/gitlab group path conflict for owner\/Missing-team:/, "reports the unresolved group path in the conflict error" );
+    like( $@, qr/path has already been taken/i, "preserves the original GitLab path conflict detail" );
+}
+
 done_testing();
