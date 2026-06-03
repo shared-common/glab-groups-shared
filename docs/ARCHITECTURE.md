@@ -14,14 +14,14 @@ the configured relative namespace path.
 ## Execution order
 
 1. `plan`
-2. `mirror` in five parallel lanes
+2. `mirror` in batch jobs capped at five concurrent jobs
 3. `report`
 4. `post_run_analytics.py`
 
 The shared workflow creates one deterministic plan, uploads it as a run
-artifact, and then starts a five-lane matrix. Each lane processes batches of 25
-repositories with a stride of five, so lane 0 handles batches 0, 5, 10, lane 1
-handles batches 1, 6, 11, and so on. The final report job downloads all lane
+artifact, and then builds a dynamic matrix with one mirror job per batch. Each
+job processes exactly one batch of 25 repositories, and the workflow caps the
+matrix at five concurrent jobs. The final report job downloads all batch
 artifacts and aggregates them into one report, CSV, JSON analytics file, and
 optional Parquet file.
 
@@ -44,6 +44,7 @@ The plan includes:
 The mirror stage:
 
 - creates or updates target projects before push
+- never sets target group or project visibility
 - fetches only the selected branches and tags
 - always includes the source default branch
 - auto-detects `pristine-tar`
@@ -57,4 +58,4 @@ The mirror stage:
 ## Failure model
 
 Per-repository failures are captured as skipped result rows and do not abort the
-lane. Fatal configuration or credential failures still stop the workflow.
+batch job. Fatal configuration or credential failures still stop the workflow.

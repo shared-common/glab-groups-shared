@@ -18,16 +18,26 @@ class SharedWorkflowContractTests(unittest.TestCase):
             text,
         )
 
-    def test_uses_five_parallel_mirror_lanes(self) -> None:
+    def test_uses_one_mirror_job_per_batch_with_five_way_parallelism(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("max-parallel: 5", text)
-        self.assertIn("lane: [0, 1, 2, 3, 4]", text)
-        self.assertIn("--batch-stride 5", text)
+        self.assertIn("matrix: ${{ fromJSON(needs.plan.outputs.batch-matrix) }}", text)
+        self.assertIn("batch-matrix: ${{ steps.batch_matrix.outputs.matrix }}", text)
+        self.assertIn("--batch-start \"${{ matrix.batch_index }}\"", text)
+        self.assertIn("--batch-stride 1", text)
+        self.assertIn("--batch-limit 1", text)
         self.assertIn("needs: [plan, mirror]", text)
 
-    def test_report_aggregates_lane_artifacts(self) -> None:
+    def test_uses_config_specific_target_pat_secret(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("pattern: glab-groups-results-${{ inputs.config-path }}-*-${{ github.run_id }}", text)
+        self.assertIn("target-token-secret:", text)
+        self.assertIn("GL_PAT_GROUP_KALI_SVC|GL_PAT_GROUP_DEBIAN_SVC", text)
+        self.assertNotIn("GL_PAT_FORK_GLAB_SVC", text)
+        self.assertIn("GL_TARGET_TOKEN_SECRET_NAME: ${{ inputs.target-token-secret }}", text)
+
+    def test_report_aggregates_batch_artifacts(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("pattern: glab-results-*-${{ github.run_id }}", text)
         self.assertIn("merge-multiple: true", text)
         self.assertIn("results-artifacts/results-*.json", text)
         self.assertIn("results-artifacts/results-*.jsonl", text)

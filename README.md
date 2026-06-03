@@ -21,9 +21,9 @@ Wrapper repositories call `.github/workflows/group-sync-core.yml` and pass:
 The shared workflow uploads plan, result, report, CSV, JSON, and optional
 Parquet artifacts on every run.
 
-Mirroring runs in five parallel lanes. The deterministic plan is split into
-batches of 25 repositories, and each lane processes every fifth batch so a
-single slow or skipped repository does not block the entire run.
+Mirroring runs as one job per deterministic batch with `max-parallel: 5`. A
+200-repository plan at the default batch size creates eight mirror jobs, while
+GitHub Actions runs at most five of those jobs at the same time.
 
 ## Target namespace contract
 
@@ -37,7 +37,12 @@ real destination as:
 and authenticates with:
 
 - `GL_BRIDGE_FORK_USER_GLAB`
-- `GL_PAT_FORK_GLAB_SVC`
+- `GL_PAT_GROUP_KALI_SVC` for `glab-groups-kali`
+- `GL_PAT_GROUP_DEBIAN_SVC` for `glab-groups-debian`
+
+Target group and project visibility is not created, updated, or finalized by
+this workflow. Configure visibility directly on the target GitLab owner/group
+outside the mirror run to avoid denied metadata writes and rate-limit pressure.
 
 ## Ref selection
 

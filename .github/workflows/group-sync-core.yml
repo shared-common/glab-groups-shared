@@ -19,6 +19,9 @@ name: group-sync-core
       config-path:
         required: true
         type: string
+      target-token-secret:
+        required: true
+        type: string
       batch-size:
         required: false
         type: number
@@ -49,11 +52,14 @@ jobs:
     timeout-minutes: 120
     permissions:
       contents: read
+    outputs:
+      batch-matrix: ${{ steps.batch_matrix.outputs.matrix }}
     steps:
       - name: Validate workflow inputs
         shell: bash
         env:
           CONFIG_PATH: ${{ inputs.config-path }}
+          TARGET_TOKEN_SECRET: ${{ inputs.target-token-secret }}
           SHARED_REF: ${{ inputs.shared-ref }}
           SHARED_REPO: ${{ inputs.shared-repo }}
           CONFIG_REPO: ${{ inputs.config-repo }}
@@ -66,7 +72,37 @@ jobs:
               exit 1
               ;;
           esac
-          for value in "${SHARED_REPO}" "${SHARED_REF}" "${CONFIG_REPO}" "${CONFIG_REF}"; do
+          case "${TARGET_TOKEN_SECRET}" in
+            GL_PAT_GROUP_KALI_SVC|GL_PAT_GROUP_DEBIAN_SVC)
+              ;;
+            *)
+              printf 'invalid target-token-secret: %s\n' \
+                "${TARGET_TOKEN_SECRET}" >&2
+              exit 1
+              ;;
+          esac
+          case "${CONFIG_PATH}" in
+            glab-groups-kali)
+              expected_token_secret="GL_PAT_GROUP_KALI_SVC"
+              ;;
+            glab-groups-debian)
+              expected_token_secret="GL_PAT_GROUP_DEBIAN_SVC"
+              ;;
+            *)
+              printf 'unsupported config-path: %s\n' "${CONFIG_PATH}" >&2
+              exit 1
+              ;;
+          esac
+          if [ "${TARGET_TOKEN_SECRET}" != "${expected_token_secret}" ]; then
+            printf '%s\n' "target-token-secret does not match config-path" >&2
+            exit 1
+          fi
+          for value in \
+            "${SHARED_REPO}" \
+            "${SHARED_REF}" \
+            "${CONFIG_REPO}" \
+            "${CONFIG_REF}"
+          do
             if [ -z "${value}" ]; then
               printf '%s\n' "shared/config repo inputs must be set" >&2
               exit 1
@@ -94,9 +130,14 @@ jobs:
       - name: Resolve BWS secret list
         id: config_meta
         shell: bash
+        env:
+          TARGET_TOKEN_SECRET: ${{ inputs.target-token-secret }}
         run: |
           set -euo pipefail
-          printf '%s\n' "secrets=GL_BASE_URL,GL_BRIDGE_FORK_USER_GLAB,GL_PAT_FORK_GLAB_SVC,GL_GROUP_TOP_GLAB_OWNER" >> "${GITHUB_OUTPUT}"
+          secret_list="GL_BASE_URL,GL_BRIDGE_FORK_USER_GLAB"
+          secret_list="${secret_list},${TARGET_TOKEN_SECRET}"
+          secret_list="${secret_list},GL_GROUP_TOP_GLAB_OWNER"
+          printf 'secrets=%s\n' "${secret_list}" >> "${GITHUB_OUTPUT}"
 
       - name: Fetch target secrets from BWS
         uses: >-
@@ -119,6 +160,8 @@ jobs:
 
       - name: Build deterministic plan
         shell: bash
+        env:
+          GL_TARGET_TOKEN_SECRET_NAME: ${{ inputs.target-token-secret }}
         run: |
           set -euo pipefail
           perl shared/.github/scripts/glab_groups.pl \
@@ -127,6 +170,31 @@ jobs:
             --batch-size "${{ inputs.batch-size }}" \
             --output plan.json \
             --summary plan.md
+
+      - name: Build mirror batch matrix
+        id: batch_matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "${GITHUB_OUTPUT}"
+          import json
+          from pathlib import Path
+
+          plan = json.loads(Path("plan.json").read_text(encoding="utf-8"))
+          total_batches = int(plan.get("total_batches", 0))
+          batch_size = int(plan.get("batch_size", 0))
+          if batch_size < 1:
+              raise SystemExit("plan batch_size must be greater than zero")
+          if total_batches < 0:
+              raise SystemExit("plan total_batches must not be negative")
+          if total_batches > 256:
+              raise SystemExit("plan creates more than 256 mirror jobs")
+          include = [{"batch_index": index} for index in range(total_batches)]
+          if not include:
+              include = [{"batch_index": 0}]
+          matrix = json.dumps({"include": include}, separators=(",", ":"))
+          print(f"matrix={matrix}")
+          PY
 
       - name: Upload plan artifact
         # actions/upload-artifact v6.0.0
@@ -154,8 +222,7 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 5
-      matrix:
-        lane: [0, 1, 2, 3, 4]
+      matrix: ${{ fromJSON(needs.plan.outputs.batch-matrix) }}
     steps:
       - name: Checkout shared workflow repository
         # actions/checkout v6.0.2
@@ -176,9 +243,14 @@ jobs:
       - name: Resolve BWS secret list
         id: config_meta
         shell: bash
+        env:
+          TARGET_TOKEN_SECRET: ${{ inputs.target-token-secret }}
         run: |
           set -euo pipefail
-          printf '%s\n' "secrets=GL_BASE_URL,GL_BRIDGE_FORK_USER_GLAB,GL_PAT_FORK_GLAB_SVC,GL_GROUP_TOP_GLAB_OWNER" >> "${GITHUB_OUTPUT}"
+          secret_list="GL_BASE_URL,GL_BRIDGE_FORK_USER_GLAB"
+          secret_list="${secret_list},${TARGET_TOKEN_SECRET}"
+          secret_list="${secret_list},GL_GROUP_TOP_GLAB_OWNER"
+          printf 'secrets=%s\n' "${secret_list}" >> "${GITHUB_OUTPUT}"
 
       - name: Fetch target secrets from BWS
         uses: >-
@@ -199,28 +271,31 @@ jobs:
           set -euo pipefail
           python3 shared/.github/scripts/mask_secret_files.py
 
-      - name: Mirror selected repositories for lane
+      - name: Mirror selected repositories for batch
         shell: bash
+        env:
+          GL_TARGET_TOKEN_SECRET_NAME: ${{ inputs.target-token-secret }}
         run: |
           set -euo pipefail
           perl shared/.github/scripts/glab_groups.pl \
             mirror \
             --plan plan.json \
             --batch-size "${{ inputs.batch-size }}" \
-            --batch-start "${{ matrix.lane }}" \
-            --batch-stride 5 \
-            --output "results-${{ matrix.lane }}.json" \
-            --jsonl "results-${{ matrix.lane }}.jsonl"
+            --batch-start "${{ matrix.batch_index }}" \
+            --batch-stride 1 \
+            --batch-limit 1 \
+            --output "results-${{ matrix.batch_index }}.json" \
+            --jsonl "results-${{ matrix.batch_index }}.jsonl"
 
-      - name: Upload lane result artifacts
+      - name: Upload batch result artifacts
         # actions/upload-artifact v6.0.0
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
-          name: glab-groups-results-${{ inputs.config-path }}-${{ matrix.lane }}-${{ github.run_id }}
+          name: glab-results-${{ matrix.batch_index }}-${{ github.run_id }}
           if-no-files-found: error
           path: |
-            results-${{ matrix.lane }}.json
-            results-${{ matrix.lane }}.jsonl
+            results-${{ matrix.batch_index }}.json
+            results-${{ matrix.batch_index }}.jsonl
 
       - name: Cleanup secrets
         if: always()
@@ -252,11 +327,11 @@ jobs:
           name: glab-groups-plan-${{ github.run_id }}
           path: .
 
-      - name: Download lane result artifacts
+      - name: Download batch result artifacts
         # actions/download-artifact v7.0.0
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
-          pattern: glab-groups-results-${{ inputs.config-path }}-*-${{ github.run_id }}
+          pattern: glab-results-*-${{ github.run_id }}
           path: results-artifacts
           merge-multiple: true
 
@@ -270,7 +345,7 @@ jobs:
             results_args+=(--results "${file}")
           done
           if [ "${#results_args[@]}" -eq 0 ]; then
-            printf '%s\n' "no lane result JSON files found" >&2
+            printf '%s\n' "no batch result JSON files found" >&2
             exit 1
           fi
           perl shared/.github/scripts/glab_groups.pl \
@@ -290,7 +365,7 @@ jobs:
             jsonl_args+=(--jsonl "${file}")
           done
           if [ "${#jsonl_args[@]}" -eq 0 ]; then
-            printf '%s\n' "no lane result JSONL files found" >&2
+            printf '%s\n' "no batch result JSONL files found" >&2
             exit 1
           fi
           parquet_args=()

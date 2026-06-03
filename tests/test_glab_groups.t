@@ -105,12 +105,11 @@ sub run_cmd {
             lfs_enabled => JSON::PP::false,
         },
         {
-            visibility => "public",
             force_lfs => JSON::PP::true,
         },
         undef,
     );
-    is( $action, "update_project", "detects metadata drift" );
+    is( $action, "update_project", "detects non-visibility metadata drift" );
 }
 
 {
@@ -119,20 +118,51 @@ sub run_cmd {
             additional_branches => [],
             additional_tags => [],
             force_lfs => JSON::PP::false,
-            visibility => "public",
         },
         {
             additional_branches => [],
             additional_tags => [],
-            visibility => undef,
         },
         {
             additional_branches => [],
             additional_tags => [],
-            visibility => undef,
         },
     );
-    is( $policy->{visibility}, "public", "merge keeps default visibility when overlays omit it" );
+    ok( !exists $policy->{visibility}, "merge policy does not carry target visibility" );
+}
+
+{
+    my $dir = tempdir( CLEANUP => 1 );
+    write_json_file(
+        File::Spec->catfile( $dir, "defaults.json" ),
+        {
+            kind => "glab-groups/defaults",
+            version => 1,
+            defaults => {
+                visibility => "private",
+            },
+        }
+    );
+    write_json_file(
+        File::Spec->catfile( $dir, "namespaces.json" ),
+        {
+            kind => "glab-groups/namespaces",
+            version => 1,
+            namespaces => [
+                {
+                    name => "kali",
+                    source_group_url => "https://gitlab.com/kalilinux",
+                    target_namespace_path => "kalilinux",
+                },
+            ],
+        }
+    );
+    my $loaded = eval {
+        load_config_dir($dir);
+        1;
+    };
+    ok( !$loaded, "rejects removed visibility config" );
+    like( $@, qr/visibility is no longer supported/, "reports removed visibility contract" );
 }
 
 {
@@ -211,10 +241,10 @@ sub run_cmd {
             "--summary", $summary_path,
         ),
         0,
-        "report merges multiple lane result files",
+        "report merges multiple batch result files",
     );
     my $report = JSON::PP->new->decode( do { open( my $fh, "<:encoding(UTF-8)", $report_path ) or die $!; local $/; <$fh> } );
-    is( scalar @{ $report->{results} }, 2, "merged report preserves all lane rows" );
+    is( scalar @{ $report->{results} }, 2, "merged report preserves all batch rows" );
     is( $report->{result_counts}->{mirrored}, 1, "merged report counts mirrored rows" );
     is( $report->{result_counts}->{skipped}, 1, "merged report counts skipped rows" );
 }
@@ -246,7 +276,7 @@ sub run_cmd {
         die "unexpected gitlab request: $method $path";
     };
 
-    my $group_id = GlabGroups::_ensure_group_path( {}, "owner/MixedCase-team", \%cache, "private" );
+    my $group_id = GlabGroups::_ensure_group_path( {}, "owner/MixedCase-team", \%cache );
     is( $group_id, 42, "reuses existing group after path conflict" );
     is( $cache{"owner/MixedCase-team"}, 42, "caches resolved group id after conflict lookup" );
 }
@@ -273,12 +303,77 @@ sub run_cmd {
     };
 
     my $error = eval {
-        GlabGroups::_ensure_group_path( {}, "owner/Missing-team", \%cache, "private" );
+        GlabGroups::_ensure_group_path( {}, "owner/Missing-team", \%cache );
         1;
     };
     ok( !$error, "conflict without resolvable group still fails" );
     like( $@, qr/gitlab group path conflict for owner\/Missing-team:/, "reports the unresolved group path in the conflict error" );
     like( $@, qr/path has already been taken/i, "preserves the original GitLab path conflict detail" );
+}
+
+{
+    no warnings 'redefine';
+    my %cache;
+    my @payloads;
+
+    local *GlabGroups::_get_group = sub {
+        my ( $client, $group_path ) = @_;
+        return undef if $group_path eq "owner";
+        die "unexpected group lookup: $group_path";
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        if ( $method eq "POST" && $path eq "/groups" ) {
+            push @payloads, $payload;
+            return { id => 7 };
+        }
+        die "unexpected gitlab request: $method $path";
+    };
+
+    my $group_id = GlabGroups::_ensure_group_path( {}, "owner", \%cache );
+    is( $group_id, 7, "creates missing group" );
+    ok( !exists $payloads[0]->{visibility}, "group creation payload does not set visibility" );
+}
+
+{
+    no warnings 'redefine';
+    my @requests;
+
+    local *GlabGroups::_get_project = sub {
+        my ( $client, $project_path ) = @_;
+        return undef;
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        push @requests, { method => $method, path => $path, payload => $payload };
+        return { id => 99, archived => JSON::PP::false };
+    };
+
+    my $result = GlabGroups::_ensure_target_project(
+        {},
+        {
+            policy => { force_lfs => JSON::PP::false },
+            source_archived => JSON::PP::false,
+            source_description => "source",
+            source_lfs_enabled => JSON::PP::false,
+            target_full_path => "owner/group/project",
+            target_namespace_id => 42,
+        }
+    );
+    ok( $result->{created}, "creates missing target project" );
+    ok( !exists $requests[0]->{payload}->{visibility}, "project creation payload does not set visibility" );
+
+    GlabGroups::_finalize_target_project(
+        {},
+        99,
+        "main",
+        {
+            source_description => "source",
+        }
+    );
+    ok( !exists $requests[1]->{payload}->{visibility}, "project finalize payload does not set visibility" );
 }
 
 done_testing();

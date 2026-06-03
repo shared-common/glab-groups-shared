@@ -34,7 +34,6 @@ my %DEFAULTS = (
     retry_attempts => 3,
     retry_backoff_seconds => 2,
     size_limit_bytes => 10 * 1024 * 1024 * 1024,
-    visibility => "public",
 );
 
 sub run_cli {
@@ -194,13 +193,11 @@ sub classify_plan_action {
     return "fail" if !$source_project || ref($source_project) ne "HASH";
     return "create_project" if !$target_project;
 
-    my $source_visibility = _coalesce_visibility( $policy->{visibility}, $source_project->{visibility} );
     my $source_description = _normalize_description( $source_project->{description} );
     my $target_description = _normalize_description( $target_project->{description} );
 
     return "update_project"
-      if ( ( $target_project->{visibility} || "" ) ne $source_visibility )
-      || ( $target_description ne $source_description )
+      if ( $target_description ne $source_description )
       || ( !!$target_project->{archived} != !!$source_project->{archived} )
       || ( !!$target_project->{lfs_enabled} != !!( $policy->{force_lfs} || $source_project->{lfs_enabled} ) );
 
@@ -579,7 +576,7 @@ sub _build_plan {
             my $target_namespace_path = dirname($target_full_path);
             my $override = $config->{overrides}->{$target_relative_project_path} || {};
             my $policy = _merge_policy( $config->{defaults}, $namespace, $override );
-            my $target_namespace_id = _ensure_group_path( $target_client, $target_namespace_path, \%group_cache, $policy->{visibility} );
+            my $target_namespace_id = _ensure_group_path( $target_client, $target_namespace_path, \%group_cache );
             my $target_project = $target_projects_by_path->{$target_full_path};
             my $skip_reason = $config->{exclusions}->{$target_relative_project_path};
             my $action = classify_plan_action(
@@ -852,6 +849,7 @@ sub _render_report_summary {
 sub _normalize_defaults_payload {
     my ( $payload, $label ) = @_;
     ref($payload) eq "HASH" or die "$label.defaults must be an object\n";
+    _reject_visibility_key( $payload, "$label.defaults" );
     return {
         additional_branches => _normalize_ref_specs( $payload->{additional_branches}, "$label.defaults.additional_branches" ),
         additional_tags => _normalize_ref_specs( $payload->{additional_tags}, "$label.defaults.additional_tags" ),
@@ -864,13 +862,13 @@ sub _normalize_defaults_payload {
         retry_attempts => _defaulted_positive_int( $payload->{retry_attempts}, $DEFAULTS{retry_attempts}, "$label.defaults.retry_attempts" ),
         retry_backoff_seconds => _defaulted_positive_int( $payload->{retry_backoff_seconds}, $DEFAULTS{retry_backoff_seconds}, "$label.defaults.retry_backoff_seconds" ),
         size_limit_bytes => _defaulted_bounded_positive_int( $payload->{size_limit_bytes}, $DEFAULTS{size_limit_bytes}, $DEFAULTS{size_limit_bytes}, "$label.defaults.size_limit_bytes" ),
-        visibility => _coalesce_visibility( $payload->{visibility}, $DEFAULTS{visibility} ),
     };
 }
 
 sub _normalize_namespace {
     my ( $payload, $label ) = @_;
     ref($payload) eq "HASH" or die "$label must be an object\n";
+    _reject_visibility_key( $payload, $label );
     return {
         additional_branches => _normalize_ref_specs( $payload->{additional_branches}, "$label.additional_branches" ),
         additional_tags => _normalize_ref_specs( $payload->{additional_tags}, "$label.additional_tags" ),
@@ -885,15 +883,13 @@ sub _normalize_namespace {
         max_blob_bytes => _optional_bounded_positive_int( $payload->{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, "$label.max_blob_bytes" ),
         source_group_url => _required_https_url( $payload->{source_group_url}, "$label.source_group_url" ),
         target_namespace_path => _required_relative_namespace_path( $payload->{target_namespace_path}, "$label.target_namespace_path" ),
-        visibility => defined $payload->{visibility}
-          ? _coalesce_visibility( $payload->{visibility}, $DEFAULTS{visibility} )
-          : undef,
     };
 }
 
 sub _normalize_override {
     my ( $payload, $label ) = @_;
     ref($payload) eq "HASH" or die "$label must be an object\n";
+    _reject_visibility_key( $payload, $label );
     return {
         additional_branches => _normalize_ref_specs( $payload->{additional_branches}, "$label.additional_branches" ),
         additional_tags => _normalize_ref_specs( $payload->{additional_tags}, "$label.additional_tags" ),
@@ -906,7 +902,6 @@ sub _normalize_override {
         size_limit_bytes => _optional_bounded_positive_int( $payload->{size_limit_bytes}, $DEFAULTS{size_limit_bytes}, "$label.size_limit_bytes" ),
         max_blob_bytes => _optional_bounded_positive_int( $payload->{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, "$label.max_blob_bytes" ),
         target_project_path => _required_relative_project_path( $payload->{target_project_path}, "$label.target_project_path" ),
-        visibility => $payload->{visibility} ? _coalesce_visibility( $payload->{visibility}, $DEFAULTS{visibility} ) : undef,
     };
 }
 
@@ -924,7 +919,6 @@ sub _merge_policy {
           retry_attempts
           retry_backoff_seconds
           size_limit_bytes
-          visibility
         )) {
             next unless exists $overlay->{$key};
             next unless defined $overlay->{$key};
@@ -946,15 +940,15 @@ sub _merge_policy {
     $policy->{retry_backoff_seconds} ||= $DEFAULTS{retry_backoff_seconds};
     $policy->{size_limit_bytes} ||= $DEFAULTS{size_limit_bytes};
     $policy->{max_blob_bytes} ||= $DEFAULTS{max_blob_bytes};
-    $policy->{visibility} = $DEFAULTS{visibility} unless defined $policy->{visibility};
     return $policy;
 }
 
 sub _load_target_client {
+    my $token_secret_name = _required_secret_name( $ENV{GL_TARGET_TOKEN_SECRET_NAME}, "GL_TARGET_TOKEN_SECRET_NAME" );
     return _make_gitlab_client(
         _required_https_url( _required_env_file("GL_BASE_URL"), "GL_BASE_URL" ),
         _required_env_file("GL_BRIDGE_FORK_USER_GLAB"),
-        _required_env_file("GL_PAT_FORK_GLAB_SVC"),
+        _required_env_file($token_secret_name),
     );
 }
 
@@ -978,7 +972,7 @@ sub _make_gitlab_client {
 }
 
 sub _ensure_group_path {
-    my ( $client, $group_path, $cache, $visibility ) = @_;
+    my ( $client, $group_path, $cache ) = @_;
     return $cache->{$group_path} if exists $cache->{$group_path};
     my @parts = split m{/}, $group_path;
     my $current = "";
@@ -994,7 +988,6 @@ sub _ensure_group_path {
             my %payload = (
                 name => $part,
                 path => $part,
-                visibility => $visibility,
             );
             $payload{parent_id} = $parent_id if defined $parent_id;
             my $create_ok = eval {
@@ -1077,7 +1070,6 @@ sub _ensure_target_project {
     my %payload = (
         description => $entry->{source_description},
         lfs_enabled => $entry->{policy}->{force_lfs} || $entry->{source_lfs_enabled} ? JSON::PP::true : JSON::PP::false,
-        visibility => $entry->{policy}->{visibility},
     );
 
     my $project;
@@ -1100,8 +1092,7 @@ sub _ensure_target_project {
     else {
         $project = $existing;
         my $needs_update =
-             ( $project->{visibility} || "" ) ne $payload{visibility}
-          || _normalize_description( $project->{description} ) ne $payload{description}
+             _normalize_description( $project->{description} ) ne $payload{description}
           || !!$project->{lfs_enabled} != !!$payload{lfs_enabled};
         if ($needs_update) {
             $project = _gitlab_request( $client, "PUT", "/projects/" . $project->{id}, \%payload );
@@ -1133,7 +1124,6 @@ sub _finalize_target_project {
             {
                 default_branch => $default_branch,
                 description => $entry->{source_description},
-                visibility => $entry->{policy}->{visibility},
             }
         );
     }
@@ -1514,6 +1504,20 @@ sub _required_https_url {
     return $value;
 }
 
+sub _required_secret_name {
+    my ( $value, $label ) = @_;
+    $value = _required_string( $value, $label );
+    $value =~ /\AGL_PAT_GROUP_[A-Z0-9_]+_SVC\z/
+      or die "$label must name a GL_PAT_GROUP_*_SVC secret\n";
+    return $value;
+}
+
+sub _reject_visibility_key {
+    my ( $payload, $label ) = @_;
+    return unless exists $payload->{visibility};
+    die "$label.visibility is no longer supported; manage target visibility outside this workflow\n";
+}
+
 sub _positive_int {
     my ( $value, $label ) = @_;
     defined $value or die "$label is required\n";
@@ -1558,13 +1562,6 @@ sub _optional_bool {
     my ($value) = @_;
     return undef if !defined $value;
     return $value ? JSON::PP::true : JSON::PP::false;
-}
-
-sub _coalesce_visibility {
-    my ( $value, $default ) = @_;
-    my $resolved = defined $value && length $value ? $value : $default;
-    $resolved =~ /\A(?:private|internal|public)\z/ or die "invalid visibility: $resolved\n";
-    return $resolved;
 }
 
 sub _normalize_ref_specs {
