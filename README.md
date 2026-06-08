@@ -40,6 +40,7 @@ and authenticates with:
 - `GL_BRIDGE_FORK_USER_GLAB`
 - `GL_PAT_GROUP_KALI_SVC` for `glab-groups-kali`
 - `GL_PAT_GROUP_DEBIAN_SVC` for `glab-groups-debian`
+- `GL_PAT_GROUP_FREEDESKTOP_SVC` for `glab-groups-freedesktop`
 
 Target group and project visibility is not created, updated, or finalized by
 this workflow. Configure visibility directly on the target GitLab owner/group
