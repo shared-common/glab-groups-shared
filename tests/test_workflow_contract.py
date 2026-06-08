@@ -43,6 +43,7 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("GL_PAT_GROUP_PROJ_SVC", text)
         self.assertIn("GL_TARGET_TOKEN_SECRET_NAME: ${{ inputs.target-token-secret }}", text)
         self.assertIn("GH_ORG_SHARED_APP_ID", text)
+        self.assertIn("GH_ORG_SHARED_APP_INSTALL_ID", text)
         self.assertIn("GH_ORG_SHARED_APP_PEM", text)
         self.assertIn("needs-github-source-auth", text)
         self.assertNotIn("GL_GROUP_TOP_GLAB_OWNER", text)

@@ -643,12 +643,8 @@ sub _discover_project_inventory {
     my ( $project, $policy, $source_auth ) = @_;
     my $source = _parse_source_project_url( $project->{source_project_url}, $project->{name} );
     my $project_source_auth = _resolve_source_auth_for_project_source( $source_auth, $source, $policy );
-    my $source_url = _maybe_auth_url(
-        $source->{clone_url},
-        $project_source_auth->{username},
-        $project_source_auth->{token},
-    );
-    my $available = _discover_remote_refs( $source_url, $policy );
+    my $chosen_clone_url = $source->{clone_url};
+    my $available = _discover_project_remote_refs( $source, $project_source_auth, $policy, \$chosen_clone_url );
     my $has_refs =
          scalar( keys %{ $available->{branches} || {} } )
       || scalar( keys %{ $available->{tags} || {} } );
@@ -665,11 +661,11 @@ sub _discover_project_inventory {
                     description => "",
                     description_known => JSON::PP::false,
                     empty_repo => $has_refs ? JSON::PP::false : JSON::PP::true,
-                    http_url_to_repo => $source->{clone_url},
+                    http_url_to_repo => $chosen_clone_url,
                     lfs_enabled => JSON::PP::false,
                     lfs_enabled_known => JSON::PP::false,
                     path_with_namespace => $source->{path_with_namespace},
-                    ssh_url_to_repo => $source->{clone_url},
+                    ssh_url_to_repo => $chosen_clone_url,
                     visibility => "public",
                 },
             ],
@@ -1235,6 +1231,7 @@ sub _load_source_auth {
     my $username = _optional_env_file("GL_GROUPS_SOURCE_USERNAME");
     my $token = _optional_env_file("GL_GROUPS_SOURCE_TOKEN");
     my $github_app_id = _optional_env_file("GH_ORG_SHARED_APP_ID");
+    my $github_app_install_id = _optional_env_file("GH_ORG_SHARED_APP_INSTALL_ID");
     my $github_app_pem = _optional_env_file("GH_ORG_SHARED_APP_PEM");
     if ( defined $github_app_id xor defined $github_app_pem ) {
         die "GH_ORG_SHARED_APP_ID_FILE and GH_ORG_SHARED_APP_PEM_FILE must be set together\n";
@@ -1243,6 +1240,9 @@ sub _load_source_auth {
     if ( defined $github_app_id && defined $github_app_pem ) {
         $github_app = {
             app_id => _required_numeric_string( $github_app_id, "GH_ORG_SHARED_APP_ID" ),
+            install_id => defined $github_app_install_id
+              ? _required_numeric_string( $github_app_install_id, "GH_ORG_SHARED_APP_INSTALL_ID" )
+              : undef,
             pem => _normalize_private_key_secret( $github_app_pem, "GH_ORG_SHARED_APP_PEM" ),
         };
     }
@@ -1302,22 +1302,26 @@ sub _parse_source_project_url {
     if ( $host eq "github.com" ) {
         @segments == 2
           or die "GitHub project URL must point to exactly one repository path: $url\n";
+        my $repo_name = _strip_optional_git_suffix( $segments[1] );
         return {
             base_url => $base_url,
-            clone_url => $url,
+            clone_url => $base_url . "/" . $segments[0] . "/" . $repo_name . ".git",
             group_path => $segments[0],
+            fallback_clone_url => undef,
             kind => "github_project",
-            path_with_namespace => join( "/", @segments ),
+            path_with_namespace => join( "/", $segments[0], $repo_name ),
         };
     }
 
-    if ( @segments >= 2 && $segments[-1] eq $project_name ) {
+    if ( @segments >= 2 && _strip_optional_git_suffix( $segments[-1] ) eq $project_name ) {
+        my $normalized_name = _strip_optional_git_suffix( $segments[-1] );
         return {
             base_url => $base_url,
             clone_url => $url,
+            fallback_clone_url => $url =~ /\.git\z/ ? undef : $url . ".git",
             group_path => join( "/", @segments[ 0 .. $#segments - 1 ] ),
             kind => "git_project",
-            path_with_namespace => join( "/", @segments ),
+            path_with_namespace => join( "/", @segments[ 0 .. $#segments - 1 ], $normalized_name ),
         };
     }
 
@@ -1325,10 +1329,49 @@ sub _parse_source_project_url {
     return {
         base_url => $base_url,
         clone_url => $url,
+        fallback_clone_url => $url =~ /\.git\z/ ? undef : $url . ".git",
         group_path => $root_key,
         kind => "git_project",
         path_with_namespace => _join_path( $root_key, $project_name ),
     };
+}
+
+sub _discover_project_remote_refs {
+    my ( $source, $project_source_auth, $policy, $chosen_clone_url_ref ) = @_;
+    my $source_url = _maybe_auth_url(
+        $source->{clone_url},
+        $project_source_auth->{username},
+        $project_source_auth->{token},
+    );
+    my $available = eval { _discover_remote_refs( $source_url, $policy ) };
+    my $discover_error = $@;
+    my $fallback_clone_url = $source->{fallback_clone_url};
+    if (
+        defined $fallback_clone_url
+        && length $fallback_clone_url
+        && (
+            !$available
+            || !scalar( keys %{ $available->{branches} || {} } ) && !( $available->{default_branch} || q{} )
+        )
+      )
+    {
+        my $fallback_source_url = _maybe_auth_url(
+            $fallback_clone_url,
+            $project_source_auth->{username},
+            $project_source_auth->{token},
+        );
+        my $fallback_available = eval { _discover_remote_refs( $fallback_source_url, $policy ) };
+        if ($fallback_available) {
+            $available = $fallback_available;
+            $discover_error = q{};
+            $$chosen_clone_url_ref = $fallback_clone_url if defined $chosen_clone_url_ref;
+        }
+        else {
+            $discover_error ||= $@;
+        }
+    }
+    die $discover_error if !$available;
+    return $available;
 }
 
 sub _make_gitlab_client {
@@ -1751,7 +1794,8 @@ sub _github_installation_source_auth {
     my ( $source_auth, $base_url, $account, $policy ) = @_;
     my $github_app = $source_auth->{github_app}
       or die "GitHub source $account requires GH_ORG_SHARED_APP_ID and GH_ORG_SHARED_APP_PEM secrets\n";
-    my $cache_key = lc( $base_url . "|" . $account );
+    my $installation_key = defined $github_app->{install_id} ? $github_app->{install_id} : $account;
+    my $cache_key = lc( $base_url . "|" . $installation_key );
     my $cached = $source_auth->{github_installation_tokens}->{$cache_key};
     if ( $cached && $cached->{expires_at_epoch} > time() + 300 ) {
         return {
@@ -1761,12 +1805,15 @@ sub _github_installation_source_auth {
     }
 
     my $jwt = _generate_github_app_jwt( $github_app->{app_id}, $github_app->{pem} );
-    my $installation = _get_github_account_installation(
-        $base_url,
-        $account,
-        $jwt,
-        $policy,
-    );
+    my $installation =
+      defined $github_app->{install_id}
+      ? { id => $github_app->{install_id} }
+      : _get_github_account_installation(
+            $base_url,
+            $account,
+            $jwt,
+            $policy,
+        );
     my %request_opt = %{ _source_read_request_opt($policy) };
     $request_opt{auth_bearer} = $jwt;
     $request_opt{method} = "POST";
@@ -2724,6 +2771,13 @@ sub _relative_path {
     $relative =~ /\A[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*\z/
       or die "invalid relative project path: $relative\n";
     return $relative;
+}
+
+sub _strip_optional_git_suffix {
+    my ($value) = @_;
+    my $normalized = _required_string( $value, "project path segment" );
+    $normalized =~ s/\.git\z//;
+    return $normalized;
 }
 
 sub _join_path {

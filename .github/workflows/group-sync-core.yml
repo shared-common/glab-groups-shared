@@ -182,7 +182,7 @@ jobs:
               $target_token_secret,
           );
           if ($needs_github_source_auth) {
-              push @secret_names, "GH_ORG_SHARED_APP_ID", "GH_ORG_SHARED_APP_PEM";
+              push @secret_names, "GH_ORG_SHARED_APP_ID", "GH_ORG_SHARED_APP_INSTALL_ID", "GH_ORG_SHARED_APP_PEM";
           }
 
           open( my $fh, ">>:encoding(UTF-8)", $github_output )
@@ -309,7 +309,7 @@ jobs:
           secret_list="GL_BASE_URL,GL_BRIDGE_FORK_USER_GLAB"
           secret_list="${secret_list},${TARGET_TOKEN_SECRET}"
           if [ "${NEEDS_GITHUB_SOURCE_AUTH}" = "true" ]; then
-            secret_list="${secret_list},GH_ORG_SHARED_APP_ID,GH_ORG_SHARED_APP_PEM"
+            secret_list="${secret_list},GH_ORG_SHARED_APP_ID,GH_ORG_SHARED_APP_INSTALL_ID,GH_ORG_SHARED_APP_PEM"
           fi
           printf 'secrets=%s\n' "${secret_list}" >> "${GITHUB_OUTPUT}"
 

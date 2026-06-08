@@ -234,6 +234,48 @@ YAML
 {
     no warnings 'redefine';
 
+    local *GlabGroups::_get_github_account_installation = sub {
+        die "_get_github_account_installation should not be called when GH_ORG_SHARED_APP_INSTALL_ID is configured";
+    };
+    local *GlabGroups::_generate_github_app_jwt = sub { return "jwt-token"; };
+    local *GlabGroups::_github_request = sub {
+        my ( $base_url, $path, $payload, $opt ) = @_;
+        is( $path, "/app/installations/88/access_tokens", "GitHub installation token request uses the configured shared installation id" );
+        is( $opt->{method}, "POST", "fixed-install GitHub token request uses POST" );
+        is( $opt->{auth_bearer}, "jwt-token", "fixed-install GitHub token request uses the app JWT" );
+        return {
+            expires_at => "2030-01-01T00:00:00Z",
+            token => "ghs_shared_install_token",
+        };
+    };
+
+    my $source_auth = {
+        github_app => {
+            app_id => "123",
+            install_id => "88",
+            pem => "unused",
+        },
+        github_installation_tokens => {},
+    };
+    my $resolved = GlabGroups::_github_installation_source_auth(
+        $source_auth,
+        "https://github.com",
+        "ignored-source-account",
+        {},
+    );
+    is_deeply(
+        $resolved,
+        {
+            token => "ghs_shared_install_token",
+            username => "x-access-token",
+        },
+        "GitHub installation auth can use the configured shared installation id directly",
+    );
+}
+
+{
+    no warnings 'redefine';
+
     local *GlabGroups::_gitlab_request = sub {
         my ( $client, $method, $path ) = @_;
         return [ { id => 1, full_path => "plasma", path => "plasma" } ]
@@ -315,14 +357,22 @@ HTML
 
 {
     no warnings 'redefine';
+    my @seen_source_urls;
 
     local *GlabGroups::_discover_remote_refs = sub {
         my ( $source_url, $policy ) = @_;
+        push @seen_source_urls, $source_url;
+        return {
+            branches => {},
+            default_branch => "",
+            tags => {},
+        } if $source_url eq "https://gitlab.com/WhyNotHugo/darkman";
         return {
             branches => { main => 1, stable => 1 },
             default_branch => "main",
             tags => { "v1.0.0" => 1 },
-        };
+        } if $source_url eq "https://gitlab.com/WhyNotHugo/darkman.git";
+        die "unexpected source url: $source_url";
     };
 
     my $inventory = GlabGroups::_discover_inventory(
@@ -343,6 +393,15 @@ HTML
     is( $inventory->{inventory}->[0]->{project_entry}->{target_group_path}, "glab-forks/labwc", "explicit project discovery keeps the configured target group path" );
     is( $inventory->{inventory}->[0]->{projects}->[0]->{path_with_namespace}, "WhyNotHugo/darkman", "explicit GitLab project discovery keeps the source project path" );
     is( $inventory->{inventory}->[0]->{projects}->[0]->{default_branch}, "main", "explicit project discovery records the discovered default branch" );
+    is( $inventory->{inventory}->[0]->{projects}->[0]->{http_url_to_repo}, "https://gitlab.com/WhyNotHugo/darkman.git", "explicit GitLab project discovery stores the working clone URL" );
+    is_deeply(
+        \@seen_source_urls,
+        [
+            "https://gitlab.com/WhyNotHugo/darkman",
+            "https://gitlab.com/WhyNotHugo/darkman.git",
+        ],
+        "explicit GitLab project discovery retries the .git clone URL when the human-facing URL has no branches",
+    );
 }
 
 {
@@ -373,6 +432,21 @@ HTML
 
     is( $inventory->{inventory}->[0]->{group_path}, "git.code.sf.net", "explicit generic project discovery uses the source host as the synthetic group path when the URL path is not repo-shaped" );
     is( $inventory->{inventory}->[0]->{projects}->[0]->{path_with_namespace}, "git.code.sf.net/gptfdisk", "explicit generic project discovery uses the configured project name for the synthetic source path" );
+}
+
+{
+    my $parsed = GlabGroups::_parse_source_project_url(
+        "https://github.com/labwc/labwc",
+        "labwc",
+    );
+    is( $parsed->{clone_url}, "https://github.com/labwc/labwc.git", "GitHub direct project URLs normalize to the .git clone URL" );
+    is( $parsed->{path_with_namespace}, "labwc/labwc", "GitHub direct project URLs keep the owner/repo path without a .git suffix" );
+
+    $parsed = GlabGroups::_parse_source_project_url(
+        "https://gitlab.com/WhyNotHugo/darkman.git",
+        "darkman",
+    );
+    is( $parsed->{path_with_namespace}, "WhyNotHugo/darkman", "repo-shaped direct project URLs strip an optional .git suffix from the source path" );
 }
 
 {
