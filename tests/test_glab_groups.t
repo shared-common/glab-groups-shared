@@ -113,6 +113,104 @@ sub run_cmd {
 }
 
 {
+    no warnings 'redefine';
+
+    local *GlabGroups::_load_target_client = sub { return {}; };
+    local *GlabGroups::_load_target_root_group_path = sub { return "owner"; };
+    local *GlabGroups::_ensure_group_path = sub { return 42; };
+    local *GlabGroups::_build_target_project_index = sub { return {}; };
+
+    my $plan = GlabGroups::_build_plan(
+        {
+            defaults => { additional_branches => [], additional_tags => [], force_lfs => JSON::PP::false },
+            exclusions => {},
+            overrides => {},
+        },
+        {
+            inventory => [
+                {
+                    group_path => "root",
+                    namespace => {
+                        target_namespace_path => "mirror",
+                    },
+                    projects => [
+                        {
+                            archived => JSON::PP::true,
+                            default_branch => "main",
+                            description => "source",
+                            empty_repo => JSON::PP::false,
+                            http_url_to_repo => "https://example.invalid/root/project.git",
+                            id => 10,
+                            lfs_enabled => JSON::PP::false,
+                            path_with_namespace => "root/project",
+                            ssh_url_to_repo => 'git@example.invalid:root/project.git',
+                            visibility => "public",
+                        },
+                    ],
+                },
+            ],
+        },
+        25,
+    );
+    is( $plan->{plan}->[0]->{action}, "skip", "archived source projects are skipped during planning" );
+    is( $plan->{plan}->[0]->{skip_reason}, "Archived source repository is excluded from mirroring.", "records the archived source skip reason" );
+}
+
+{
+    no warnings 'redefine';
+
+    local *GlabGroups::_load_target_client = sub { return {}; };
+    local *GlabGroups::_load_target_root_group_path = sub { return "owner"; };
+    local *GlabGroups::_ensure_group_path = sub { return 42; };
+    local *GlabGroups::_build_target_project_index = sub {
+        return {
+            "owner/mirror/project" => {
+                archived => JSON::PP::true,
+                description => "source",
+                id => 99,
+                lfs_enabled => JSON::PP::false,
+                visibility => "private",
+            },
+        };
+    };
+
+    my $plan = GlabGroups::_build_plan(
+        {
+            defaults => { additional_branches => [], additional_tags => [], force_lfs => JSON::PP::false },
+            exclusions => {},
+            overrides => {},
+        },
+        {
+            inventory => [
+                {
+                    group_path => "root",
+                    namespace => {
+                        target_namespace_path => "mirror",
+                    },
+                    projects => [
+                        {
+                            archived => JSON::PP::false,
+                            default_branch => "main",
+                            description => "source",
+                            empty_repo => JSON::PP::false,
+                            http_url_to_repo => "https://example.invalid/root/project.git",
+                            id => 10,
+                            lfs_enabled => JSON::PP::false,
+                            path_with_namespace => "root/project",
+                            ssh_url_to_repo => 'git@example.invalid:root/project.git',
+                            visibility => "public",
+                        },
+                    ],
+                },
+            ],
+        },
+        25,
+    );
+    is( $plan->{plan}->[0]->{action}, "skip", "archived target projects are skipped during planning" );
+    is( $plan->{plan}->[0]->{skip_reason}, "Archived target repository is excluded from mirroring.", "records the archived target skip reason" );
+}
+
+{
     my $policy = GlabGroups::_merge_policy(
         {
             additional_branches => [],
@@ -454,56 +552,6 @@ sub run_cmd {
         }
     );
     ok( !exists $requests[1]->{payload}->{visibility}, "project finalize payload does not set visibility" );
-}
-
-{
-    no warnings 'redefine';
-    my @requests;
-
-    local *GlabGroups::_get_project = sub {
-        my ( $client, $project_path ) = @_;
-        return {
-            archived => JSON::PP::true,
-            description => "source",
-            id => 99,
-            lfs_enabled => JSON::PP::false,
-        };
-    };
-
-    local *GlabGroups::_gitlab_request = sub {
-        my ( $client, $method, $path, $payload, $opt ) = @_;
-        push @requests, { method => $method, path => $path, payload => $payload };
-        return { archived => JSON::PP::false, id => 99 } if $method eq "POST" && $path eq "/projects/99/unarchive";
-        return { archived => JSON::PP::false, id => 99 } if $method eq "PUT" && $path eq "/projects/99";
-        return { archived => JSON::PP::false, id => 99 } if $method eq "GET" && $path eq "/projects/99";
-        return { archived => JSON::PP::true, id => 99 } if $method eq "POST" && $path eq "/projects/99/archive";
-        die "unexpected gitlab request: $method $path";
-    };
-
-    my $prepared = GlabGroups::_ensure_target_project(
-        {},
-        {
-            policy => { force_lfs => JSON::PP::false },
-            source_archived => JSON::PP::true,
-            source_description => "source",
-            source_lfs_enabled => JSON::PP::false,
-            target_full_path => "owner/group/project",
-            target_namespace_id => 42,
-        }
-    );
-    ok( $prepared->{unarchived}, "unarchives archived target before mirroring" );
-    is( $requests[0]->{path}, "/projects/99/unarchive", "does not archive before mirror push" );
-
-    GlabGroups::_finalize_target_project(
-        {},
-        99,
-        "master",
-        {
-            source_archived => JSON::PP::true,
-            source_description => "source",
-        }
-    );
-    is( $requests[-1]->{path}, "/projects/99/archive", "archives target only after mirror finalization" );
 }
 
 {

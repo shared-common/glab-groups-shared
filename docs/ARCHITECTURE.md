@@ -45,8 +45,8 @@ The plan includes:
 The mirror stage:
 
 - creates or updates target projects before push
-- unarchives archived targets before push and reapplies the desired archive
-  state after refs are mirrored
+- skips archived source projects and archived existing target projects instead of
+  mutating archive state
 - never sets target group or project visibility
 - discovers group inventory through direct-project and subgroup traversal rather
   than a single `include_subgroups=true` API query

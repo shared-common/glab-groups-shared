@@ -206,7 +206,6 @@ sub classify_plan_action {
 
     return "update_project"
       if ( $target_description ne $source_description )
-      || ( !!$target_project->{archived} != !!$source_project->{archived} )
       || ( !!$target_project->{lfs_enabled} != !!( $policy->{force_lfs} || $source_project->{lfs_enabled} ) );
 
     return "mirror_only";
@@ -589,6 +588,12 @@ sub _build_plan {
             my $target_namespace_id = _ensure_group_path( $target_client, $target_namespace_path, \%group_cache );
             my $target_project = $target_projects_by_path->{$target_full_path};
             my $skip_reason = $config->{exclusions}->{$target_relative_project_path};
+            if ( !$skip_reason && $source_project->{archived} ) {
+                $skip_reason = "Archived source repository is excluded from mirroring.";
+            }
+            if ( !$skip_reason && $target_project && $target_project->{archived} ) {
+                $skip_reason = "Archived target repository is excluded from mirroring.";
+            }
             my $action = classify_plan_action(
                 $source_project,
                 $target_project,
@@ -1094,7 +1099,6 @@ sub _ensure_target_project {
     my $project;
     my $created = JSON::PP::false;
     my $updated = JSON::PP::false;
-    my $unarchived = JSON::PP::false;
     if ( !$existing ) {
         $project = _gitlab_request(
             $client,
@@ -1111,11 +1115,6 @@ sub _ensure_target_project {
     }
     else {
         $project = $existing;
-        if ( $project->{archived} ) {
-            $project = _gitlab_request( $client, "POST", "/projects/" . $project->{id} . "/unarchive", undef ) || $project;
-            $project->{archived} = JSON::PP::false;
-            $unarchived = JSON::PP::true;
-        }
         my $needs_update =
              _normalize_description( $project->{description} ) ne $payload{description}
           || !!$project->{lfs_enabled} != !!$payload{lfs_enabled};
@@ -1129,7 +1128,6 @@ sub _ensure_target_project {
         created => $created,
         project_id => $project->{id},
         updated => $updated,
-        unarchived => $unarchived,
     };
 }
 
@@ -1140,20 +1138,6 @@ sub _finalize_target_project {
     );
     $payload{default_branch} = $default_branch if $default_branch;
     _gitlab_request( $client, "PUT", "/projects/$project_id", \%payload );
-    _sync_target_archive_state( $client, $project_id, $entry->{source_archived} );
-}
-
-sub _sync_target_archive_state {
-    my ( $client, $project_id, $want_archived ) = @_;
-    my $project = _gitlab_request( $client, "GET", "/projects/$project_id", undef );
-    return unless $project;
-    if ( $want_archived && !$project->{archived} ) {
-        _gitlab_request( $client, "POST", "/projects/$project_id/archive", undef );
-        return;
-    }
-    if ( !$want_archived && $project->{archived} ) {
-        _gitlab_request( $client, "POST", "/projects/$project_id/unarchive", undef );
-    }
 }
 
 sub _ensure_target_lfs_enabled {
