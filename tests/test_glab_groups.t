@@ -583,6 +583,31 @@ HTML
 }
 
 {
+    my $inferred = GlabGroups::_infer_default_branch_from_heads(
+        {
+            main => 1,
+            feature => 1,
+        }
+    );
+    is( $inferred, "main", "prefers main when a remote omits the HEAD symref" );
+
+    $inferred = GlabGroups::_infer_default_branch_from_heads(
+        {
+            master => 1,
+            stable => 1,
+        }
+    );
+    is( $inferred, "master", "falls back to master when main is absent and HEAD is omitted" );
+
+    $inferred = GlabGroups::_infer_default_branch_from_heads(
+        {
+            onlybranch => 1,
+        }
+    );
+    is( $inferred, "onlybranch", "uses the sole branch when HEAD is omitted and only one branch exists" );
+}
+
+{
     my $action = classify_plan_action(
         {
             visibility => "public",

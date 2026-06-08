@@ -2252,11 +2252,24 @@ sub _discover_remote_refs {
             next;
         }
     }
+    if ( !$default_branch ) {
+        $default_branch = _infer_default_branch_from_heads( \%branches );
+    }
     return {
         branches => \%branches,
         default_branch => $default_branch,
         tags => \%tags,
     };
+}
+
+sub _infer_default_branch_from_heads {
+    my ($branches) = @_;
+    return q{} unless $branches && ref($branches) eq "HASH";
+    return "main" if $branches->{main};
+    return "master" if $branches->{master};
+    my @names = sort keys %{$branches};
+    return $names[0] if @names == 1;
+    return q{};
 }
 
 sub _fetch_selected_refs {
