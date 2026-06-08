@@ -1084,7 +1084,9 @@ sub _find_group_by_parent_and_path {
 sub _is_gitlab_path_conflict_error {
     my ($error) = @_;
     return 0 unless defined $error && !ref($error);
-    return $error =~ /path has already been taken/i ? 1 : 0;
+    return 1 if $error =~ /path has already been taken/i;
+    return 1 if $error =~ /(?:[:{,\s]|")path(?:["\s]*=>|"\s*:)\s*\[[^\]]*has already been taken[^\]]*\]/i;
+    return 0;
 }
 
 sub _ensure_target_project {
