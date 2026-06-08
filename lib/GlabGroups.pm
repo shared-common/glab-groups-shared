@@ -44,6 +44,9 @@ my %GITLAB_READ_DEFAULTS = (
     timeout_seconds => 150,
 );
 
+my $TARGET_SYNC_BRANCH = "gitlab/mcr/main";
+my $TARGET_DEFAULT_BRANCH = "mcr/main";
+
 sub run_cli {
     my (@argv) = @_;
     my $command = shift @argv or die _usage();
@@ -757,9 +760,9 @@ sub _mirror_entry {
         $lfs_result->{status} == 0 or die "git lfs push failed: $lfs_result->{output}\n";
     }
 
-    _push_selected_refs( $repo_dir, $selected, $entry->{policy} );
+    _push_selected_refs( $repo_dir, $selected, $entry->{policy}, $default_branch );
     _finalize_target_project( $target_client, $prepared->{project_id}, $default_branch, $entry );
-    my $verified = _verify_entry( $target_client, $entry, $selected );
+    my $verified = _verify_entry( $target_client, $entry, $selected, $default_branch );
 
     return {
         target_full_path => $entry->{target_full_path},
@@ -775,7 +778,7 @@ sub _mirror_entry {
 }
 
 sub _verify_entry {
-    my ( $target_client, $entry, $selected ) = @_;
+    my ( $target_client, $entry, $selected, $source_default_branch ) = @_;
     my $project = _get_project( $target_client, $entry->{target_full_path} );
     return {
         target_full_path => $entry->{target_full_path},
@@ -786,7 +789,11 @@ sub _verify_entry {
     my %tags;
     if ($selected) {
         for my $branch ( @{ $selected->{branches} || [] } ) {
-            $branches{$branch} = _get_branch( $target_client, $project->{id}, $branch ) ? JSON::PP::true : JSON::PP::false;
+            my $target_branch_name =
+              ( $source_default_branch && $branch eq $source_default_branch )
+              ? $TARGET_SYNC_BRANCH
+              : $branch;
+            $branches{$target_branch_name} = _get_branch( $target_client, $project->{id}, $target_branch_name ) ? JSON::PP::true : JSON::PP::false;
         }
         for my $tag ( @{ $selected->{tags} || [] } ) {
             $tags{$tag} = _get_tag( $target_client, $project->{id}, $tag ) ? JSON::PP::true : JSON::PP::false;
@@ -1161,10 +1168,13 @@ sub _ensure_target_project {
 
 sub _finalize_target_project {
     my ( $client, $project_id, $default_branch, $entry ) = @_;
+    my $managed_default_branch = _ensure_managed_target_branches( $client, $project_id, $default_branch );
     my %payload = (
         description => $entry->{source_description},
     );
-    $payload{default_branch} = $default_branch if $default_branch;
+    if ($managed_default_branch) {
+        $payload{default_branch} = $managed_default_branch;
+    }
     _gitlab_request( $client, "PUT", "/projects/$project_id", \%payload );
 }
 
@@ -1210,6 +1220,83 @@ sub _get_tag {
         undef,
         { allow_missing => 1 }
     );
+}
+
+sub _ensure_managed_target_branches {
+    my ( $client, $project_id, $source_default_branch ) = @_;
+    return q{} unless $source_default_branch;
+
+    my @specs = (
+        {
+            name => $TARGET_SYNC_BRANCH,
+            ref => $source_default_branch,
+        },
+        {
+            default => JSON::PP::true,
+            name => $TARGET_DEFAULT_BRANCH,
+            ref => $TARGET_SYNC_BRANCH,
+        },
+        {
+            name => "mcr/feature/init",
+            ref => $TARGET_DEFAULT_BRANCH,
+        },
+        {
+            name => "mcr/staging",
+            protect => JSON::PP::true,
+            ref => $TARGET_DEFAULT_BRANCH,
+        },
+        {
+            name => "mcr/release",
+            protect => JSON::PP::true,
+            ref => $TARGET_DEFAULT_BRANCH,
+        },
+    );
+
+    my $managed_default_branch = q{};
+    for my $spec (@specs) {
+        my $branch = _ensure_target_branch_from_ref( $client, $project_id, $spec->{name}, $spec->{ref} );
+        next unless $branch;
+        if ( $spec->{protect} ) {
+            $branch = _ensure_target_branch_protected( $client, $project_id, $spec->{name}, $branch );
+        }
+        $managed_default_branch = $spec->{name} if $spec->{default};
+    }
+
+    return $managed_default_branch && _get_branch( $client, $project_id, $managed_default_branch )
+      ? $managed_default_branch
+      : q{};
+}
+
+sub _ensure_target_branch_from_ref {
+    my ( $client, $project_id, $branch_name, $ref_name ) = @_;
+    my $branch = _get_branch( $client, $project_id, $branch_name );
+    return $branch if $branch;
+    return undef unless _get_branch( $client, $project_id, $ref_name );
+    return _gitlab_request(
+        $client,
+        "POST",
+        "/projects/$project_id/repository/branches",
+        {
+            branch => $branch_name,
+            ref => $ref_name,
+        }
+    );
+}
+
+sub _ensure_target_branch_protected {
+    my ( $client, $project_id, $branch_name, $branch ) = @_;
+    $branch ||= _get_branch( $client, $project_id, $branch_name );
+    return undef unless $branch;
+    return $branch if $branch->{protected};
+    _gitlab_request(
+        $client,
+        "POST",
+        "/projects/$project_id/protected_branches",
+        {
+            name => $branch_name,
+        }
+    );
+    return _get_branch( $client, $project_id, $branch_name );
 }
 
 sub _list_group_projects {
@@ -1373,53 +1460,57 @@ sub _fetch_selected_refs {
 }
 
 sub _push_selected_refs {
-    my ( $repo_dir, $selected, $policy ) = @_;
+    my ( $repo_dir, $selected, $policy, $default_branch ) = @_;
     for my $branch ( @{ $selected->{branches} || [] } ) {
-        my $result = _run_command(
-            [
-                "git", "-C", $repo_dir, "push", "--force", "target",
-                "refs/heads/$branch:refs/heads/$branch"
-            ],
-            _git_command_options( $policy, JSON::PP::true )
+        next if $default_branch && $branch eq $default_branch;
+        _push_target_refspec(
+            $repo_dir,
+            "refs/heads/$branch:refs/heads/$branch",
+            "branch $branch",
+            $policy,
         );
-        if ( $result->{status} != 0 && $result->{output} =~ /LFS objects are missing/i ) {
-            _run_command(
-                [ "git", "-C", $repo_dir, "lfs", "push", "--all", "target" ],
-                _git_command_options( $policy, JSON::PP::true )
-            );
-            $result = _run_command(
-                [
-                    "git", "-C", $repo_dir, "push", "--force", "target",
-                    "refs/heads/$branch:refs/heads/$branch"
-                ],
-                _git_command_options( $policy, JSON::PP::true )
-            );
-        }
-        $result->{status} == 0 or die "git push failed for branch $branch: $result->{output}\n";
+    }
+    if ($default_branch) {
+        _push_target_refspec(
+            $repo_dir,
+            "refs/heads/$default_branch:refs/heads/$TARGET_SYNC_BRANCH",
+            "managed sync branch $TARGET_SYNC_BRANCH",
+            $policy,
+        );
     }
     for my $tag ( @{ $selected->{tags} || [] } ) {
-        my $result = _run_command(
+        _push_target_refspec(
+            $repo_dir,
+            "refs/tags/$tag:refs/tags/$tag",
+            "tag $tag",
+            $policy,
+        );
+    }
+}
+
+sub _push_target_refspec {
+    my ( $repo_dir, $refspec, $label, $policy ) = @_;
+    my $result = _run_command(
+        [
+            "git", "-C", $repo_dir, "push", "--force", "target",
+            $refspec
+        ],
+        _git_command_options( $policy, JSON::PP::true )
+    );
+    if ( $result->{status} != 0 && $result->{output} =~ /LFS objects are missing/i ) {
+        _run_command(
+            [ "git", "-C", $repo_dir, "lfs", "push", "--all", "target" ],
+            _git_command_options( $policy, JSON::PP::true )
+        );
+        $result = _run_command(
             [
                 "git", "-C", $repo_dir, "push", "--force", "target",
-                "refs/tags/$tag:refs/tags/$tag"
+                $refspec
             ],
             _git_command_options( $policy, JSON::PP::true )
         );
-        if ( $result->{status} != 0 && $result->{output} =~ /LFS objects are missing/i ) {
-            _run_command(
-                [ "git", "-C", $repo_dir, "lfs", "push", "--all", "target" ],
-                _git_command_options( $policy, JSON::PP::true )
-            );
-            $result = _run_command(
-                [
-                    "git", "-C", $repo_dir, "push", "--force", "target",
-                    "refs/tags/$tag:refs/tags/$tag"
-                ],
-                _git_command_options( $policy, JSON::PP::true )
-            );
-        }
-        $result->{status} == 0 or die "git push failed for tag $tag: $result->{output}\n";
     }
+    $result->{status} == 0 or die "git push failed for $label: $result->{output}\n";
 }
 
 sub _prepare_lfs {

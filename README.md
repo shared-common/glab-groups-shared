@@ -46,9 +46,9 @@ Target group and project visibility is not created, updated, or finalized by
 this workflow. Configure visibility directly on the target GitLab owner/group
 outside the mirror run to avoid denied metadata writes and rate-limit pressure.
 
-Target project creation and deletion are outside this workflow too. The shared
-runtime only updates already-existing target projects and skips missing or
-archived targets.
+Target project deletion stays outside this workflow. The shared runtime creates
+missing target projects, updates existing target project metadata, and skips
+archived sources.
 
 ## Ref selection
 
@@ -59,6 +59,18 @@ Each config directory exposes these defaults:
 - `additional_tags`: extra tag names to mirror on every run when present
 - `size_limit_bytes`: selected-ref budget, defaulting to 10 GiB
 - `max_blob_bytes`: blob limit, defaulting to 100 MiB
+
+The source default branch is mirrored to the managed target branch
+`gitlab/mcr/main` instead of a target-side `main` branch. After the synced
+branch lands, the runtime bootstraps these target-only branches when missing:
+
+- `mcr/main` from `gitlab/mcr/main` and sets it as the target default branch
+- `mcr/feature/init` from `mcr/main`
+- `mcr/staging` from `mcr/main`, then protects it
+- `mcr/release` from `mcr/main`, then protects it
+
+Those `mcr/*` branches are one-shot target bootstrap branches. They are not
+force-synced from source on later runs.
 
 ## Validation
 

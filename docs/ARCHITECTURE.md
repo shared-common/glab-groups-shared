@@ -53,9 +53,14 @@ The mirror stage:
 - uses longer bounded retries for GitLab read requests during discovery to ride
   out transient 5xx and timeout failures from upstream GitLab/Varnish
 - fetches only the selected branches and tags
-- always includes the source default branch
+- always includes the source default branch in source-side selection
+- mirrors the source default branch into target `gitlab/mcr/main`
 - auto-detects `pristine-tar`
 - applies configured additional branches and tags
+- bootstraps target-only `mcr/main`, `mcr/feature/init`, `mcr/staging`, and
+  `mcr/release` branches when missing
+- sets target `mcr/main` as the default branch when bootstrap succeeds
+- protects target `mcr/staging` and `mcr/release`
 - enforces a 10 GiB total selected-ref budget
 - attempts LFS migration for blobs larger than 100 MiB before falling back to
   per-repository skip

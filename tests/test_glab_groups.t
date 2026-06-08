@@ -729,15 +729,37 @@ sub run_cmd {
 {
     no warnings 'redefine';
     my @requests;
+    my %branches = (
+        main => { name => "main", protected => JSON::PP::false },
+    );
 
     local *GlabGroups::_get_project = sub {
         my ( $client, $project_path ) = @_;
         return { id => 99, description => "old", lfs_enabled => JSON::PP::false, archived => JSON::PP::false };
     };
 
+    local *GlabGroups::_get_branch = sub {
+        my ( $client, $project_id, $branch_name ) = @_;
+        my $branch = $branches{$branch_name};
+        return undef unless $branch;
+        return { %{$branch} };
+    };
+
     local *GlabGroups::_gitlab_request = sub {
         my ( $client, $method, $path, $payload, $opt ) = @_;
         push @requests, { method => $method, path => $path, payload => $payload };
+        if ( $method eq "POST" && $path eq "/projects/99/repository/branches" ) {
+            $branches{ $payload->{branch} } = {
+                name => $payload->{branch},
+                protected => JSON::PP::false,
+            };
+            return { %{ $branches{ $payload->{branch} } } };
+        }
+        if ( $method eq "POST" && $path eq "/projects/99/protected_branches" ) {
+            $branches{ $payload->{name} } ||= { name => $payload->{name} };
+            $branches{ $payload->{name} }->{protected} = JSON::PP::true;
+            return { %{ $branches{ $payload->{name} } } };
+        }
         return { id => 99, archived => JSON::PP::false, description => "source", lfs_enabled => JSON::PP::false };
     };
 
@@ -764,7 +786,28 @@ sub run_cmd {
             source_description => "source",
         }
     );
-    ok( !exists $requests[1]->{payload}->{visibility}, "project finalize payload does not set visibility" );
+    my @branch_create_requests =
+      grep { $_->{method} eq "POST" && $_->{path} eq "/projects/99/repository/branches" } @requests;
+    is_deeply(
+        [ map { $_->{payload}->{branch} } @branch_create_requests ],
+        [ "gitlab/mcr/main", "mcr/main", "mcr/feature/init", "mcr/staging", "mcr/release" ],
+        "finalize bootstraps the managed target branches in order",
+    );
+    is_deeply(
+        [ map { $_->{payload}->{ref} } @branch_create_requests ],
+        [ "main", "gitlab/mcr/main", "mcr/main", "mcr/main", "mcr/main" ],
+        "managed target branches are created from the expected refs",
+    );
+    my @protect_requests =
+      grep { $_->{method} eq "POST" && $_->{path} eq "/projects/99/protected_branches" } @requests;
+    is_deeply(
+        [ map { $_->{payload}->{name} } @protect_requests ],
+        [ "mcr/staging", "mcr/release" ],
+        "finalize protects the managed promotion branches",
+    );
+    my @project_put_requests = grep { $_->{method} eq "PUT" && $_->{path} eq "/projects/99" } @requests;
+    ok( !exists $project_put_requests[-1]->{payload}->{visibility}, "project finalize payload does not set visibility" );
+    is( $project_put_requests[-1]->{payload}->{default_branch}, "mcr/main", "project finalize makes mcr/main the default branch" );
 }
 
 {
@@ -780,6 +823,82 @@ sub run_cmd {
     GlabGroups::_ensure_target_lfs_enabled( {}, 99 );
     is( $requests[0]->{path}, "/projects/99", "enables target project LFS by project id" );
     ok( $requests[0]->{payload}->{lfs_enabled}, "sets lfs_enabled true for discovered LFS repositories" );
+}
+
+{
+    no warnings 'redefine';
+    my @refspecs;
+
+    local *GlabGroups::_run_command = sub {
+        my ( $cmd, $opt ) = @_;
+        push @refspecs, $cmd->[-1] if $cmd->[3] eq "push";
+        return { output => q{}, status => 0 };
+    };
+
+    GlabGroups::_push_selected_refs(
+        "/tmp/repo",
+        {
+            branches => [ "main", "release" ],
+            tags => ["v1.0.0"],
+        },
+        {
+            git_timeout_seconds => 60,
+            retry_attempts => 1,
+            retry_backoff_seconds => 1,
+        },
+        "main",
+    );
+
+    is_deeply(
+        \@refspecs,
+        [
+            "refs/heads/release:refs/heads/release",
+            "refs/heads/main:refs/heads/gitlab/mcr/main",
+            "refs/tags/v1.0.0:refs/tags/v1.0.0",
+        ],
+        "push_selected_refs mirrors the source default branch only to gitlab/mcr/main",
+    );
+}
+
+{
+    no warnings 'redefine';
+
+    local *GlabGroups::_get_project = sub {
+        my ( $client, $project_path ) = @_;
+        return { default_branch => "mcr/main", id => 99 };
+    };
+
+    local *GlabGroups::_get_branch = sub {
+        my ( $client, $project_id, $branch_name ) = @_;
+        return { name => $branch_name } if $branch_name eq "gitlab/mcr/main" || $branch_name eq "release";
+        return undef;
+    };
+
+    local *GlabGroups::_get_tag = sub {
+        my ( $client, $project_id, $tag_name ) = @_;
+        return undef;
+    };
+
+    my $verify = GlabGroups::_verify_entry(
+        {},
+        {
+            target_full_path => "owner/group/project",
+        },
+        {
+            branches => [ "main", "release" ],
+            tags => [],
+        },
+        "main",
+    );
+
+    is_deeply(
+        $verify->{branches},
+        {
+            "gitlab/mcr/main" => JSON::PP::true,
+            "release" => JSON::PP::true,
+        },
+        "verify_entry checks the managed sync branch instead of target main",
+    );
 }
 
 {
