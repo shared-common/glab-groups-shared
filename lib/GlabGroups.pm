@@ -1038,44 +1038,72 @@ sub _find_group_by_parent_and_path {
     my ( $client, $parent_id, $group_path, $path_segment ) = @_;
     my $expected_path = lc($path_segment);
     my $expected_full_path = lc($group_path);
-    my $page = 1;
+    my @path_builders;
+    my $search = uri_escape_utf8($path_segment);
 
-    while (1) {
-        my $path;
-        my $search = uri_escape_utf8($path_segment);
-        if ( defined $parent_id ) {
-            $path = sprintf(
-                "/groups/%d/subgroups?per_page=100&page=%d&search=%s",
-                $parent_id,
-                $page,
-                $search,
-            );
-        }
-        else {
-            $path = sprintf(
-                "/groups?top_level_only=true&per_page=100&page=%d&search=%s",
-                $page,
-                $search,
-            );
-        }
+    if ( defined $parent_id ) {
+        @path_builders = (
+            sub {
+                my ($page) = @_;
+                return sprintf(
+                    "/groups/%d/subgroups?per_page=100&page=%d&search=%s",
+                    $parent_id,
+                    $page,
+                    $search,
+                );
+            },
+            sub {
+                my ($page) = @_;
+                return sprintf(
+                    "/groups/%d/subgroups?per_page=100&page=%d&all_available=true",
+                    $parent_id,
+                    $page,
+                );
+            },
+        );
+    }
+    else {
+        @path_builders = (
+            sub {
+                my ($page) = @_;
+                return sprintf(
+                    "/groups?top_level_only=true&per_page=100&page=%d&search=%s",
+                    $page,
+                    $search,
+                );
+            },
+            sub {
+                my ($page) = @_;
+                return sprintf(
+                    "/groups?top_level_only=true&per_page=100&page=%d&all_available=true",
+                    $page,
+                );
+            },
+        );
+    }
 
-        my $groups = _gitlab_request( $client, "GET", $path, undef );
-        ref($groups) eq "ARRAY" or die "group search response must be a list\n";
-        last unless @{$groups};
+    for my $path_builder (@path_builders) {
+        my $page = 1;
+        while (1) {
+            my $path = $path_builder->($page);
+            my $groups = _gitlab_request( $client, "GET", $path, undef );
+            ref($groups) eq "ARRAY" or die "group search response must be a list\n";
+            last unless @{$groups};
 
-        for my $group ( @{$groups} ) {
-            next unless ref($group) eq "HASH";
-            my $candidate_full_path = lc( $group->{full_path} || q{} );
-            return $group if $candidate_full_path eq $expected_full_path;
-        }
-        for my $group ( @{$groups} ) {
-            next unless ref($group) eq "HASH";
-            my $candidate_path = lc( $group->{path} || q{} );
-            return $group if $candidate_path eq $expected_path;
-        }
+            for my $group ( @{$groups} ) {
+                next unless ref($group) eq "HASH";
+                my $candidate_full_path = lc( $group->{full_path} || q{} );
+                return $group if $candidate_full_path eq $expected_full_path;
+            }
+            for my $group ( @{$groups} ) {
+                next unless ref($group) eq "HASH";
+                my $candidate_path = lc( $group->{path} || q{} );
+                return $group if $candidate_path eq $expected_path;
+            }
 
-        last if @{$groups} < 100;
-        $page++;
+            last if @{$groups} < 100;
+            $page++;
+        }
     }
 
     return undef;

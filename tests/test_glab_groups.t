@@ -446,6 +446,44 @@ sub run_cmd {
 
 {
     no warnings 'redefine';
+    my %cache = (
+        owner => 7,
+        "owner/freedesktop" => 8,
+    );
+
+    local *GlabGroups::_get_group = sub {
+        my ( $client, $group_path ) = @_;
+        return undef if $group_path eq "owner/freedesktop/wlroots";
+        die "unexpected group lookup: $group_path";
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        if ( $method eq "POST" && $path eq "/groups" ) {
+            die "gitlab request failed [400] POST /groups: {\"message\":\"Failed to save group {:path=>[\\\"has already been taken\\\"]}\"}\n";
+        }
+        if ( $method eq "GET" && $path eq "/groups/8/subgroups?per_page=100&page=1&search=wlroots" ) {
+            return [];
+        }
+        if ( $method eq "GET" && $path eq "/groups/8/subgroups?per_page=100&page=1&all_available=true" ) {
+            return [
+                {
+                    id => 99,
+                    full_path => "owner/freedesktop/wlroots",
+                    path => "wlroots",
+                },
+            ];
+        }
+        die "unexpected gitlab request: $method $path";
+    };
+
+    my $group_id = GlabGroups::_ensure_group_path( {}, "owner/freedesktop/wlroots", \%cache );
+    is( $group_id, 99, "reuses existing nested group after search fallback misses it" );
+    is( $cache{"owner/freedesktop/wlroots"}, 99, "caches nested group id after enumerating existing subgroups" );
+}
+
+{
+    no warnings 'redefine';
     my %cache = ( owner => 7 );
 
     local *GlabGroups::_get_group = sub {
@@ -460,6 +498,9 @@ sub run_cmd {
             die "gitlab request failed [400] POST /groups: {\"message\":\"Failed to save group {:base=>[\\\"path has already been taken\\\"]}\"}\n";
         }
         if ( $method eq "GET" && $path eq "/groups/7/subgroups?per_page=100&page=1&search=Missing-team" ) {
+            return [];
+        }
+        if ( $method eq "GET" && $path eq "/groups/7/subgroups?per_page=100&page=1&all_available=true" ) {
             return [];
         }
         die "unexpected gitlab request: $method $path";
