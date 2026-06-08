@@ -213,7 +213,6 @@ jobs:
           if-no-files-found: error
           path: |
             plan.json
-            plan.md
 
       - name: Cleanup secrets
         if: always()
@@ -392,9 +391,78 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat plan.md >> "${GITHUB_STEP_SUMMARY}"
-          printf '\n' >> "${GITHUB_STEP_SUMMARY}"
-          cat report.md >> "${GITHUB_STEP_SUMMARY}"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          MAX_SUMMARY_CHARS = 900_000
+          import os
+
+          MAX_SKIPPED_ITEMS = 50
+          MAX_FAILED_ITEMS = 50
+
+          def append_line(parts: list[str], line: str) -> None:
+              parts.append(f"{line}\n")
+
+          def append_items(parts: list[str], heading: str, items: list[dict], field: str, limit: int) -> None:
+              selected = [item for item in items if isinstance(item, dict)]
+              if not selected:
+                  return
+              append_line(parts, "")
+              append_line(parts, f"### {heading}")
+              for item in selected[:limit]:
+                  target = item.get("target_full_path", "<unknown>")
+                  detail = item.get(field) or item.get("error") or item.get("reason") or heading.lower()
+                  append_line(parts, f"- `{target}`: {detail}")
+              if len(selected) > limit:
+                  append_line(parts, f"- _... {len(selected) - limit} additional entries omitted; see workflow artifacts for full JSON outputs._")
+
+          plan = json.loads(Path("plan.json").read_text(encoding="utf-8"))
+          report = json.loads(Path("report.json").read_text(encoding="utf-8"))
+
+          plan_counts = plan.get("counts") or {}
+          result_counts = report.get("result_counts") or {}
+          results = report.get("results") or []
+          skipped = [item for item in results if isinstance(item, dict) and (item.get("status") or "") == "skipped"]
+          failed = [item for item in results if isinstance(item, dict) and (item.get("status") or "") == "failed"]
+
+          parts: list[str] = []
+          append_line(parts, "## Plan")
+          append_line(parts, "")
+          append_line(parts, f"- generated at: {plan.get('generated_at', '')}")
+          append_line(parts, f"- total targets: {plan.get('total_targets', 0)}")
+          append_line(parts, f"- batch size: {plan.get('batch_size', 0)}")
+          append_line(parts, f"- total batches: {plan.get('total_batches', 0)}")
+          append_line(parts, f"- create project: {plan_counts.get('create_project', 0)}")
+          append_line(parts, f"- update project: {plan_counts.get('update_project', 0)}")
+          append_line(parts, f"- mirror only: {plan_counts.get('mirror_only', 0)}")
+          append_line(parts, f"- skip: {plan_counts.get('skip', 0)}")
+          append_line(parts, f"- fail: {plan_counts.get('fail', 0)}")
+
+          append_line(parts, "")
+          append_line(parts, "## Report")
+          append_line(parts, "")
+          append_line(parts, f"- generated at: {report.get('generated_at', '')}")
+          append_line(parts, f"- mirrored: {result_counts.get('mirrored', 0)}")
+          append_line(parts, f"- created empty: {result_counts.get('created_empty', 0)}")
+          append_line(parts, f"- updated empty: {result_counts.get('updated_empty', 0)}")
+          append_line(parts, f"- skipped: {result_counts.get('skipped', 0)}")
+          append_line(parts, f"- failed: {result_counts.get('failed', 0)}")
+
+          append_items(parts, "Skipped", skipped, "reason", MAX_SKIPPED_ITEMS)
+          append_items(parts, "Failed", failed, "error", MAX_FAILED_ITEMS)
+
+          text = "".join(parts)
+          if len(text) > MAX_SUMMARY_CHARS:
+              text = text[:MAX_SUMMARY_CHARS]
+              newline = text.rfind("\n")
+              if newline > 0:
+                  text = text[: newline + 1]
+              text += "\n_... truncated in step summary; see workflow artifacts for full JSON outputs._\n"
+
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as handle:
+              handle.write(text)
+          PY
 
       - name: Upload run artifacts
         # actions/upload-artifact v6.0.0
@@ -404,10 +472,8 @@ jobs:
           if-no-files-found: error
           path: |
             plan.json
-            plan.md
             results-artifacts/**
             report.json
-            report.md
             results.csv
             analytics.json
             results.parquet

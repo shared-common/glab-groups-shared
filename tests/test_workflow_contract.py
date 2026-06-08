@@ -47,6 +47,21 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("results-artifacts/results-*.jsonl", text)
         self.assertNotIn("Fail on mirror failures", text)
 
+    def test_step_summary_is_bounded(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("MAX_SUMMARY_CHARS = 900_000", text)
+        self.assertIn("MAX_SKIPPED_ITEMS = 50", text)
+        self.assertIn("MAX_FAILED_ITEMS = 50", text)
+        self.assertIn('append_line(parts, "## Plan")', text)
+        self.assertIn('append_line(parts, "## Report")', text)
+        self.assertIn("see workflow artifacts for full JSON outputs", text)
+        self.assertNotIn("plan.md\n            report.json", text)
+
+    def test_markdown_files_are_not_uploaded_as_artifacts(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertNotIn("plan.md", text.split("Upload plan artifact", 1)[1].split("Cleanup secrets", 1)[0])
+        self.assertNotIn("report.md", text.split("Upload run artifacts", 1)[1])
+
 
 if __name__ == "__main__":
     unittest.main()
