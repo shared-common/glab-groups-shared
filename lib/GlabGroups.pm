@@ -1096,6 +1096,8 @@ sub _normalize_defaults_payload {
         git_timeout_seconds => _defaulted_positive_int( $payload->{git_timeout_seconds}, $DEFAULTS{git_timeout_seconds}, "$label.defaults.git_timeout_seconds" ),
         max_blob_bytes => _defaulted_bounded_positive_int( $payload->{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, "$label.defaults.max_blob_bytes" ),
         mirror_pristine_tar => _bool_or_default( $payload->{mirror_pristine_tar}, 1 ),
+        read_retry_attempts => _defaulted_positive_int( $payload->{read_retry_attempts}, $GITLAB_READ_DEFAULTS{retry_attempts}, "$label.defaults.read_retry_attempts" ),
+        read_retry_backoff_seconds => _defaulted_positive_int( $payload->{read_retry_backoff_seconds}, $GITLAB_READ_DEFAULTS{retry_backoff_seconds}, "$label.defaults.read_retry_backoff_seconds" ),
         retry_attempts => _defaulted_positive_int( $payload->{retry_attempts}, $DEFAULTS{retry_attempts}, "$label.defaults.retry_attempts" ),
         retry_backoff_seconds => _defaulted_positive_int( $payload->{retry_backoff_seconds}, $DEFAULTS{retry_backoff_seconds}, "$label.defaults.retry_backoff_seconds" ),
         size_limit_bytes => _defaulted_bounded_positive_int( $payload->{size_limit_bytes}, $DEFAULTS{size_limit_bytes}, $DEFAULTS{size_limit_bytes}, "$label.defaults.size_limit_bytes" ),
@@ -1114,6 +1116,8 @@ sub _normalize_namespace {
         git_timeout_seconds => $payload->{git_timeout_seconds},
         mirror_pristine_tar => _optional_bool( $payload->{mirror_pristine_tar} ),
         name => _required_string( $payload->{name}, "$label.name" ),
+        read_retry_attempts => _optional_positive_int( $payload->{read_retry_attempts}, "$label.read_retry_attempts" ),
+        read_retry_backoff_seconds => _optional_positive_int( $payload->{read_retry_backoff_seconds}, "$label.read_retry_backoff_seconds" ),
         retry_attempts => _optional_positive_int( $payload->{retry_attempts}, "$label.retry_attempts" ),
         retry_backoff_seconds => _optional_positive_int( $payload->{retry_backoff_seconds}, "$label.retry_backoff_seconds" ),
         size_limit_bytes => _optional_bounded_positive_int( $payload->{size_limit_bytes}, $DEFAULTS{size_limit_bytes}, "$label.size_limit_bytes" ),
@@ -1136,6 +1140,8 @@ sub _normalize_project {
         git_timeout_seconds => $payload->{git_timeout_seconds},
         mirror_pristine_tar => _optional_bool( $payload->{mirror_pristine_tar} ),
         name => _required_path_segment( $payload->{name}, "$label.name" ),
+        read_retry_attempts => _optional_positive_int( $payload->{read_retry_attempts}, "$label.read_retry_attempts" ),
+        read_retry_backoff_seconds => _optional_positive_int( $payload->{read_retry_backoff_seconds}, "$label.read_retry_backoff_seconds" ),
         retry_attempts => _optional_positive_int( $payload->{retry_attempts}, "$label.retry_attempts" ),
         retry_backoff_seconds => _optional_positive_int( $payload->{retry_backoff_seconds}, "$label.retry_backoff_seconds" ),
         size_limit_bytes => _optional_bounded_positive_int( $payload->{size_limit_bytes}, $DEFAULTS{size_limit_bytes}, "$label.size_limit_bytes" ),
@@ -1156,6 +1162,8 @@ sub _normalize_override {
         force_lfs => _optional_bool( $payload->{force_lfs} ),
         git_timeout_seconds => $payload->{git_timeout_seconds},
         mirror_pristine_tar => _optional_bool( $payload->{mirror_pristine_tar} ),
+        read_retry_attempts => _optional_positive_int( $payload->{read_retry_attempts}, "$label.read_retry_attempts" ),
+        read_retry_backoff_seconds => _optional_positive_int( $payload->{read_retry_backoff_seconds}, "$label.read_retry_backoff_seconds" ),
         retry_attempts => _optional_positive_int( $payload->{retry_attempts}, "$label.retry_attempts" ),
         retry_backoff_seconds => _optional_positive_int( $payload->{retry_backoff_seconds}, "$label.retry_backoff_seconds" ),
         size_limit_bytes => _optional_bounded_positive_int( $payload->{size_limit_bytes}, $DEFAULTS{size_limit_bytes}, "$label.size_limit_bytes" ),
@@ -1175,6 +1183,8 @@ sub _merge_policy {
           git_timeout_seconds
           max_blob_bytes
           mirror_pristine_tar
+          read_retry_attempts
+          read_retry_backoff_seconds
           retry_attempts
           retry_backoff_seconds
           size_limit_bytes
@@ -1195,6 +1205,8 @@ sub _merge_policy {
         @{ $override->{additional_tags} || [] },
     ];
     $policy->{git_timeout_seconds} ||= $DEFAULTS{git_timeout_seconds};
+    $policy->{read_retry_attempts} ||= $GITLAB_READ_DEFAULTS{retry_attempts};
+    $policy->{read_retry_backoff_seconds} ||= $GITLAB_READ_DEFAULTS{retry_backoff_seconds};
     $policy->{retry_attempts} ||= $DEFAULTS{retry_attempts};
     $policy->{retry_backoff_seconds} ||= $DEFAULTS{retry_backoff_seconds};
     $policy->{size_limit_bytes} ||= $DEFAULTS{size_limit_bytes};
@@ -2372,10 +2384,10 @@ sub _gitlab_read_request_opt {
     my $retry_attempts = $GITLAB_READ_DEFAULTS{retry_attempts};
     my $retry_backoff = $GITLAB_READ_DEFAULTS{retry_backoff_seconds};
     if ( $policy && ref($policy) eq "HASH" ) {
-        $retry_attempts = $policy->{retry_attempts}
-          if $policy->{retry_attempts} && $policy->{retry_attempts} > $retry_attempts;
-        $retry_backoff = $policy->{retry_backoff_seconds}
-          if $policy->{retry_backoff_seconds} && $policy->{retry_backoff_seconds} > $retry_backoff;
+        $retry_attempts = $policy->{read_retry_attempts}
+          if $policy->{read_retry_attempts};
+        $retry_backoff = $policy->{read_retry_backoff_seconds}
+          if $policy->{read_retry_backoff_seconds};
     }
     return {
         max_time_seconds => $GITLAB_READ_DEFAULTS{max_time_seconds},

@@ -1025,6 +1025,8 @@ HTML
         {},
         "root",
         {
+            read_retry_attempts => 2,
+            read_retry_backoff_seconds => 5,
             retry_attempts => 7,
             retry_backoff_seconds => 9,
         }
@@ -1038,8 +1040,22 @@ HTML
         !( scalar grep { $_->{path} =~ /include_subgroups=true/ } @requests ),
         "group inventory no longer relies on include_subgroups project listing",
     );
-    is( $requests[0]->{opt}->{retry_attempts}, 7, "group inventory forwards stronger read retry attempts" );
-    is( $requests[0]->{opt}->{retry_backoff_seconds}, 9, "group inventory forwards stronger read retry backoff" );
+    is( $requests[0]->{opt}->{retry_attempts}, 2, "group inventory uses the read-specific retry attempts" );
+    is( $requests[0]->{opt}->{retry_backoff_seconds}, 5, "group inventory uses the read-specific retry backoff" );
+}
+
+{
+    my $opt = GlabGroups::_git_command_options(
+        {
+            read_retry_attempts => 2,
+            read_retry_backoff_seconds => 5,
+            retry_attempts => 7,
+            retry_backoff_seconds => 9,
+        },
+        JSON::PP::true,
+    );
+    is( $opt->{retry_attempts}, 7, "git command retries continue to use retry_attempts" );
+    is( $opt->{retry_backoff_seconds}, 9, "git command retries continue to use retry_backoff_seconds" );
 }
 
 {

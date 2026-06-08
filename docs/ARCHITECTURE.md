@@ -67,6 +67,8 @@ The mirror stage:
   installation, and minting short-lived installation access tokens
 - uses longer bounded retries for GitLab read requests during discovery to ride
   out transient 5xx and timeout failures from upstream GitLab/Varnish
+- lets each config directory tune discovery/read retry counts separately from
+  retryable git mirror operations
 - fetches only the selected branches and tags
 - always includes the source default branch in source-side selection
 - mirrors the source default branch into target `gitlab/mcr/main`

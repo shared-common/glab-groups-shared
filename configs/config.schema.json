@@ -210,6 +210,14 @@
           "type": "boolean",
           "default": true
         },
+        "read_retry_attempts": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "read_retry_backoff_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
         "retry_attempts": {
           "type": "integer",
           "minimum": 1
