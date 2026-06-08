@@ -93,6 +93,8 @@ only when a mirror or explicit target-preparation step actually needs them.
 Each config directory exposes these defaults:
 
 - `mirror_pristine_tar`: always mirror detected `pristine-tar` branch or tag
+- `gitlab_source_include_subgroups`: optional GitLab source discovery mode that
+  uses `include_subgroups=true` instead of subgroup-by-subgroup traversal
 - `read_retry_attempts`: retry count for plan/discovery GitLab API reads
 - `read_retry_backoff_seconds`: backoff for plan/discovery GitLab API reads
 - `additional_branches`: extra branch names to mirror on every run when present
@@ -113,6 +115,11 @@ branch lands, the runtime bootstraps these target-only branches when missing:
 
 Those `mcr/*` branches are one-shot target bootstrap branches. They are not
 force-synced from source on later runs.
+
+Plan runs also reuse a cached normalized source inventory artifact between
+workflow runs when the cache is still fresh. The shared workflow currently treats
+an inventory cache younger than 18 hours as reusable and rewrites the cache
+after rediscovery.
 
 ## Validation
 

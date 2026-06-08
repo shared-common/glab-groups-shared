@@ -143,6 +143,42 @@ jobs:
           path: gh-actions-cfg
           persist-credentials: false
 
+      - name: Compute inventory cache bucket
+        id: inventory_cache_key
+        shell: bash
+        env:
+          CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          set -euo pipefail
+          printf 'bucket=%s\n' "$(date -u +%Y-%m-%d)" >> "${GITHUB_OUTPUT}"
+          mapfile -t inventory_key_files < <(
+            printf '%s\n' \
+              "shared/lib/GlabGroups.pm" \
+              "shared/.github/workflows/group-sync-core.yml"
+            find "gh-actions-cfg/${CONFIG_PATH}" -maxdepth 1 -type f | LC_ALL=C sort
+          )
+          inventory_content_hash="$(
+            printf '%s\0' "${inventory_key_files[@]}" \
+            | xargs -0 sha256sum \
+            | sha256sum \
+            | awk '{print $1}'
+          )"
+          printf 'content-hash=%s\n' "${inventory_content_hash}" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore source inventory cache
+        uses: actions/cache@v4
+        with:
+          path: inventory-cache
+          key: >-
+            ${{ format(
+              'glab-groups-inventory-{0}-{1}-{2}',
+              inputs.config-path,
+              steps.inventory_cache_key.outputs.bucket,
+              steps.inventory_cache_key.outputs.content-hash
+            ) }}
+          restore-keys: |
+            ${{ format('glab-groups-inventory-{0}-', inputs.config-path) }}
+
       - name: Resolve BWS secret list
         id: config_meta
         shell: bash
@@ -221,6 +257,9 @@ jobs:
             plan \
             --config-dir "gh-actions-cfg/${{ inputs.config-path }}" \
             --batch-size "${{ inputs.batch-size }}" \
+            --inventory-input "inventory-cache/discover.json" \
+            --inventory-output "inventory-cache/discover.json" \
+            --inventory-max-age-seconds 64800 \
             --output plan.json \
             --summary plan.md
 

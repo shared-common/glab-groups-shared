@@ -78,6 +78,15 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("plan.md", text.split("Upload plan artifact", 1)[1].split("Cleanup secrets", 1)[0])
         self.assertNotIn("report.md", text.split("Upload run artifacts", 1)[1])
 
+    def test_plan_uses_inventory_cache(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("Restore source inventory cache", text)
+        self.assertIn("actions/cache@v4", text)
+        self.assertIn("inventory-cache", text)
+        self.assertIn("--inventory-input \"inventory-cache/discover.json\"", text)
+        self.assertIn("--inventory-output \"inventory-cache/discover.json\"", text)
+        self.assertIn("--inventory-max-age-seconds 64800", text)
+
 
 if __name__ == "__main__":
     unittest.main()

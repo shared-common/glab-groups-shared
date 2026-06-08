@@ -41,7 +41,7 @@ my %DEFAULTS = (
 
 my %GITLAB_READ_DEFAULTS = (
     max_time_seconds => 120,
-    page_size => 50,
+    page_size => 100,
     retry_attempts => 6,
     retry_backoff_seconds => 5,
     timeout_seconds => 150,
@@ -338,6 +338,9 @@ sub _cmd_plan {
     my (@argv) = @_;
     my %opt = (
         batch_size => 25,
+        inventory_max_age_seconds => 64_800,
+        inventory_input => q{},
+        inventory_output => q{},
         output => "plan.json",
         summary => "plan.md",
     );
@@ -345,17 +348,59 @@ sub _cmd_plan {
         \@argv,
         "config-dir=s" => \$opt{config_dir},
         "batch-size=i" => \$opt{batch_size},
+        "inventory-input=s" => \$opt{inventory_input},
+        "inventory-output=s" => \$opt{inventory_output},
+        "inventory-max-age-seconds=i" => \$opt{inventory_max_age_seconds},
         "output=s" => \$opt{output},
         "summary=s" => \$opt{summary},
     ) or die _usage();
 
     my $config = load_config_dir( $opt{config_dir} );
-    my $inventory = _discover_inventory($config);
-    my $normalized = _normalize_inventory($inventory);
+    my $normalized = _load_or_discover_inventory(
+        $config,
+        {
+            input_path => $opt{inventory_input},
+            max_age_seconds => $opt{inventory_max_age_seconds},
+        }
+    );
+    _write_json( $opt{inventory_output}, $normalized ) if $opt{inventory_output};
     my $plan = _build_plan( $config, $normalized, $opt{batch_size} );
     _write_json( $opt{output}, $plan );
     _write_text( $opt{summary}, _render_plan_summary($plan) );
     return 0;
+}
+
+sub _load_or_discover_inventory {
+    my ( $config, $opt ) = @_;
+    $opt ||= {};
+
+    my $input_path = $opt->{input_path} || q{};
+    if ( $input_path && -f $input_path ) {
+        my $cached = eval {
+            my $inventory = _read_json($input_path);
+            _normalize_inventory($inventory);
+        };
+        if ($cached) {
+            return $cached if _inventory_cache_is_fresh( $cached, $opt->{max_age_seconds} );
+        }
+        else {
+            warn "ignoring unreadable inventory cache $input_path: " . _trim_error($@) . "\n";
+        }
+    }
+
+    my $inventory = _discover_inventory($config);
+    return _normalize_inventory($inventory);
+}
+
+sub _inventory_cache_is_fresh {
+    my ( $inventory, $max_age_seconds ) = @_;
+    return 0 unless ref($inventory) eq "HASH";
+    my $discovered_at = $inventory->{discovered_at};
+    return 0 unless defined $discovered_at && !ref($discovered_at) && length $discovered_at;
+    my $discovered_epoch = eval { _parse_iso8601_utc_epoch($discovered_at) };
+    return 0 unless defined $discovered_epoch;
+    return 1 if !defined $max_age_seconds || $max_age_seconds < 1;
+    return ( time() - $discovered_epoch ) <= $max_age_seconds ? 1 : 0;
 }
 
 sub _cmd_prepare_target {
@@ -1093,6 +1138,7 @@ sub _normalize_defaults_payload {
         git_timeout_seconds => _defaulted_positive_int( $payload->{git_timeout_seconds}, $DEFAULTS{git_timeout_seconds}, "$label.defaults.git_timeout_seconds" ),
         max_blob_bytes => _defaulted_bounded_positive_int( $payload->{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, "$label.defaults.max_blob_bytes" ),
         mirror_pristine_tar => _bool_or_default( $payload->{mirror_pristine_tar}, 1 ),
+        gitlab_source_include_subgroups => _bool_or_default( $payload->{gitlab_source_include_subgroups}, 0 ),
         read_retry_attempts => _defaulted_positive_int( $payload->{read_retry_attempts}, $GITLAB_READ_DEFAULTS{retry_attempts}, "$label.defaults.read_retry_attempts" ),
         read_retry_backoff_seconds => _defaulted_positive_int( $payload->{read_retry_backoff_seconds}, $GITLAB_READ_DEFAULTS{retry_backoff_seconds}, "$label.defaults.read_retry_backoff_seconds" ),
         retry_attempts => _defaulted_positive_int( $payload->{retry_attempts}, $DEFAULTS{retry_attempts}, "$label.defaults.retry_attempts" ),
@@ -1111,6 +1157,7 @@ sub _normalize_namespace {
         allow_blob_rewrite => _optional_bool( $payload->{allow_blob_rewrite} ),
         force_lfs => _optional_bool( $payload->{force_lfs} ),
         git_timeout_seconds => $payload->{git_timeout_seconds},
+        gitlab_source_include_subgroups => _optional_bool( $payload->{gitlab_source_include_subgroups} ),
         mirror_pristine_tar => _optional_bool( $payload->{mirror_pristine_tar} ),
         name => _required_string( $payload->{name}, "$label.name" ),
         read_retry_attempts => _optional_positive_int( $payload->{read_retry_attempts}, "$label.read_retry_attempts" ),
@@ -1135,6 +1182,7 @@ sub _normalize_project {
         allow_blob_rewrite => _optional_bool( $payload->{allow_blob_rewrite} ),
         force_lfs => _optional_bool( $payload->{force_lfs} ),
         git_timeout_seconds => $payload->{git_timeout_seconds},
+        gitlab_source_include_subgroups => _optional_bool( $payload->{gitlab_source_include_subgroups} ),
         mirror_pristine_tar => _optional_bool( $payload->{mirror_pristine_tar} ),
         name => _required_path_segment( $payload->{name}, "$label.name" ),
         read_retry_attempts => _optional_positive_int( $payload->{read_retry_attempts}, "$label.read_retry_attempts" ),
@@ -1158,6 +1206,7 @@ sub _normalize_override {
         allow_blob_rewrite => _optional_bool( $payload->{allow_blob_rewrite} ),
         force_lfs => _optional_bool( $payload->{force_lfs} ),
         git_timeout_seconds => $payload->{git_timeout_seconds},
+        gitlab_source_include_subgroups => _optional_bool( $payload->{gitlab_source_include_subgroups} ),
         mirror_pristine_tar => _optional_bool( $payload->{mirror_pristine_tar} ),
         read_retry_attempts => _optional_positive_int( $payload->{read_retry_attempts}, "$label.read_retry_attempts" ),
         read_retry_backoff_seconds => _optional_positive_int( $payload->{read_retry_backoff_seconds}, "$label.read_retry_backoff_seconds" ),
@@ -1178,6 +1227,7 @@ sub _merge_policy {
           allow_blob_rewrite
           force_lfs
           git_timeout_seconds
+          gitlab_source_include_subgroups
           max_blob_bytes
           mirror_pristine_tar
           read_retry_attempts
@@ -1506,6 +1556,24 @@ sub _is_gitlab_path_conflict_error {
     return 0;
 }
 
+sub _is_gitlab_already_exists_error {
+    my ($error) = @_;
+    return 0 unless defined $error && !ref($error);
+    return 1 if $error =~ /already exists/i;
+    return 1 if $error =~ /has already been taken/i;
+    return 0;
+}
+
+sub _is_gitlab_missing_ref_error {
+    my ($error) = @_;
+    return 0 unless defined $error && !ref($error);
+    return 1 if $error =~ /invalid reference name/i;
+    return 1 if $error =~ /branch .* does not exist/i;
+    return 1 if $error =~ /ref .* does not exist/i;
+    return 1 if $error =~ /not a valid reference/i;
+    return 0;
+}
+
 sub _ensure_target_project {
     my ( $client, $entry ) = @_;
     my $group_cache = $client->{group_path_cache} ||= {};
@@ -1690,50 +1758,74 @@ sub _ensure_managed_target_branches {
     );
 
     my $managed_default_branch = q{};
+    my %branch_exists;
     for my $spec (@specs) {
-        my $branch = _ensure_target_branch_from_ref( $client, $project_id, $spec->{name}, $spec->{ref} );
-        next unless $branch;
-        if ( $spec->{protect} ) {
-            $branch = _ensure_target_branch_protected( $client, $project_id, $spec->{name}, $branch );
-        }
-        $managed_default_branch = $spec->{name} if $spec->{default};
+        my $exists = _ensure_target_branch_from_ref(
+            $client,
+            $project_id,
+            $spec->{name},
+            $spec->{ref},
+            \%branch_exists,
+        );
+        next unless $exists;
+        _ensure_target_branch_protected( $client, $project_id, $spec->{name} ) if $spec->{protect};
+        $branch_exists{ $spec->{name} } = 1;
+        $managed_default_branch = $spec->{name} if $spec->{default} && $branch_exists{ $spec->{name} };
     }
 
-    return $managed_default_branch && _get_branch( $client, $project_id, $managed_default_branch )
+    return $managed_default_branch && $branch_exists{$managed_default_branch}
       ? $managed_default_branch
       : q{};
 }
 
 sub _ensure_target_branch_from_ref {
-    my ( $client, $project_id, $branch_name, $ref_name ) = @_;
-    my $branch = _get_branch( $client, $project_id, $branch_name );
-    return $branch if $branch;
-    return undef unless _get_branch( $client, $project_id, $ref_name );
-    return _gitlab_request(
-        $client,
-        "POST",
-        "/projects/$project_id/repository/branches",
-        {
-            branch => $branch_name,
-            ref => $ref_name,
-        }
-    );
+    my ( $client, $project_id, $branch_name, $ref_name, $branch_exists ) = @_;
+    return 1 if $branch_exists && $branch_exists->{$branch_name};
+
+    my $create_ok = eval {
+        _gitlab_request(
+            $client,
+            "POST",
+            "/projects/$project_id/repository/branches",
+            {
+                branch => $branch_name,
+                ref => $ref_name,
+            }
+        );
+        1;
+    };
+    if ($create_ok) {
+        $branch_exists->{$branch_name} = 1 if $branch_exists;
+        return 1;
+    }
+
+    my $create_error = $@ || "unknown branch creation error\n";
+    if ( _is_gitlab_already_exists_error($create_error) ) {
+        $branch_exists->{$branch_name} = 1 if $branch_exists;
+        return 1;
+    }
+    return 0 if _is_gitlab_missing_ref_error($create_error);
+    die $create_error;
 }
 
 sub _ensure_target_branch_protected {
-    my ( $client, $project_id, $branch_name, $branch ) = @_;
-    $branch ||= _get_branch( $client, $project_id, $branch_name );
-    return undef unless $branch;
-    return $branch if $branch->{protected};
-    _gitlab_request(
-        $client,
-        "POST",
-        "/projects/$project_id/protected_branches",
-        {
-            name => $branch_name,
-        }
-    );
-    return _get_branch( $client, $project_id, $branch_name );
+    my ( $client, $project_id, $branch_name ) = @_;
+    my $protect_ok = eval {
+        _gitlab_request(
+            $client,
+            "POST",
+            "/projects/$project_id/protected_branches",
+            {
+                name => $branch_name,
+            }
+        );
+        1;
+    };
+    return 1 if $protect_ok;
+
+    my $protect_error = $@ || "unknown protected branch error\n";
+    return 1 if _is_gitlab_already_exists_error($protect_error);
+    die $protect_error;
 }
 
 sub _list_gitlab_top_level_groups {
@@ -1931,7 +2023,11 @@ sub _list_cgit_root_projects {
 
 sub _list_group_projects {
     my ( $client, $group_path, $policy ) = @_;
-    my $group = _get_group( $client, $group_path );
+    if ( $policy && $policy->{gitlab_source_include_subgroups} ) {
+        return _list_group_projects_include_subgroups( $client, $group_path, $policy );
+    }
+
+    my $group = _get_group( $client, $group_path, _gitlab_read_request_opt($policy) );
     return [] unless $group;
 
     my @projects;
@@ -1960,6 +2056,38 @@ sub _list_group_projects {
         } @{ _list_group_subgroups( $client, $group_id, $policy ) };
     }
 
+    return \@projects;
+}
+
+sub _list_group_projects_include_subgroups {
+    my ( $client, $group_path, $policy ) = @_;
+    my $group = _get_group( $client, $group_path, _gitlab_read_request_opt($policy) );
+    return [] unless $group;
+
+    my @projects;
+    my %seen_project_ids;
+    my $page = 1;
+    my $page_size = _gitlab_read_page_size($policy);
+    my $request_opt = _gitlab_read_request_opt($policy);
+    while (1) {
+        my $path = sprintf(
+            "/groups/%s/projects?include_subgroups=true&with_shared=false&per_page=%d&page=%d",
+            $group->{id},
+            $page_size,
+            $page,
+        );
+        my $data = _gitlab_request( $client, "GET", $path, undef, $request_opt );
+        ref($data) eq "ARRAY" or die "group include_subgroups projects response must be a list\n";
+        last unless @{$data};
+        for my $project ( @{$data} ) {
+            next unless ref($project) eq "HASH";
+            my $project_id = $project->{id};
+            next if defined $project_id && $seen_project_ids{$project_id}++;
+            push @projects, $project;
+        }
+        last if @{$data} < $page_size;
+        $page++;
+    }
     return \@projects;
 }
 

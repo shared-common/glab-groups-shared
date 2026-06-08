@@ -201,6 +201,10 @@
           "type": "integer",
           "minimum": 1
         },
+        "gitlab_source_include_subgroups": {
+          "type": "boolean",
+          "default": false
+        },
         "max_blob_bytes": {
           "type": "integer",
           "minimum": 1,

@@ -49,6 +49,10 @@ Planning only inventories existing target namespace state under each configured
 target root. It does not create missing target groups; missing namespace paths
 are resolved later during target preparation or mirroring.
 
+The plan job can also reuse a cached normalized source inventory between
+workflow runs. When the cached inventory is still fresh, the plan step skips
+source rediscovery and rebuilds only the target-side plan state.
+
 ## Mirroring model
 
 The mirror stage:
@@ -62,9 +66,13 @@ The mirror stage:
   group expansion, GitHub organization repository pagination, direct repository
   inspection for explicit project URLs, and cgit root scraping instead of
   relying on one source-specific integration path
+- can use GitLab `include_subgroups=true` project enumeration for source group
+  discovery when the config enables `gitlab_source_include_subgroups`
 - authenticates GitHub-source discovery and Git-over-HTTPS mirroring with the
   shared GitHub App by generating a JWT, resolving the source-account
   installation, and minting short-lived installation access tokens
+- keeps explicit public project URLs on plain HTTPS git without source-auth
+  injection during discovery or mirror execution
 - uses longer bounded retries for GitLab read requests during discovery to ride
   out transient 5xx and timeout failures from upstream GitLab/Varnish
 - lets each config directory tune discovery/read retry counts separately from

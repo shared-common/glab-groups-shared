@@ -480,6 +480,42 @@ HTML
 }
 
 {
+    no warnings 'redefine';
+    my $dir = tempdir( CLEANUP => 1 );
+    my $cache_path = File::Spec->catfile( $dir, "discover.json" );
+
+    write_json_file(
+        $cache_path,
+        {
+            discovered_at => GlabGroups::_timestamp(),
+            inventory => [
+                {
+                    group_path => "root",
+                    projects => [
+                        {
+                            path_with_namespace => "root/project-a",
+                        },
+                    ],
+                },
+            ],
+        }
+    );
+
+    local *GlabGroups::_discover_inventory = sub {
+        die "_discover_inventory should not be called when the cached inventory is still fresh";
+    };
+
+    my $inventory = GlabGroups::_load_or_discover_inventory(
+        {},
+        {
+            input_path => $cache_path,
+            max_age_seconds => 64_800,
+        }
+    );
+    is( $inventory->{inventory}->[0]->{projects}->[0]->{path_with_namespace}, "root/project-a", "plan inventory cache reuse keeps the cached project inventory" );
+}
+
+{
     my $refs = resolve_selected_refs(
         "main",
         {
@@ -1114,14 +1150,14 @@ HTML
         push @requests, { method => $method, path => $path, opt => $opt };
         return [
             { id => 101, path_with_namespace => "root/project-a" },
-        ] if $method eq "GET" && $path eq "/groups/1/projects?include_subgroups=false&with_shared=false&per_page=50&page=1";
+        ] if $method eq "GET" && $path eq "/groups/1/projects?include_subgroups=false&with_shared=false&per_page=100&page=1";
         return [
             { id => 2, full_path => "root/sub", path => "sub" },
-        ] if $method eq "GET" && $path eq "/groups/1/subgroups?per_page=50&page=1";
+        ] if $method eq "GET" && $path eq "/groups/1/subgroups?per_page=100&page=1";
         return [
             { id => 102, path_with_namespace => "root/sub/project-b" },
-        ] if $method eq "GET" && $path eq "/groups/2/projects?include_subgroups=false&with_shared=false&per_page=50&page=1";
-        return [] if $method eq "GET" && $path eq "/groups/2/subgroups?per_page=50&page=1";
+        ] if $method eq "GET" && $path eq "/groups/2/projects?include_subgroups=false&with_shared=false&per_page=100&page=1";
+        return [] if $method eq "GET" && $path eq "/groups/2/subgroups?per_page=100&page=1";
         die "unexpected gitlab request: $method $path";
     };
 
@@ -1146,6 +1182,47 @@ HTML
     );
     is( $requests[0]->{opt}->{retry_attempts}, 2, "group inventory uses the read-specific retry attempts" );
     is( $requests[0]->{opt}->{retry_backoff_seconds}, 5, "group inventory uses the read-specific retry backoff" );
+}
+
+{
+    no warnings 'redefine';
+    my @requests;
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        push @requests, { method => $method, path => $path, opt => $opt };
+        return { id => 1, full_path => "root", path => "root" }
+          if $method eq "GET" && $path eq "/groups/root";
+        return [
+            { id => 101, path_with_namespace => "root/project-a" },
+            { id => 102, path_with_namespace => "root/sub/project-b" },
+        ] if $method eq "GET" && $path eq "/groups/1/projects?include_subgroups=true&with_shared=false&per_page=100&page=1";
+        return [] if $method eq "GET" && $path eq "/groups/1/projects?include_subgroups=true&with_shared=false&per_page=100&page=2";
+        die "unexpected gitlab request: $method $path";
+    };
+
+    my $projects = GlabGroups::_list_group_projects(
+        {},
+        "root",
+        {
+            gitlab_source_include_subgroups => JSON::PP::true,
+            read_retry_attempts => 2,
+            read_retry_backoff_seconds => 5,
+        }
+    );
+    is_deeply(
+        [ map { $_->{path_with_namespace} } @{$projects} ],
+        [ "root/project-a", "root/sub/project-b" ],
+        "include_subgroups discovery can enumerate subgroup projects without subgroup traversal",
+    );
+    ok(
+        !( scalar grep { $_->{path} =~ /\/subgroups\?/ } @requests ),
+        "include_subgroups discovery avoids subgroup listing API calls",
+    );
+    ok(
+        scalar( grep { $_->{path} =~ /include_subgroups=true/ } @requests ),
+        "include_subgroups discovery uses the GitLab include_subgroups project listing mode",
+    );
 }
 
 {
