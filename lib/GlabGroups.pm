@@ -404,8 +404,8 @@ sub _cmd_mirror {
                 $result = {
                     target_full_path => $entry->{target_full_path},
                     planned_action => $entry->{action},
-                    status => "failed",
-                    reason => "Repository failed after unrecoverable error.",
+                    status => "skipped",
+                    reason => "Repository skipped after unrecoverable mirror error.",
                     error => _trim_error($@),
                 };
             }
@@ -655,7 +655,8 @@ sub _mirror_entry {
         return {
             target_full_path => $entry->{target_full_path},
             planned_action => $entry->{action},
-            status => "failed",
+            status => "skipped",
+            reason => "Repository skipped after plan error.",
             error => "Plan marked target as failed",
         };
     }

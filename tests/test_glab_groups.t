@@ -130,6 +130,19 @@ sub run_cmd {
 }
 
 {
+    my $result = GlabGroups::_mirror_entry(
+        {},
+        {},
+        {
+            action => "fail",
+            target_full_path => "owner/group/project",
+        },
+    );
+    is( $result->{status}, "skipped", "plan-level fail entries are downgraded to skipped mirrors" );
+    is( $result->{reason}, "Repository skipped after plan error.", "records a skip reason for plan-level failures" );
+}
+
+{
     no warnings 'redefine';
 
     local *GlabGroups::_load_target_client = sub { return {}; };

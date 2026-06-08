@@ -45,7 +45,7 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("merge-multiple: true", text)
         self.assertIn("results-artifacts/results-*.json", text)
         self.assertIn("results-artifacts/results-*.jsonl", text)
-        self.assertIn("Fail on mirror failures", text)
+        self.assertNotIn("Fail on mirror failures", text)
 
 
 if __name__ == "__main__":

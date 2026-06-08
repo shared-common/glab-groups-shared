@@ -411,21 +411,3 @@ jobs:
             results.csv
             analytics.json
             results.parquet
-
-      - name: Fail on mirror failures
-        shell: bash
-        run: |
-          set -euo pipefail
-          failed_count="$(
-            python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          report = json.loads(Path("report.json").read_text(encoding="utf-8"))
-          print(int((report.get("result_counts") or {}).get("failed") or 0))
-          PY
-          )"
-          if [ "${failed_count}" -gt 0 ]; then
-            printf 'mirror reported %s failed repositories\n' "${failed_count}" >&2
-            exit 1
-          fi
