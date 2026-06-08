@@ -12,6 +12,7 @@
       "enum": [
         "glab-groups/defaults",
         "glab-groups/namespaces",
+        "glab-groups/projects",
         "glab-groups/project-overrides",
         "glab-groups/project-exclusions"
       ]
@@ -59,6 +60,29 @@
             "minItems": 1,
             "items": {
               "$ref": "#/$defs/namespace"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "glab-groups/projects"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "projects"
+        ],
+        "properties": {
+          "projects": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/$defs/project"
             }
           }
         }
@@ -121,6 +145,10 @@
     "projectPath": {
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
+    },
+    "pathSegment": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
     },
     "refSpec": {
       "oneOf": [
@@ -221,6 +249,32 @@
               "$ref": "#/$defs/namespacePath"
             },
             "target_namespace_path": {
+              "$ref": "#/$defs/namespacePath"
+            }
+          }
+        }
+      ]
+    },
+    "project": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/policy"
+        },
+        {
+          "type": "object",
+          "required": [
+            "name",
+            "source_project_url",
+            "target_group_path"
+          ],
+          "properties": {
+            "name": {
+              "$ref": "#/$defs/pathSegment"
+            },
+            "source_project_url": {
+              "$ref": "#/$defs/httpsUrl"
+            },
+            "target_group_path": {
               "$ref": "#/$defs/namespacePath"
             }
           }

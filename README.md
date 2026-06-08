@@ -1,8 +1,8 @@
 # glab-groups-shared
 
 Shared GitHub Actions workflows and control-plane code for mirroring public
-source-group hierarchies and public repository collections into managed target
-namespaces.
+source-group hierarchies, public repository collections, and explicit
+single-project sources into managed target namespaces.
 
 ## Runtime split
 
@@ -22,6 +22,8 @@ Wrapper repositories call `.github/workflows/group-sync-core.yml` and pass:
 The shared workflow uploads plan, result, report, CSV, JSON, and optional
 Parquet artifacts on every run.
 
+Config directories can use `.json`, `.yml`, or `.yaml` files.
+
 Mirroring runs through deterministic batch shards with `max-parallel: 5`. Small
 plans still create one job per batch; larger plans cap the matrix at 256 jobs
 and let each shard process every 256th batch so GitHub Actions matrix limits are
@@ -39,6 +41,15 @@ Config `source_group_url` values can point at:
   from `GH_ORG_SHARED_APP_ID` and `GH_ORG_SHARED_APP_PEM`
 - a cgit root URL, such as `https://git.netfilter.org`, which mirrors the
   current root-level repositories discovered from the cgit index page
+
+Config `source_project_url` values can point at:
+
+- a single GitLab or GitHub repository URL, such as
+  `https://gitlab.com/WhyNotHugo/darkman`
+- a public Git-over-HTTPS repository URL, such as
+  `https://chromium.googlesource.com/chromiumos/user-recovery-tools`
+- a public cgit-style repository URL, such as
+  `https://git.code.sf.net/p/gptfdisk/code`
 
 ## Target namespace contract
 
@@ -58,14 +69,24 @@ and authenticates with:
 - `GL_PAT_GROUP_SMALL_SVC` for `glab-groups-small`
 - `GL_PAT_GROUP_KDE_SVC` for `glab-groups-kde`
 - `GL_PAT_GROUP_GNOME_SVC` for `glab-groups-gnome`
+- `GL_PAT_GROUP_PROJ_SVC` for `glab-groups-projects`
 
 Target group and project visibility is not created, updated, or finalized by
 this workflow. Configure visibility directly on the target GitLab owner/group
 outside the mirror run to avoid denied metadata writes and rate-limit pressure.
 
+Explicit single-project configs instead provide a full `target_group_path`
+such as `glab-forks/labwc`; the runtime creates or updates the target project
+as `<target_group_path>/<name>` without deriving target path segments from the
+source repository URL.
+
 Target project deletion stays outside this workflow. The shared runtime creates
 missing target projects, updates existing target project metadata, and skips
 archived sources.
+
+The planning phase inventories existing target namespace trees but does not
+pre-create missing target groups. Missing target namespace paths are resolved
+only when a mirror or explicit target-preparation step actually needs them.
 
 ## Ref selection
 

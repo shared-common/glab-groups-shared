@@ -3,14 +3,19 @@
 ## Overview
 
 `glab-groups-shared` is the reusable control plane for the Kali, Debian,
-freedesktop, small, KDE, and GNOME wrapper repositories. The shared workflow
-checks out this repository and the shared config repository, fetches target
-GitLab credentials from BWS, and then runs the Perl and Python tooling in a
-deterministic order.
+freedesktop, small, KDE, GNOME, and explicit-project wrapper repositories. The
+shared workflow checks out this repository and the shared config repository,
+fetches target GitLab credentials from BWS, and then runs the Perl and Python
+tooling in a deterministic order.
 
 Target paths in config are stored relative to the target owner group. The
 runtime composes full paths from `GL_BASE_URL`, namespace `target_owner_path`,
 and the configured relative namespace path.
+
+Explicit project configs are the exception: they provide a full
+`target_group_path`, and the runtime creates the destination as
+`<target_group_path>/<name>` without deriving any target path segments from the
+source repository URL.
 
 ## Execution order
 
@@ -32,13 +37,17 @@ optional Parquet file.
 The plan includes:
 
 - source project id and full path
-- target full path and target namespace id
+- target full path and any already-known target namespace id
 - source inventory fields required for mirroring and verification
 - deterministic action selection:
   - `update_project`
   - `mirror_only`
   - `skip`
   - `fail`
+
+Planning only inventories existing target namespace state under each configured
+target root. It does not create missing target groups; missing namespace paths
+are resolved later during target preparation or mirroring.
 
 ## Mirroring model
 
@@ -50,8 +59,9 @@ The mirror stage:
 - does not mutate GitLab archive state as part of mirror execution
 - never sets target group or project visibility
 - discovers source inventory through GitLab group traversal, GitLab top-level
-  group expansion, GitHub organization repository pagination, and cgit root
-  scraping instead of relying on one source-specific integration path
+  group expansion, GitHub organization repository pagination, direct repository
+  inspection for explicit project URLs, and cgit root scraping instead of
+  relying on one source-specific integration path
 - authenticates GitHub-source discovery and Git-over-HTTPS mirroring with the
   shared GitHub App by generating a JWT, resolving the source-account
   installation, and minting short-lived installation access tokens

@@ -3,6 +3,7 @@ package GlabGroups;
 use strict;
 use warnings;
 
+use CPAN::Meta::YAML ();
 use Exporter qw(import);
 use File::Basename qw(dirname basename);
 use File::Path qw(make_path);
@@ -101,18 +102,19 @@ sub load_config_dir {
     defined $config_dir && -d $config_dir or die "config dir not found: $config_dir\n";
 
     opendir( my $dh, $config_dir ) or die "unable to read config dir: $config_dir\n";
-    my @files = sort grep { /\.json\z/ && -f File::Spec->catfile( $config_dir, $_ ) } readdir($dh);
+    my @files = sort grep { /\.(?:json|ya?ml)\z/ && -f File::Spec->catfile( $config_dir, $_ ) } readdir($dh);
     closedir($dh);
 
     my %config = (
         defaults => { %DEFAULTS, additional_branches => [], additional_tags => [] },
         namespaces => [],
+        projects => [],
         overrides => {},
         exclusions => {},
     );
 
     for my $file (@files) {
-        my $payload = _read_json( File::Spec->catfile( $config_dir, $file ) );
+        my $payload = _read_config_payload( File::Spec->catfile( $config_dir, $file ) );
         ref($payload) eq "HASH" or die "config payload must be an object: $file\n";
         my $kind = _required_string( $payload->{kind}, "$file.kind" );
 
@@ -131,6 +133,16 @@ sub load_config_dir {
             for my $index ( 0 .. $#{$roots} ) {
                 push @{ $config{namespaces} },
                   _normalize_namespace( $roots->[$index], "$file.namespaces[$index]" );
+            }
+            next;
+        }
+
+        if ( $kind eq "glab-groups/projects" ) {
+            my $projects = $payload->{projects};
+            ref($projects) eq "ARRAY" or die "$file.projects must be a list\n";
+            for my $index ( 0 .. $#{$projects} ) {
+                push @{ $config{projects} },
+                  _normalize_project( $projects->[$index], "$file.projects[$index]" );
             }
             next;
         }
@@ -161,7 +173,8 @@ sub load_config_dir {
         die "unsupported config kind in $file: $kind\n";
     }
 
-    @{ $config{namespaces} } or die "config dir must contain at least one namespace root\n";
+    @{ $config{namespaces} } || @{ $config{projects} }
+      or die "config dir must contain at least one namespace root or explicit project\n";
     return \%config;
 }
 
@@ -206,12 +219,24 @@ sub classify_plan_action {
     return "fail" if !$source_project || ref($source_project) ne "HASH";
     return "create_project" if !$target_project;
 
-    my $source_description = _normalize_description( $source_project->{description} );
-    my $target_description = _normalize_description( $target_project->{description} );
+    my $check_description =
+      !exists( $source_project->{description_known} ) || $source_project->{description_known};
+    my $check_lfs =
+         $policy->{force_lfs}
+      || !exists( $source_project->{lfs_enabled_known} )
+      || $source_project->{lfs_enabled_known};
 
-    return "update_project"
-      if ( $target_description ne $source_description )
-      || ( !!$target_project->{lfs_enabled} != !!( $policy->{force_lfs} || $source_project->{lfs_enabled} ) );
+    if ($check_description) {
+        my $source_description = _normalize_description( $source_project->{description} );
+        my $target_description = _normalize_description( $target_project->{description} );
+        return "update_project" if $target_description ne $source_description;
+    }
+
+    if ($check_lfs) {
+        my $target_lfs_enabled = !!$target_project->{lfs_enabled};
+        my $source_lfs_enabled = !!( $policy->{force_lfs} || $source_project->{lfs_enabled} );
+        return "update_project" if $target_lfs_enabled != $source_lfs_enabled;
+    }
 
     return "mirror_only";
 }
@@ -524,6 +549,10 @@ sub _discover_inventory {
         my $policy = _merge_policy( $config->{defaults}, $namespace, {} );
         push @inventory, @{ _discover_namespace_inventory( $namespace, $policy, $source_auth ) };
     }
+    for my $project ( @{ $config->{projects} || [] } ) {
+        my $policy = _merge_policy( $config->{defaults}, $project, {} );
+        push @inventory, @{ _discover_project_inventory( $project, $policy, $source_auth ) };
+    }
     return {
         discovered_at => _timestamp(),
         inventory => \@inventory,
@@ -610,6 +639,44 @@ sub _discover_namespace_inventory {
     die "unsupported source kind: $source->{kind}\n";
 }
 
+sub _discover_project_inventory {
+    my ( $project, $policy, $source_auth ) = @_;
+    my $source = _parse_source_project_url( $project->{source_project_url}, $project->{name} );
+    my $project_source_auth = _resolve_source_auth_for_project_source( $source_auth, $source, $policy );
+    my $source_url = _maybe_auth_url(
+        $source->{clone_url},
+        $project_source_auth->{username},
+        $project_source_auth->{token},
+    );
+    my $available = _discover_remote_refs( $source_url, $policy );
+    my $has_refs =
+         scalar( keys %{ $available->{branches} || {} } )
+      || scalar( keys %{ $available->{tags} || {} } );
+
+    return [
+        {
+            base_url => $source->{base_url},
+            group_path => $source->{group_path},
+            project_entry => $project,
+            projects => [
+                {
+                    archived => JSON::PP::false,
+                    default_branch => $available->{default_branch},
+                    description => "",
+                    description_known => JSON::PP::false,
+                    empty_repo => $has_refs ? JSON::PP::false : JSON::PP::true,
+                    http_url_to_repo => $source->{clone_url},
+                    lfs_enabled => JSON::PP::false,
+                    lfs_enabled_known => JSON::PP::false,
+                    path_with_namespace => $source->{path_with_namespace},
+                    ssh_url_to_repo => $source->{clone_url},
+                    visibility => "public",
+                },
+            ],
+        },
+    ];
+}
+
 sub _normalize_inventory {
     my ($inventory) = @_;
     ref($inventory) eq "HASH" or die "inventory must be an object\n";
@@ -633,8 +700,7 @@ sub _normalize_inventory {
 sub _build_plan {
     my ( $config, $inventory, $batch_size ) = @_;
     my $target_client = _load_target_client();
-    my %group_cache;
-    my %project_index_cache;
+    my %target_namespace_state_cache;
     my @plan;
     my %counts = (
         create_project => 0,
@@ -645,13 +711,76 @@ sub _build_plan {
     );
 
     for my $bucket ( @{ $inventory->{inventory} || [] } ) {
+        if ( ref( $bucket->{project_entry} ) eq "HASH" ) {
+            my $project_entry = $bucket->{project_entry};
+            my $target_namespace_path = $project_entry->{target_group_path};
+            my $target_state_policy = _merge_policy( $config->{defaults}, $project_entry, {} );
+            my $target_state =
+              $target_namespace_state_cache{$target_namespace_path}
+              ||= _build_target_namespace_state( $target_client, $target_namespace_path, $target_state_policy );
+            my $target_projects_by_path = $target_state->{projects};
+            my $target_groups_by_path = $target_state->{groups};
+
+            for my $source_project ( @{ $bucket->{projects} || [] } ) {
+                my $source_full_path = _required_string( $source_project->{path_with_namespace}, "path_with_namespace" );
+                my $target_full_path = _join_path( $target_namespace_path, $project_entry->{name} );
+                my $override = $config->{overrides}->{$target_full_path} || {};
+                my $policy = _merge_policy( $config->{defaults}, $project_entry, $override );
+                my $target_project = $target_projects_by_path->{$target_full_path};
+                my $target_namespace_id = $target_groups_by_path->{$target_namespace_path};
+                my $skip_reason = $config->{exclusions}->{$target_full_path};
+                if ( !$skip_reason && $source_project->{archived} ) {
+                    $skip_reason = "Archived source repository is excluded from mirroring.";
+                }
+                my $action = classify_plan_action(
+                    $source_project,
+                    $target_project,
+                    $policy,
+                    $skip_reason,
+                );
+                $counts{$action}++;
+                push @plan,
+                  {
+                    action => $action,
+                    policy => $policy,
+                    skip_reason => $skip_reason,
+                    source_archived => !!$source_project->{archived},
+                    source_default_branch => $source_project->{default_branch},
+                    source_description => _normalize_description( $source_project->{description} ),
+                    source_description_known => $source_project->{description_known},
+                    source_empty_repo => !!$source_project->{empty_repo},
+                    source_full_path => $source_full_path,
+                    source_group_path => $bucket->{group_path},
+                    source_http_url => $source_project->{http_url_to_repo},
+                    source_lfs_enabled => !!$source_project->{lfs_enabled},
+                    source_lfs_enabled_known => $source_project->{lfs_enabled_known},
+                    source_last_activity_at => $source_project->{last_activity_at},
+                    source_project_id => $source_project->{id},
+                    source_ssh_url => $source_project->{ssh_url_to_repo},
+                    source_visibility => $source_project->{visibility},
+                    target_full_path => $target_full_path,
+                    target_relative_project_path => $target_full_path,
+                    target_namespace_id => $target_namespace_id,
+                    target_namespace_path => $target_namespace_path,
+                    target_description => $target_project ? _normalize_description( $target_project->{description} ) : undef,
+                    target_lfs_enabled => $target_project ? !!$target_project->{lfs_enabled} : undef,
+                    target_project_id => $target_project ? $target_project->{id} : undef,
+                    target_visibility => $target_project ? $target_project->{visibility} : undef,
+                  };
+            }
+            next;
+        }
+
         my $namespace = $bucket->{namespace};
         my $source_group_path = $bucket->{group_path};
         my $target_root_path = _resolve_target_root_group_path($namespace);
         my $target_namespace_root_path = _join_path( $target_root_path, $namespace->{target_namespace_path} );
-        my $target_projects_by_path =
-          $project_index_cache{$target_namespace_root_path}
-          ||= _build_target_project_index( $target_client, $target_namespace_root_path );
+        my $target_state_policy = _merge_policy( $config->{defaults}, $namespace, {} );
+        my $target_state =
+          $target_namespace_state_cache{$target_namespace_root_path}
+          ||= _build_target_namespace_state( $target_client, $target_namespace_root_path, $target_state_policy );
+        my $target_projects_by_path = $target_state->{projects};
+        my $target_groups_by_path = $target_state->{groups};
 
         for my $source_project ( @{ $bucket->{projects} || [] } ) {
             my $source_full_path = _required_string( $source_project->{path_with_namespace}, "path_with_namespace" );
@@ -662,8 +791,8 @@ sub _build_plan {
             my $target_namespace_path = dirname($target_full_path);
             my $override = $config->{overrides}->{$target_relative_project_path} || {};
             my $policy = _merge_policy( $config->{defaults}, $namespace, $override );
-            my $target_namespace_id = _ensure_group_path( $target_client, $target_namespace_path, \%group_cache );
             my $target_project = $target_projects_by_path->{$target_full_path};
+            my $target_namespace_id = $target_groups_by_path->{$target_namespace_path};
             my $skip_reason = $config->{exclusions}->{$target_relative_project_path};
             if ( !$skip_reason && $source_project->{archived} ) {
                 $skip_reason = "Archived source repository is excluded from mirroring.";
@@ -675,27 +804,31 @@ sub _build_plan {
                 $skip_reason,
             );
             $counts{$action}++;
-            push @plan,
-              {
-                action => $action,
-                policy => $policy,
-                skip_reason => $skip_reason,
-                source_archived => !!$source_project->{archived},
-                source_default_branch => $source_project->{default_branch},
-                source_description => _normalize_description( $source_project->{description} ),
-                source_empty_repo => !!$source_project->{empty_repo},
-                source_full_path => $source_full_path,
-                source_group_path => $source_group_path,
-                source_http_url => $source_project->{http_url_to_repo},
-                source_lfs_enabled => !!$source_project->{lfs_enabled},
-                source_last_activity_at => $source_project->{last_activity_at},
-                source_project_id => $source_project->{id},
-                source_ssh_url => $source_project->{ssh_url_to_repo},
+                push @plan,
+                  {
+                    action => $action,
+                    policy => $policy,
+                    skip_reason => $skip_reason,
+                    source_archived => !!$source_project->{archived},
+                    source_default_branch => $source_project->{default_branch},
+                    source_description => _normalize_description( $source_project->{description} ),
+                    source_description_known => $source_project->{description_known},
+                    source_empty_repo => !!$source_project->{empty_repo},
+                    source_full_path => $source_full_path,
+                    source_group_path => $source_group_path,
+                    source_http_url => $source_project->{http_url_to_repo},
+                    source_lfs_enabled => !!$source_project->{lfs_enabled},
+                    source_lfs_enabled_known => $source_project->{lfs_enabled_known},
+                    source_last_activity_at => $source_project->{last_activity_at},
+                    source_project_id => $source_project->{id},
+                    source_ssh_url => $source_project->{ssh_url_to_repo},
                 source_visibility => $source_project->{visibility},
                 target_full_path => $target_full_path,
                 target_relative_project_path => $target_relative_project_path,
                 target_namespace_id => $target_namespace_id,
                 target_namespace_path => $target_namespace_path,
+                target_description => $target_project ? _normalize_description( $target_project->{description} ) : undef,
+                target_lfs_enabled => $target_project ? !!$target_project->{lfs_enabled} : undef,
                 target_project_id => $target_project ? $target_project->{id} : undef,
                 target_visibility => $target_project ? $target_project->{visibility} : undef,
               };
@@ -991,6 +1124,27 @@ sub _normalize_namespace {
     };
 }
 
+sub _normalize_project {
+    my ( $payload, $label ) = @_;
+    ref($payload) eq "HASH" or die "$label must be an object\n";
+    _reject_visibility_key( $payload, $label );
+    return {
+        additional_branches => _normalize_ref_specs( $payload->{additional_branches}, "$label.additional_branches" ),
+        additional_tags => _normalize_ref_specs( $payload->{additional_tags}, "$label.additional_tags" ),
+        allow_blob_rewrite => _optional_bool( $payload->{allow_blob_rewrite} ),
+        force_lfs => _optional_bool( $payload->{force_lfs} ),
+        git_timeout_seconds => $payload->{git_timeout_seconds},
+        mirror_pristine_tar => _optional_bool( $payload->{mirror_pristine_tar} ),
+        name => _required_path_segment( $payload->{name}, "$label.name" ),
+        retry_attempts => _optional_positive_int( $payload->{retry_attempts}, "$label.retry_attempts" ),
+        retry_backoff_seconds => _optional_positive_int( $payload->{retry_backoff_seconds}, "$label.retry_backoff_seconds" ),
+        size_limit_bytes => _optional_bounded_positive_int( $payload->{size_limit_bytes}, $DEFAULTS{size_limit_bytes}, "$label.size_limit_bytes" ),
+        max_blob_bytes => _optional_bounded_positive_int( $payload->{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, "$label.max_blob_bytes" ),
+        source_project_url => _required_https_url( $payload->{source_project_url}, "$label.source_project_url" ),
+        target_group_path => _required_relative_namespace_path( $payload->{target_group_path}, "$label.target_group_path" ),
+    };
+}
+
 sub _normalize_override {
     my ( $payload, $label ) = @_;
     ref($payload) eq "HASH" or die "$label must be an object\n";
@@ -1127,6 +1281,44 @@ sub _parse_source_url {
     };
 }
 
+sub _parse_source_project_url {
+    my ( $url, $project_name ) = @_;
+    my ( $base_url, $path ) = _split_source_url($url);
+    my $host = _base_url_host($base_url);
+    my @segments = grep { length } split m{/}, $path;
+
+    if ( $host eq "github.com" ) {
+        @segments == 2
+          or die "GitHub project URL must point to exactly one repository path: $url\n";
+        return {
+            base_url => $base_url,
+            clone_url => $url,
+            group_path => $segments[0],
+            kind => "github_project",
+            path_with_namespace => join( "/", @segments ),
+        };
+    }
+
+    if ( @segments >= 2 && $segments[-1] eq $project_name ) {
+        return {
+            base_url => $base_url,
+            clone_url => $url,
+            group_path => join( "/", @segments[ 0 .. $#segments - 1 ] ),
+            kind => "git_project",
+            path_with_namespace => join( "/", @segments ),
+        };
+    }
+
+    my $root_key = _source_root_key($base_url);
+    return {
+        base_url => $base_url,
+        clone_url => $url,
+        group_path => $root_key,
+        kind => "git_project",
+        path_with_namespace => _join_path( $root_key, $project_name ),
+    };
+}
+
 sub _make_gitlab_client {
     my ( $base_url, $username, $token ) = @_;
     return {
@@ -1260,35 +1452,86 @@ sub _is_gitlab_path_conflict_error {
 
 sub _ensure_target_project {
     my ( $client, $entry ) = @_;
-    my $existing = _get_project( $client, $entry->{target_full_path} );
+    my $group_cache = $client->{group_path_cache} ||= {};
+    if ( defined $entry->{target_namespace_id} ) {
+        $group_cache->{ $entry->{target_namespace_path} } ||= $entry->{target_namespace_id}
+          if defined $entry->{target_namespace_path};
+    }
+    else {
+        $entry->{target_namespace_id} = _ensure_group_path(
+            $client,
+            $entry->{target_namespace_path},
+            $group_cache,
+        );
+    }
+    my $existing =
+      defined $entry->{target_project_id}
+      ? {
+            description => $entry->{target_description},
+            id => $entry->{target_project_id},
+            lfs_enabled => $entry->{target_lfs_enabled} ? JSON::PP::true : JSON::PP::false,
+        }
+      : undef;
     my $name = basename( $entry->{target_full_path} );
-    my %payload = (
-        description => $entry->{source_description},
-        lfs_enabled => $entry->{policy}->{force_lfs} || $entry->{source_lfs_enabled} ? JSON::PP::true : JSON::PP::false,
-    );
+    my %payload;
+    if ( !exists( $entry->{source_description_known} ) || $entry->{source_description_known} ) {
+        $payload{description} = $entry->{source_description};
+    }
+    if (
+        $entry->{policy}->{force_lfs}
+        || !exists( $entry->{source_lfs_enabled_known} )
+        || $entry->{source_lfs_enabled_known}
+      )
+    {
+        $payload{lfs_enabled} =
+          $entry->{policy}->{force_lfs} || $entry->{source_lfs_enabled}
+          ? JSON::PP::true
+          : JSON::PP::false;
+    }
 
     my $project;
     my $created = JSON::PP::false;
     my $updated = JSON::PP::false;
     if ( !$existing ) {
-        $project = _gitlab_request(
-            $client,
-            "POST",
-            "/projects",
-            {
-                %payload,
-                name => $name,
-                namespace_id => $entry->{target_namespace_id},
-                path => $name,
+        my $create_ok = eval {
+            $project = _gitlab_request(
+                $client,
+                "POST",
+                "/projects",
+                {
+                    %payload,
+                    name => $name,
+                    namespace_id => $entry->{target_namespace_id},
+                    path => $name,
+                }
+            );
+            1;
+        };
+        if ($create_ok) {
+            $created = JSON::PP::true;
+        }
+        else {
+            my $create_error = $@ || "unknown project creation error\n";
+            if ( _is_gitlab_path_conflict_error($create_error) ) {
+                $project = _get_project( $client, $entry->{target_full_path} );
+                die "gitlab project path conflict for $entry->{target_full_path}: $create_error" unless $project;
             }
-        );
-        $created = JSON::PP::true;
+            else {
+                die $create_error;
+            }
+        }
     }
     else {
         $project = $existing;
-        my $needs_update =
-             _normalize_description( $project->{description} ) ne $payload{description}
-          || !!$project->{lfs_enabled} != !!$payload{lfs_enabled};
+        my $needs_update = 0;
+        if ( exists $payload{description} ) {
+            $needs_update = 1
+              if _normalize_description( $project->{description} ) ne $payload{description};
+        }
+        if ( exists $payload{lfs_enabled} ) {
+            $needs_update = 1
+              if !!$project->{lfs_enabled} != !!$payload{lfs_enabled};
+        }
         if ($needs_update) {
             $project = _gitlab_request( $client, "PUT", "/projects/" . $project->{id}, \%payload );
             $updated = JSON::PP::true;
@@ -1305,9 +1548,10 @@ sub _ensure_target_project {
 sub _finalize_target_project {
     my ( $client, $project_id, $default_branch, $entry ) = @_;
     my $managed_default_branch = _ensure_managed_target_branches( $client, $project_id, $default_branch );
-    my %payload = (
-        description => $entry->{source_description},
-    );
+    my %payload;
+    if ( !exists( $entry->{source_description_known} ) || $entry->{source_description_known} ) {
+        $payload{description} = $entry->{source_description};
+    }
     if ($managed_default_branch) {
         $payload{default_branch} = $managed_default_branch;
     }
@@ -1327,8 +1571,9 @@ sub _ensure_target_lfs_enabled {
 }
 
 sub _get_group {
-    my ( $client, $group_path ) = @_;
-    return _gitlab_request( $client, "GET", "/groups/" . _encode_path($group_path), undef, { allow_missing => 1 } );
+    my ( $client, $group_path, $opt ) = @_;
+    my %request_opt = ( allow_missing => 1, %{ $opt || {} } );
+    return _gitlab_request( $client, "GET", "/groups/" . _encode_path($group_path), undef, \%request_opt );
 }
 
 sub _get_project {
@@ -1466,6 +1711,22 @@ sub _resolve_source_auth_for_entry {
             $base_url,
             $entry->{source_group_path},
             $entry->{policy},
+        );
+    }
+    return {
+        token => $source_auth->{token},
+        username => $source_auth->{username},
+    };
+}
+
+sub _resolve_source_auth_for_project_source {
+    my ( $source_auth, $source, $policy ) = @_;
+    if ( $source->{kind} eq "github_project" ) {
+        return _github_installation_source_auth(
+            $source_auth,
+            $source->{base_url},
+            $source->{group_path},
+            $policy,
         );
     }
     return {
@@ -1699,18 +1960,64 @@ sub _list_group_subgroups {
 }
 
 sub _build_target_project_index {
-    my ( $client, $group_path ) = @_;
-    my $group = _get_group( $client, $group_path );
-    return {} unless $group;
+    my ( $client, $group_path, $policy ) = @_;
+    return _build_target_namespace_state( $client, $group_path, $policy )->{projects};
+}
 
-    my %index;
-    for my $project ( @{ _list_group_projects( $client, $group_path ) } ) {
-        next unless ref($project) eq "HASH";
-        my $path = $project->{path_with_namespace};
-        next unless defined $path && !ref($path) && length $path;
-        $index{$path} = $project;
+sub _build_target_namespace_state {
+    my ( $client, $group_path, $policy ) = @_;
+    my $request_opt = _gitlab_read_request_opt($policy);
+    my $group = _get_group( $client, $group_path, $request_opt );
+    return { groups => {}, projects => {} } unless $group;
+
+    my %groups = (
+        $group_path => $group->{id},
+    );
+    my %projects;
+    my @queue = ($group);
+    my %seen_group_ids;
+    my %seen_project_ids;
+
+    while (@queue) {
+        my $current = shift @queue;
+        next unless ref($current) eq "HASH";
+        my $group_id = $current->{id};
+        next unless defined $group_id;
+        next if $seen_group_ids{$group_id}++;
+
+        my $current_path = $current->{full_path} || q{};
+        if ( defined $current_path && !ref($current_path) && length $current_path ) {
+            $groups{$current_path} = $group_id;
+        }
+
+        for my $project ( @{ _list_direct_group_projects( $client, $group_id, $policy ) } ) {
+            next unless ref($project) eq "HASH";
+            my $project_id = $project->{id};
+            next if defined $project_id && $seen_project_ids{$project_id}++;
+            my $path = $project->{path_with_namespace};
+            next unless defined $path && !ref($path) && length $path;
+            $projects{$path} = $project;
+        }
+
+        my @subgroups = @{ _list_group_subgroups( $client, $group_id, $policy ) };
+        for my $subgroup (@subgroups) {
+            next unless ref($subgroup) eq "HASH";
+            my $subgroup_path = $subgroup->{full_path} || q{};
+            if ( defined $subgroup_path && !ref($subgroup_path) && length $subgroup_path ) {
+                $groups{$subgroup_path} = $subgroup->{id};
+            }
+        }
+        push @queue, sort {
+            ( lc( $a->{full_path} || $a->{path} || q{} ) )
+              cmp
+            ( lc( $b->{full_path} || $b->{path} || q{} ) )
+        } @subgroups;
     }
-    return \%index;
+
+    return {
+        groups => \%groups,
+        projects => \%projects,
+    };
 }
 
 sub _discover_remote_refs {
@@ -2205,6 +2512,21 @@ sub _read_json {
     return $JSON->decode($text);
 }
 
+sub _read_config_payload {
+    my ($path) = @_;
+    return _read_json($path) if $path =~ /\.json\z/;
+
+    open( my $fh, "<:encoding(UTF-8)", $path ) or die "unable to read $path\n";
+    my $text = do { local $/; <$fh> };
+    close $fh;
+
+    my $docs = CPAN::Meta::YAML->read_string($text)
+      or die "unable to parse YAML config: $path\n";
+    eval { @{$docs} == 1 }
+      or die "config file must contain exactly one YAML document: $path\n";
+    return $docs->[0];
+}
+
 sub _write_json {
     my ( $path, $payload ) = @_;
     _write_text( $path, JSON::PP->new->canonical(1)->utf8(1)->pretty(1)->encode($payload) );
@@ -2249,6 +2571,14 @@ sub _required_relative_namespace_path {
 sub _required_relative_project_path {
     my ( $value, $label ) = @_;
     return _required_group_path_min_segments( $value, $label, 2 );
+}
+
+sub _required_path_segment {
+    my ( $value, $label ) = @_;
+    $value = _required_string( $value, $label );
+    $value =~ /\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
+      or die "$label must be a single path segment\n";
+    return $value;
 }
 
 sub _required_group_path_min_segments {

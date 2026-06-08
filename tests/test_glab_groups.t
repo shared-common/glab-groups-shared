@@ -26,6 +26,13 @@ sub write_json_file {
     close $fh;
 }
 
+sub write_text_file {
+    my ( $path, $text ) = @_;
+    open( my $fh, ">:encoding(UTF-8)", $path ) or die "unable to write $path";
+    print {$fh} $text;
+    close $fh;
+}
+
 sub run_cmd {
     my (@args) = @_;
     my $cmd = join q{ }, map { "'" . ( my $v = $_ ) =~ s/'/'"'"'/gr . "'" } @args;
@@ -95,6 +102,44 @@ sub run_cmd {
     );
     my $config = load_config_dir($dir);
     is( $config->{namespaces}->[0]->{target_owner_path}, "glab-forks", "loads target owner path from namespace entries" );
+}
+
+{
+    my $dir = tempdir( CLEANUP => 1 );
+    write_text_file(
+        File::Spec->catfile( $dir, "defaults.yml" ),
+        <<'YAML'
+kind: glab-groups/defaults
+version: 1
+defaults:
+  additional_branches:
+    - release
+  additional_tags:
+    - v1.0.0
+  mirror_pristine_tar: true
+YAML
+    );
+    write_text_file(
+        File::Spec->catfile( $dir, "namespaces.yml" ),
+        <<'YAML'
+kind: glab-groups/projects
+version: 1
+projects:
+  - name: darkman
+    source_project_url: https://gitlab.com/WhyNotHugo/darkman
+    target_group_path: glab-forks/labwc
+    additional_branches:
+      - stable
+    additional_tags:
+      - v2.0.0
+YAML
+    );
+
+    my $config = load_config_dir($dir);
+    is( scalar @{ $config->{projects} }, 1, "loads explicit projects from YAML config" );
+    is( $config->{projects}->[0]->{target_group_path}, "glab-forks/labwc", "keeps the full explicit target group path" );
+    is( $config->{defaults}->{additional_branches}->[0]->{name}, "release", "loads default branches from YAML config" );
+    is( $config->{projects}->[0]->{additional_branches}->[0]->{name}, "stable", "loads per-project branch overrides from YAML config" );
 }
 
 {
@@ -269,6 +314,68 @@ HTML
 }
 
 {
+    no warnings 'redefine';
+
+    local *GlabGroups::_discover_remote_refs = sub {
+        my ( $source_url, $policy ) = @_;
+        return {
+            branches => { main => 1, stable => 1 },
+            default_branch => "main",
+            tags => { "v1.0.0" => 1 },
+        };
+    };
+
+    my $inventory = GlabGroups::_discover_inventory(
+        {
+            defaults => { additional_branches => [], additional_tags => [] },
+            namespaces => [],
+            projects => [
+                {
+                    name => "darkman",
+                    source_project_url => "https://gitlab.com/WhyNotHugo/darkman",
+                    target_group_path => "glab-forks/labwc",
+                },
+            ],
+        }
+    );
+
+    is( $inventory->{inventory}->[0]->{group_path}, "WhyNotHugo", "explicit GitLab project discovery keeps the source owner path" );
+    is( $inventory->{inventory}->[0]->{project_entry}->{target_group_path}, "glab-forks/labwc", "explicit project discovery keeps the configured target group path" );
+    is( $inventory->{inventory}->[0]->{projects}->[0]->{path_with_namespace}, "WhyNotHugo/darkman", "explicit GitLab project discovery keeps the source project path" );
+    is( $inventory->{inventory}->[0]->{projects}->[0]->{default_branch}, "main", "explicit project discovery records the discovered default branch" );
+}
+
+{
+    no warnings 'redefine';
+
+    local *GlabGroups::_discover_remote_refs = sub {
+        my ( $source_url, $policy ) = @_;
+        return {
+            branches => { main => 1 },
+            default_branch => "main",
+            tags => {},
+        };
+    };
+
+    my $inventory = GlabGroups::_discover_inventory(
+        {
+            defaults => { additional_branches => [], additional_tags => [] },
+            namespaces => [],
+            projects => [
+                {
+                    name => "gptfdisk",
+                    source_project_url => "https://git.code.sf.net/p/gptfdisk/code",
+                    target_group_path => "glab-forks/firmware",
+                },
+            ],
+        }
+    );
+
+    is( $inventory->{inventory}->[0]->{group_path}, "git.code.sf.net", "explicit generic project discovery uses the source host as the synthetic group path when the URL path is not repo-shaped" );
+    is( $inventory->{inventory}->[0]->{projects}->[0]->{path_with_namespace}, "git.code.sf.net/gptfdisk", "explicit generic project discovery uses the configured project name for the synthetic source path" );
+}
+
+{
     my $refs = resolve_selected_refs(
         "main",
         {
@@ -312,8 +419,9 @@ HTML
     no warnings 'redefine';
 
     local *GlabGroups::_load_target_client = sub { return {}; };
-    local *GlabGroups::_ensure_group_path = sub { return 42; };
-    local *GlabGroups::_build_target_project_index = sub { return {}; };
+    local *GlabGroups::_build_target_namespace_state = sub {
+        return { groups => {}, projects => {} };
+    };
 
     my $plan = GlabGroups::_build_plan(
         {
@@ -350,6 +458,53 @@ HTML
     );
     is( $plan->{plan}->[0]->{action}, "skip", "archived source projects are skipped during planning" );
     is( $plan->{plan}->[0]->{skip_reason}, "Archived source repository is excluded from mirroring.", "records the archived source skip reason" );
+}
+
+{
+    no warnings 'redefine';
+
+    local *GlabGroups::_load_target_client = sub { return {}; };
+    local *GlabGroups::_build_target_namespace_state = sub {
+        return { groups => {}, projects => {} };
+    };
+
+    my $plan = GlabGroups::_build_plan(
+        {
+            defaults => { additional_branches => [], additional_tags => [], force_lfs => JSON::PP::false },
+            exclusions => {},
+            overrides => {},
+        },
+        {
+            inventory => [
+                {
+                    group_path => "WhyNotHugo",
+                    project_entry => {
+                        name => "darkman",
+                        target_group_path => "glab-forks/labwc",
+                    },
+                    projects => [
+                        {
+                            archived => JSON::PP::false,
+                            default_branch => "main",
+                            description => "",
+                            description_known => JSON::PP::false,
+                            empty_repo => JSON::PP::false,
+                            http_url_to_repo => "https://gitlab.com/WhyNotHugo/darkman",
+                            lfs_enabled => JSON::PP::false,
+                            lfs_enabled_known => JSON::PP::false,
+                            path_with_namespace => "WhyNotHugo/darkman",
+                            ssh_url_to_repo => "https://gitlab.com/WhyNotHugo/darkman",
+                            visibility => "public",
+                        },
+                    ],
+                },
+            ],
+        },
+        25,
+    );
+    is( $plan->{plan}->[0]->{target_full_path}, "glab-forks/labwc/darkman", "explicit project planning uses the configured target group path without deriving namespace segments from the source path" );
+    is( $plan->{plan}->[0]->{target_namespace_path}, "glab-forks/labwc", "explicit project planning keeps the configured target group path as the target namespace path" );
+    is( $plan->{plan}->[0]->{target_relative_project_path}, "glab-forks/labwc/darkman", "explicit project planning keys overrides and exclusions by the full explicit target project path" );
 }
 
 {
@@ -391,8 +546,14 @@ HTML
     no warnings 'redefine';
 
     local *GlabGroups::_load_target_client = sub { return {}; };
-    local *GlabGroups::_ensure_group_path = sub { return 42; };
-    local *GlabGroups::_build_target_project_index = sub { return {}; };
+    local *GlabGroups::_build_target_namespace_state = sub {
+        return {
+            groups => {
+                "owner/mirror" => 42,
+            },
+            projects => {},
+        };
+    };
 
     my $plan = GlabGroups::_build_plan(
         {
@@ -429,15 +590,16 @@ HTML
     );
     is( $plan->{plan}->[0]->{action}, "create_project", "missing target projects are planned for creation" );
     ok( !defined $plan->{plan}->[0]->{skip_reason}, "missing target projects do not get a skip reason" );
-    is( $plan->{plan}->[0]->{target_namespace_id}, 42, "missing target projects keep resolved target namespace id for creation" );
+    is( $plan->{plan}->[0]->{target_namespace_id}, 42, "missing target projects keep the existing target namespace id when the namespace already exists" );
 }
 
 {
     no warnings 'redefine';
 
     local *GlabGroups::_load_target_client = sub { return {}; };
-    local *GlabGroups::_ensure_group_path = sub { return 77; };
-    local *GlabGroups::_build_target_project_index = sub { return {}; };
+    local *GlabGroups::_build_target_namespace_state = sub {
+        return { groups => {}, projects => {} };
+    };
 
     my $plan = GlabGroups::_build_plan(
         {
@@ -478,6 +640,7 @@ HTML
     );
     is( $plan->{plan}->[0]->{target_full_path}, "glab-forks/mirror/project", "plan uses namespace target_owner_path as the target root" );
     is( $plan->{plan}->[0]->{target_namespace_path}, "glab-forks/mirror", "target namespace path is rooted under namespace target_owner_path" );
+    ok( !defined $plan->{plan}->[0]->{target_namespace_id}, "plan leaves missing target namespace ids unresolved until target preparation" );
 }
 
 {
@@ -938,6 +1101,39 @@ HTML
 
 {
     no warnings 'redefine';
+    my @requests;
+    my @ensured_groups;
+
+    local *GlabGroups::_ensure_group_path = sub {
+        my ( $client, $group_path, $cache ) = @_;
+        push @ensured_groups, $group_path;
+        return 77;
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        push @requests, { method => $method, path => $path, payload => $payload };
+        return { id => 123, archived => JSON::PP::false };
+    };
+
+    my $result = GlabGroups::_ensure_target_project(
+        {},
+        {
+            policy => { force_lfs => JSON::PP::false },
+            source_archived => JSON::PP::false,
+            source_description => "source",
+            source_lfs_enabled => JSON::PP::false,
+            target_full_path => "owner/group/project",
+            target_namespace_path => "owner/group",
+        }
+    );
+    ok( $result->{created}, "creates missing target project after resolving the target namespace on demand" );
+    is_deeply( \@ensured_groups, [ "owner/group" ], "resolves the target namespace only when project preparation needs it" );
+    is( $requests[0]->{payload}->{namespace_id}, 77, "project creation uses the resolved namespace id" );
+}
+
+{
+    no warnings 'redefine';
     my $dir = tempdir( CLEANUP => 1 );
     my $plan_path = File::Spec->catfile( $dir, "plan.json" );
     my $output_path = File::Spec->catfile( $dir, "results.json" );
@@ -983,11 +1179,6 @@ HTML
         main => { name => "main", protected => JSON::PP::false },
     );
 
-    local *GlabGroups::_get_project = sub {
-        my ( $client, $project_path ) = @_;
-        return { id => 99, description => "old", lfs_enabled => JSON::PP::false, archived => JSON::PP::false };
-    };
-
     local *GlabGroups::_get_branch = sub {
         my ( $client, $project_id, $branch_name ) = @_;
         my $branch = $branches{$branch_name};
@@ -1021,7 +1212,11 @@ HTML
             source_description => "source",
             source_lfs_enabled => JSON::PP::false,
             target_full_path => "owner/group/project",
+            target_description => "old",
+            target_lfs_enabled => JSON::PP::false,
+            target_namespace_path => "owner/group",
             target_namespace_id => 42,
+            target_project_id => 99,
         }
     );
     ok( !$result->{created}, "does not create when project already exists" );
@@ -1058,6 +1253,40 @@ HTML
     my @project_put_requests = grep { $_->{method} eq "PUT" && $_->{path} eq "/projects/99" } @requests;
     ok( !exists $project_put_requests[-1]->{payload}->{visibility}, "project finalize payload does not set visibility" );
     is( $project_put_requests[-1]->{payload}->{default_branch}, "mcr/main", "project finalize makes mcr/main the default branch" );
+}
+
+{
+    no warnings 'redefine';
+    my @requests;
+
+    local *GlabGroups::_get_project = sub {
+        die "_get_project should not be called when plan already supplied the target project metadata";
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        push @requests, { method => $method, path => $path, payload => $payload };
+        return { id => 77, archived => JSON::PP::false, description => "keep me", lfs_enabled => JSON::PP::true };
+    };
+
+    my $result = GlabGroups::_ensure_target_project(
+        {},
+        {
+            policy => { force_lfs => JSON::PP::false },
+            source_description => "",
+            source_description_known => JSON::PP::false,
+            source_lfs_enabled => JSON::PP::false,
+            source_lfs_enabled_known => JSON::PP::false,
+            target_description => "keep me",
+            target_full_path => "glab-forks/labwc/darkman",
+            target_lfs_enabled => JSON::PP::true,
+            target_namespace_path => "glab-forks/labwc",
+            target_namespace_id => 42,
+            target_project_id => 77,
+        }
+    );
+    ok( !$result->{updated}, "explicit project updates skip description and LFS metadata drift when the source does not provide authoritative values" );
+    is( scalar @requests, 0, "explicit project metadata gaps do not trigger project update API calls" );
 }
 
 {

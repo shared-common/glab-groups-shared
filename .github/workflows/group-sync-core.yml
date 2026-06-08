@@ -74,7 +74,7 @@ jobs:
               ;;
           esac
           case "${TARGET_TOKEN_SECRET}" in
-            GL_PAT_GROUP_KALI_SVC|GL_PAT_GROUP_DEBIAN_SVC|GL_PAT_GROUP_FREEDESKTOP_SVC|GL_PAT_GROUP_SMALL_SVC|GL_PAT_GROUP_KDE_SVC|GL_PAT_GROUP_GNOME_SVC)
+            GL_PAT_GROUP_KALI_SVC|GL_PAT_GROUP_DEBIAN_SVC|GL_PAT_GROUP_FREEDESKTOP_SVC|GL_PAT_GROUP_SMALL_SVC|GL_PAT_GROUP_KDE_SVC|GL_PAT_GROUP_GNOME_SVC|GL_PAT_GROUP_PROJ_SVC)
               ;;
             *)
               printf 'invalid target-token-secret: %s\n' \
@@ -100,6 +100,9 @@ jobs:
               ;;
             glab-groups-gnome)
               expected_token_secret="GL_PAT_GROUP_GNOME_SVC"
+              ;;
+            glab-groups-projects)
+              expected_token_secret="GL_PAT_GROUP_PROJ_SVC"
               ;;
             *)
               printf 'unsupported config-path: %s\n' "${CONFIG_PATH}" >&2
@@ -148,41 +151,46 @@ jobs:
           TARGET_TOKEN_SECRET: ${{ inputs.target-token-secret }}
         run: |
           set -euo pipefail
-          python3 - "${CONFIG_DIR}" "${TARGET_TOKEN_SECRET}" "${GITHUB_OUTPUT}" <<'PY'
-          import json
-          import sys
-          from pathlib import Path
+          perl -I shared/lib -MGlabGroups=load_config_dir - "${CONFIG_DIR}" "${TARGET_TOKEN_SECRET}" "${GITHUB_OUTPUT}" <<'PERL'
+          use strict;
+          use warnings;
 
-          config_dir = Path(sys.argv[1])
-          target_token_secret = sys.argv[2]
-          github_output = Path(sys.argv[3])
+          my ( $config_dir, $target_token_secret, $github_output ) = @ARGV;
+          my $config = load_config_dir($config_dir);
 
-          found = False
-          for path in sorted(config_dir.glob("*.json")):
-              data = json.loads(path.read_text(encoding="utf-8"))
-              for namespace in data.get("namespaces", []):
-                  source_url = namespace.get("source_group_url", "")
-                  if isinstance(source_url, str) and source_url.startswith("https://github.com/"):
-                      found = True
+          my $needs_github_source_auth = 0;
+          for my $namespace ( @{ $config->{namespaces} || [] } ) {
+              my $source_url = $namespace->{source_group_url} || "";
+              if ( $source_url =~ m{\Ahttps://github\.com/} ) {
+                  $needs_github_source_auth = 1;
+                  last;
+              }
+          }
+          if ( !$needs_github_source_auth ) {
+              for my $project ( @{ $config->{projects} || [] } ) {
+                  my $source_url = $project->{source_project_url} || "";
+                  if ( $source_url =~ m{\Ahttps://github\.com/} ) {
+                      $needs_github_source_auth = 1;
+                      last;
+                  }
+              }
+          }
 
-          secret_names = [
+          my @secret_names = (
               "GL_BASE_URL",
               "GL_BRIDGE_FORK_USER_GLAB",
-              target_token_secret,
-          ]
-          if found:
-              secret_names.extend([
-                  "GH_ORG_SHARED_APP_ID",
-                  "GH_ORG_SHARED_APP_PEM",
-              ])
+              $target_token_secret,
+          );
+          if ($needs_github_source_auth) {
+              push @secret_names, "GH_ORG_SHARED_APP_ID", "GH_ORG_SHARED_APP_PEM";
+          }
 
-          with github_output.open("a", encoding="utf-8") as handle:
-              handle.write(f"secrets={','.join(secret_names)}\n")
-              handle.write(
-                  "needs-github-source-auth="
-                  f"{'true' if found else 'false'}\n"
-              )
-          PY
+          open( my $fh, ">>:encoding(UTF-8)", $github_output )
+            or die "unable to append to \$GITHUB_OUTPUT: $github_output\n";
+          print {$fh} "secrets=", join( ",", @secret_names ), "\n";
+          print {$fh} "needs-github-source-auth=", ( $needs_github_source_auth ? "true" : "false" ), "\n";
+          close $fh;
+          PERL
 
       - name: Fetch target secrets from BWS
         uses: >-

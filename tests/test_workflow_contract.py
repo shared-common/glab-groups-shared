@@ -40,12 +40,17 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("GL_PAT_GROUP_SMALL_SVC", text)
         self.assertIn("GL_PAT_GROUP_KDE_SVC", text)
         self.assertIn("GL_PAT_GROUP_GNOME_SVC", text)
+        self.assertIn("GL_PAT_GROUP_PROJ_SVC", text)
         self.assertIn("GL_TARGET_TOKEN_SECRET_NAME: ${{ inputs.target-token-secret }}", text)
         self.assertIn("GH_ORG_SHARED_APP_ID", text)
         self.assertIn("GH_ORG_SHARED_APP_PEM", text)
         self.assertIn("needs-github-source-auth", text)
         self.assertNotIn("GL_GROUP_TOP_GLAB_OWNER", text)
-        self.assertIn('python3 - "${CONFIG_DIR}" "${TARGET_TOKEN_SECRET}" "${GITHUB_OUTPUT}" <<\'PY\'', text)
+        self.assertIn(
+            'perl -I shared/lib -MGlabGroups=load_config_dir - "${CONFIG_DIR}" "${TARGET_TOKEN_SECRET}" "${GITHUB_OUTPUT}" <<\'PERL\'',
+            text,
+        )
+        self.assertIn("$config->{projects}", text)
         self.assertNotIn('config_meta_json="$(', text)
         self.assertNotIn('needs_github_source_auth="$(', text)
 
