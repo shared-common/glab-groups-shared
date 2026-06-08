@@ -193,6 +193,50 @@ YAML
 {
     no warnings 'redefine';
 
+    local *GlabGroups::_load_source_auth = sub { return { github_app => { app_id => "123", pem => "unused" }, github_installation_tokens => {} }; };
+    local *GlabGroups::_github_installation_source_auth = sub {
+        return { token => "ghs_install_token", username => "x-access-token" };
+    };
+    local *GlabGroups::_github_request = sub {
+        my ( $base_url, $path, $payload, $opt ) = @_;
+        return [
+            {
+                archived => JSON::PP::false,
+                clone_url => "https://github.com/crowdsecurity/.github.git",
+                default_branch => "main",
+                description => "Community health files",
+                full_name => "crowdsecurity/.github",
+                id => 102,
+                private => JSON::PP::false,
+                pushed_at => "2026-06-09T00:00:00Z",
+                size => 1,
+                ssh_url => 'git@github.com:crowdsecurity/.github.git',
+                visibility => "public",
+            },
+        ] if $path =~ /page=1/;
+        return [] if $path =~ /page=2/;
+        die "unexpected GitHub request: $base_url $path";
+    };
+
+    my $inventory = GlabGroups::_discover_inventory(
+        {
+            defaults => { additional_branches => [], additional_tags => [] },
+            namespaces => [
+                {
+                    name => "crowdsecurity",
+                    source_group_url => "https://github.com/crowdsecurity",
+                    target_namespace_path => "crowdsecurity",
+                },
+            ],
+        }
+    );
+
+    is( $inventory->{inventory}->[0]->{projects}->[0]->{path_with_namespace}, "crowdsecurity/.github", "GitHub org discovery accepts public repos like .github that do not fit the stricter GitLab-style path validator" );
+}
+
+{
+    no warnings 'redefine';
+
     local *GlabGroups::_get_github_account_installation = sub {
         my ( $base_url, $account, $jwt, $policy ) = @_;
         return { id => 77 };
@@ -841,7 +885,8 @@ HTML
     my $dir = tempdir( CLEANUP => 1 );
     my $blob_path = File::Spec->catfile( $dir, "blob.bin" );
     open( my $blob, ">:raw", $blob_path ) or die "unable to write blob";
-    print {$blob} "a" x ( 1024 * 1024 + 13 );
+    my $random = qx{LC_ALL=C TZ=UTC head -c 1048589 /dev/urandom};
+    print {$blob} $random;
     close $blob;
 
     my ( $status, $output ) = run_cmd( "git", "init", "-b", "main", $dir );
@@ -860,7 +905,7 @@ HTML
         { branches => ["main"], tags => [] },
         64,
     );
-    cmp_ok( $analysis->{total_bytes}, ">", 1024 * 1024, "counts selected object bytes" );
+    cmp_ok( $analysis->{total_bytes}, ">", 1024 * 1024, "counts packed selected-ref bytes" );
     is( scalar @{ $analysis->{oversized_blobs} }, 1, "detects oversize blob" );
 }
 

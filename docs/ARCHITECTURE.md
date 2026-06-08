@@ -86,7 +86,8 @@ The mirror stage:
   `mcr/release` branches when missing
 - sets target `mcr/main` as the default branch when bootstrap succeeds
 - protects target `mcr/staging` and `mcr/release`
-- enforces a 10 GiB total selected-ref budget
+- enforces a 9 GiB packed selected-ref storage budget that better matches GitLab
+  repository storage behavior than an uncompressed object-size sum
 - attempts LFS migration for blobs larger than 100 MiB before falling back to
   per-repository skip
 - retries retryable Git and GitLab operations with bounded backoff

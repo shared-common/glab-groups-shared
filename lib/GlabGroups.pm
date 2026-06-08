@@ -36,7 +36,7 @@ my %DEFAULTS = (
     mirror_pristine_tar => JSON::PP::true,
     retry_attempts => 3,
     retry_backoff_seconds => 2,
-    size_limit_bytes => 10 * 1024 * 1024 * 1024,
+    size_limit_bytes => 9 * 1024 * 1024 * 1024,
 );
 
 my %GITLAB_READ_DEFAULTS = (
@@ -266,6 +266,36 @@ sub analyze_selected_refs {
 
     return { total_bytes => 0, oversized_blobs => [] } unless %object_ids;
 
+    my ( $refs_fh, $refs_path ) = tempfile();
+    print {$refs_fh} join( "\n", @rev_args ), "\n";
+    close $refs_fh;
+
+    my $pack_cmd = join q{ },
+      _shell_quote("git"),
+      _shell_quote("-C"),
+      _shell_quote($repo_dir),
+      _shell_quote("pack-objects"),
+      _shell_quote("--stdout"),
+      _shell_quote("--quiet"),
+      _shell_quote("--revs"),
+      "<",
+      _shell_quote($refs_path),
+      "|",
+      _shell_quote("wc"),
+      _shell_quote("-c"),
+      "2>&1";
+    my $pack_result = _run_shell_command(
+        $pack_cmd,
+        {
+            timeout => 300,
+        }
+    );
+    unlink $refs_path;
+    $pack_result->{status} == 0 or die "git pack-objects failed: $pack_result->{output}\n";
+    my ($packed_bytes) = $pack_result->{output} =~ /(\d+)/;
+    defined $packed_bytes or die "unable to parse packed size from git pack-objects output: $pack_result->{output}\n";
+    $packed_bytes += 0;
+
     my ( $fh, $path ) = tempfile();
     print {$fh} join( "\n", sort keys %object_ids ), "\n";
     close $fh;
@@ -288,18 +318,16 @@ sub analyze_selected_refs {
     unlink $path;
     $cat_result->{status} == 0 or die "git cat-file failed: $cat_result->{output}\n";
 
-    my $total_bytes = 0;
     my @oversized_blobs;
     for my $line ( split /\n/, $cat_result->{output} ) {
         next unless $line =~ /\A([0-9a-f]{40})\s+(\w+)\s+(\d+)\z/;
         my ( $object_id, $type, $size ) = ( $1, $2, $3 + 0 );
-        $total_bytes += $size;
         if ( $type eq "blob" && $size > $max_blob_bytes ) {
             push @oversized_blobs, { object_id => $object_id, size => $size };
         }
     }
     return {
-        total_bytes => $total_bytes,
+        total_bytes => $packed_bytes,
         oversized_blobs => \@oversized_blobs,
     };
 }
@@ -1965,7 +1993,7 @@ sub _list_github_org_projects {
         last unless @{$data};
         for my $repo ( @{$data} ) {
             next unless ref($repo) eq "HASH";
-            my $full_name = _required_project_path(
+            my $full_name = _required_github_full_name(
                 $repo->{full_name},
                 "GitHub repository full_name",
             );
@@ -2739,6 +2767,18 @@ sub _required_numeric_string {
 sub _required_project_path {
     my ( $value, $label ) = @_;
     return _required_group_path_min_segments( $value, $label, 2 );
+}
+
+sub _required_github_full_name {
+    my ( $value, $label ) = @_;
+    $value = _required_string( $value, $label );
+    my @segments = split m{/}, $value;
+    @segments == 2 or die "$label must contain exactly two path segments\n";
+    $segments[0] =~ /\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
+      or die "$label owner must be a GitHub account path segment\n";
+    $segments[1] =~ /\A[A-Za-z0-9._-]+\z/
+      or die "$label repository must be a GitHub repository name\n";
+    return $value;
 }
 
 sub _required_relative_namespace_path {

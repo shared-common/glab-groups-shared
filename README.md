@@ -101,7 +101,7 @@ Each config directory exposes these defaults:
 - `additional_tags`: extra tag names to mirror on every run when present
 - `retry_attempts`: retry count for retryable git mirror operations
 - `retry_backoff_seconds`: backoff for retryable git mirror operations
-- `size_limit_bytes`: selected-ref budget, defaulting to 10 GiB
+- `size_limit_bytes`: selected-ref packed storage budget, defaulting to 9 GiB
 - `max_blob_bytes`: blob limit, defaulting to 100 MiB
 
 The source default branch is mirrored to the managed target branch
