@@ -21,9 +21,10 @@ Wrapper repositories call `.github/workflows/group-sync-core.yml` and pass:
 The shared workflow uploads plan, result, report, CSV, JSON, and optional
 Parquet artifacts on every run.
 
-Mirroring runs as one job per deterministic batch with `max-parallel: 5`. A
-200-repository plan at the default batch size creates eight mirror jobs, while
-GitHub Actions runs at most five of those jobs at the same time.
+Mirroring runs through deterministic batch shards with `max-parallel: 5`. Small
+plans still create one job per batch; larger plans cap the matrix at 256 jobs
+and let each shard process every 256th batch so GitHub Actions matrix limits are
+not exceeded.
 
 ## Target namespace contract
 

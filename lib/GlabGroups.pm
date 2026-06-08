@@ -397,11 +397,12 @@ sub _cmd_mirror {
                 $result = {
                     target_full_path => $entry->{target_full_path},
                     planned_action => $entry->{action},
-                    status => "skipped",
-                    reason => "Repository skipped after unrecoverable error.",
+                    status => "failed",
+                    reason => "Repository failed after unrecoverable error.",
                     error => _trim_error($@),
                 };
             }
+            $result = _sanitize_payload($result);
             push @results, $result;
             print {$jsonl_fh} $JSON->encode($result), "\n";
         }
@@ -645,6 +646,7 @@ sub _mirror_entry {
 
     my $prepared = _ensure_target_project( $target_client, $entry );
     if ( $entry->{source_empty_repo} ) {
+        _finalize_target_project( $target_client, $prepared->{project_id}, $entry->{source_default_branch} || "", $entry );
         my $verified = _verify_entry( $target_client, $entry );
         return {
             target_full_path => $entry->{target_full_path},
@@ -657,13 +659,16 @@ sub _mirror_entry {
 
     my $workdir = tempdir( CLEANUP => 1 );
     my $repo_dir = File::Spec->catdir( $workdir, "repo" );
-    _run_command( [ "git", "init", $repo_dir ], { timeout => 120 } );
+    my $init_result = _run_command( [ "git", "init", $repo_dir ], { timeout => 120 } );
+    $init_result->{status} == 0 or die "git init failed: $init_result->{output}\n";
 
     my $source_url = _maybe_auth_url( $entry->{source_http_url}, $source_auth->{username}, $source_auth->{token} );
     my $target_url = _maybe_auth_url( _project_git_url( $target_client->{base_url}, $entry->{target_full_path} ), $target_client->{username}, $target_client->{token} );
 
-    _run_command( [ "git", "-C", $repo_dir, "remote", "add", "source", $source_url ], { timeout => 60 } );
-    _run_command( [ "git", "-C", $repo_dir, "remote", "add", "target", $target_url ], { timeout => 60 } );
+    my $remote_result = _run_command( [ "git", "-C", $repo_dir, "remote", "add", "source", $source_url ], { timeout => 60 } );
+    $remote_result->{status} == 0 or die "git remote add source failed: $remote_result->{output}\n";
+    $remote_result = _run_command( [ "git", "-C", $repo_dir, "remote", "add", "target", $target_url ], { timeout => 60 } );
+    $remote_result->{status} == 0 or die "git remote add target failed: $remote_result->{output}\n";
 
     my $available = _discover_remote_refs( $source_url, $entry->{policy} );
     my $default_branch = $entry->{source_default_branch} || $available->{default_branch} || "";
@@ -671,7 +676,8 @@ sub _mirror_entry {
     @{ $selected->{branches} } or die "no source branches resolved for $entry->{source_full_path}\n";
 
     _fetch_selected_refs( $repo_dir, $selected, $entry->{policy} );
-    _run_command( [ "git", "-C", $repo_dir, "checkout", "-f", $selected->{branches}->[0] ], { timeout => 300 } );
+    my $checkout_result = _run_command( [ "git", "-C", $repo_dir, "checkout", "-f", $selected->{branches}->[0] ], { timeout => 300 } );
+    $checkout_result->{status} == 0 or die "git checkout failed for branch $selected->{branches}->[0]: $checkout_result->{output}\n";
 
     my $size_before = analyze_selected_refs( $repo_dir, $selected, $entry->{policy}->{max_blob_bytes} );
     if ( $size_before->{total_bytes} > $entry->{policy}->{size_limit_bytes} ) {
@@ -716,23 +722,27 @@ sub _mirror_entry {
 
     my $needs_lfs = $entry->{policy}->{force_lfs} || $entry->{source_lfs_enabled} || _repo_has_lfs_files($repo_dir);
     if ($needs_lfs) {
+        _ensure_target_lfs_enabled( $target_client, $prepared->{project_id} );
         _prepare_lfs( $repo_dir, $entry->{policy} );
         for my $branch ( @{ $selected->{branches} || [] } ) {
-            _run_command(
+            my $lfs_result = _run_command(
                 [ "git", "-C", $repo_dir, "lfs", "fetch", "source", "refs/heads/$branch" ],
                 _git_command_options( $entry->{policy}, JSON::PP::true )
             );
+            $lfs_result->{status} == 0 or die "git lfs fetch failed for branch $branch: $lfs_result->{output}\n";
         }
         for my $tag ( @{ $selected->{tags} || [] } ) {
-            _run_command(
+            my $lfs_result = _run_command(
                 [ "git", "-C", $repo_dir, "lfs", "fetch", "source", "refs/tags/$tag" ],
                 _git_command_options( $entry->{policy}, JSON::PP::true )
             );
+            $lfs_result->{status} == 0 or die "git lfs fetch failed for tag $tag: $lfs_result->{output}\n";
         }
-        _run_command(
+        my $lfs_result = _run_command(
             [ "git", "-C", $repo_dir, "lfs", "push", "--all", "target" ],
             _git_command_options( $entry->{policy}, JSON::PP::true )
         );
+        $lfs_result->{status} == 0 or die "git lfs push failed: $lfs_result->{output}\n";
     }
 
     _push_selected_refs( $repo_dir, $selected, $entry->{policy} );
@@ -1075,6 +1085,7 @@ sub _ensure_target_project {
     my $project;
     my $created = JSON::PP::false;
     my $updated = JSON::PP::false;
+    my $unarchived = JSON::PP::false;
     if ( !$existing ) {
         $project = _gitlab_request(
             $client,
@@ -1091,6 +1102,11 @@ sub _ensure_target_project {
     }
     else {
         $project = $existing;
+        if ( $project->{archived} ) {
+            $project = _gitlab_request( $client, "POST", "/projects/" . $project->{id} . "/unarchive", undef ) || $project;
+            $project->{archived} = JSON::PP::false;
+            $unarchived = JSON::PP::true;
+        }
         my $needs_update =
              _normalize_description( $project->{description} ) ne $payload{description}
           || !!$project->{lfs_enabled} != !!$payload{lfs_enabled};
@@ -1100,33 +1116,47 @@ sub _ensure_target_project {
         }
     }
 
-    if ( $entry->{source_archived} && !$project->{archived} ) {
-        _gitlab_request( $client, "POST", "/projects/" . $project->{id} . "/archive", undef );
-    }
-    if ( !$entry->{source_archived} && $project->{archived} ) {
-        _gitlab_request( $client, "POST", "/projects/" . $project->{id} . "/unarchive", undef );
-    }
-
     return {
         created => $created,
         project_id => $project->{id},
         updated => $updated,
+        unarchived => $unarchived,
     };
 }
 
 sub _finalize_target_project {
     my ( $client, $project_id, $default_branch, $entry ) = @_;
-    if ($default_branch) {
-        _gitlab_request(
-            $client,
-            "PUT",
-            "/projects/$project_id",
-            {
-                default_branch => $default_branch,
-                description => $entry->{source_description},
-            }
-        );
+    my %payload = (
+        description => $entry->{source_description},
+    );
+    $payload{default_branch} = $default_branch if $default_branch;
+    _gitlab_request( $client, "PUT", "/projects/$project_id", \%payload );
+    _sync_target_archive_state( $client, $project_id, $entry->{source_archived} );
+}
+
+sub _sync_target_archive_state {
+    my ( $client, $project_id, $want_archived ) = @_;
+    my $project = _gitlab_request( $client, "GET", "/projects/$project_id", undef );
+    return unless $project;
+    if ( $want_archived && !$project->{archived} ) {
+        _gitlab_request( $client, "POST", "/projects/$project_id/archive", undef );
+        return;
     }
+    if ( !$want_archived && $project->{archived} ) {
+        _gitlab_request( $client, "POST", "/projects/$project_id/unarchive", undef );
+    }
+}
+
+sub _ensure_target_lfs_enabled {
+    my ( $client, $project_id ) = @_;
+    _gitlab_request(
+        $client,
+        "PUT",
+        "/projects/$project_id",
+        {
+            lfs_enabled => JSON::PP::true,
+        }
+    );
 }
 
 sub _get_group {
@@ -1232,22 +1262,32 @@ sub _discover_remote_refs {
 sub _fetch_selected_refs {
     my ( $repo_dir, $selected, $policy ) = @_;
     for my $branch ( @{ $selected->{branches} || [] } ) {
-        _run_command(
+        my $remote_ref = "refs/remotes/source/$branch";
+        my $result = _run_command(
             [
                 "git", "-C", $repo_dir, "fetch", "--no-tags", "source",
-                "+refs/heads/$branch:refs/heads/$branch"
+                "+refs/heads/$branch:$remote_ref"
             ],
             _git_command_options( $policy, JSON::PP::true )
         );
+        $result->{status} == 0 or die "git fetch failed for branch $branch: $result->{output}\n";
+        $result = _run_command(
+            [ "git", "-C", $repo_dir, "update-ref", "refs/heads/$branch", $remote_ref ],
+            {
+                timeout => 120,
+            }
+        );
+        $result->{status} == 0 or die "git update-ref failed for branch $branch: $result->{output}\n";
     }
     for my $tag ( @{ $selected->{tags} || [] } ) {
-        _run_command(
+        my $result = _run_command(
             [
                 "git", "-C", $repo_dir, "fetch", "--no-tags", "source",
                 "+refs/tags/$tag:refs/tags/$tag"
             ],
             _git_command_options( $policy, JSON::PP::true )
         );
+        $result->{status} == 0 or die "git fetch failed for tag $tag: $result->{output}\n";
     }
 }
 
@@ -1660,8 +1700,33 @@ sub _push_unique {
 
 sub _trim_error {
     my ($error) = @_;
+    $error = "unknown error" unless defined $error;
     $error =~ s/\s+\z//;
     return $error;
+}
+
+sub _sanitize_payload {
+    my ($value) = @_;
+    return _redact_secret_material($value) if !ref($value);
+    if ( ref($value) eq "HASH" ) {
+        return { map { $_ => _sanitize_payload( $value->{$_} ) } keys %{$value} };
+    }
+    if ( ref($value) eq "ARRAY" ) {
+        return [ map { _sanitize_payload($_) } @{$value} ];
+    }
+    return $value;
+}
+
+sub _redact_secret_material {
+    my ($value) = @_;
+    return $value unless defined $value;
+    my $text = $value;
+    $text =~ s{https://[^/\s:@]+:[^@\s/]+@}{https://<redacted>@}g;
+    $text =~ s{(PRIVATE-TOKEN:\s*)\S+}{$1<redacted>}ig;
+    $text =~ s{\bglpat-[A-Za-z0-9._-]+\b}{glpat-<redacted>}g;
+    $text =~ s{\bgithub_pat_[A-Za-z0-9_]+\b}{github_pat_<redacted>}g;
+    $text =~ s{\bgh[opsu]_[A-Za-z0-9_]+\b}{gh_<redacted>}g;
+    return $text;
 }
 
 sub _run_command {

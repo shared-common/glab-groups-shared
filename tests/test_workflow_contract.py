@@ -18,14 +18,17 @@ class SharedWorkflowContractTests(unittest.TestCase):
             text,
         )
 
-    def test_uses_one_mirror_job_per_batch_with_five_way_parallelism(self) -> None:
+    def test_caps_mirror_matrix_with_batch_strides(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("max-parallel: 5", text)
         self.assertIn("matrix: ${{ fromJSON(needs.plan.outputs.batch-matrix) }}", text)
         self.assertIn("batch-matrix: ${{ steps.batch_matrix.outputs.matrix }}", text)
-        self.assertIn("--batch-start \"${{ matrix.batch_index }}\"", text)
-        self.assertIn("--batch-stride 1", text)
-        self.assertIn("--batch-limit 1", text)
+        self.assertIn("max_matrix_jobs = 256", text)
+        self.assertIn('"shard_index": index', text)
+        self.assertIn('"batch_stride": job_count', text)
+        self.assertIn("--batch-start \"${{ matrix.batch_start }}\"", text)
+        self.assertIn("--batch-stride \"${{ matrix.batch_stride }}\"", text)
+        self.assertIn("--batch-limit \"${{ matrix.batch_limit }}\"", text)
         self.assertIn("needs: [plan, mirror]", text)
 
     def test_uses_config_specific_target_pat_secret(self) -> None:
@@ -40,6 +43,7 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("merge-multiple: true", text)
         self.assertIn("results-artifacts/results-*.json", text)
         self.assertIn("results-artifacts/results-*.jsonl", text)
+        self.assertIn("Fail on mirror failures", text)
 
 
 if __name__ == "__main__":

@@ -194,6 +194,39 @@ sub run_cmd {
 
 {
     my $dir = tempdir( CLEANUP => 1 );
+    my $source = File::Spec->catdir( $dir, "source" );
+    my $mirror = File::Spec->catdir( $dir, "mirror" );
+
+    my ( $status, $output ) = run_cmd( "git", "init", "-b", "master", $source );
+    is( $status, 0, "source git init succeeds" ) or diag($output);
+    ( $status, $output ) = run_cmd( "git", "-C", $source, "config", "user.email", 'tests@example.invalid' );
+    is( $status, 0, "source git config email succeeds" ) or diag($output);
+    ( $status, $output ) = run_cmd( "git", "-C", $source, "config", "user.name", "Tests" );
+    is( $status, 0, "source git config name succeeds" ) or diag($output);
+    open( my $fh, ">:encoding(UTF-8)", File::Spec->catfile( $source, "README.md" ) ) or die "unable to write source file";
+    print {$fh} "source\n";
+    close $fh;
+    ( $status, $output ) = run_cmd( "git", "-C", $source, "add", "README.md" );
+    is( $status, 0, "source git add succeeds" ) or diag($output);
+    ( $status, $output ) = run_cmd( "git", "-C", $source, "commit", "-m", "source" );
+    is( $status, 0, "source git commit succeeds" ) or diag($output);
+
+    ( $status, $output ) = run_cmd( "git", "init", $mirror );
+    is( $status, 0, "mirror git init succeeds" ) or diag($output);
+    ( $status, $output ) = run_cmd( "git", "-C", $mirror, "remote", "add", "source", $source );
+    is( $status, 0, "mirror remote add succeeds" ) or diag($output);
+
+    GlabGroups::_fetch_selected_refs(
+        $mirror,
+        { branches => ["master"], tags => [] },
+        { git_timeout_seconds => 300, retry_attempts => 1, retry_backoff_seconds => 1 },
+    );
+    ( $status, $output ) = run_cmd( "git", "-C", $mirror, "rev-parse", "--verify", "refs/heads/master" );
+    is( $status, 0, "fetch creates refs/heads/master without checked-out branch conflict" ) or diag($output);
+}
+
+{
+    my $dir = tempdir( CLEANUP => 1 );
     my $plan_path = File::Spec->catfile( $dir, "plan.json" );
     my $results_0 = File::Spec->catfile( $dir, "results-0.json" );
     my $results_1 = File::Spec->catfile( $dir, "results-1.json" );
@@ -374,6 +407,84 @@ sub run_cmd {
         }
     );
     ok( !exists $requests[1]->{payload}->{visibility}, "project finalize payload does not set visibility" );
+}
+
+{
+    no warnings 'redefine';
+    my @requests;
+
+    local *GlabGroups::_get_project = sub {
+        my ( $client, $project_path ) = @_;
+        return {
+            archived => JSON::PP::true,
+            description => "source",
+            id => 99,
+            lfs_enabled => JSON::PP::false,
+        };
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        push @requests, { method => $method, path => $path, payload => $payload };
+        return { archived => JSON::PP::false, id => 99 } if $method eq "POST" && $path eq "/projects/99/unarchive";
+        return { archived => JSON::PP::false, id => 99 } if $method eq "PUT" && $path eq "/projects/99";
+        return { archived => JSON::PP::false, id => 99 } if $method eq "GET" && $path eq "/projects/99";
+        return { archived => JSON::PP::true, id => 99 } if $method eq "POST" && $path eq "/projects/99/archive";
+        die "unexpected gitlab request: $method $path";
+    };
+
+    my $prepared = GlabGroups::_ensure_target_project(
+        {},
+        {
+            policy => { force_lfs => JSON::PP::false },
+            source_archived => JSON::PP::true,
+            source_description => "source",
+            source_lfs_enabled => JSON::PP::false,
+            target_full_path => "owner/group/project",
+            target_namespace_id => 42,
+        }
+    );
+    ok( $prepared->{unarchived}, "unarchives archived target before mirroring" );
+    is( $requests[0]->{path}, "/projects/99/unarchive", "does not archive before mirror push" );
+
+    GlabGroups::_finalize_target_project(
+        {},
+        99,
+        "master",
+        {
+            source_archived => JSON::PP::true,
+            source_description => "source",
+        }
+    );
+    is( $requests[-1]->{path}, "/projects/99/archive", "archives target only after mirror finalization" );
+}
+
+{
+    no warnings 'redefine';
+    my @requests;
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        push @requests, { method => $method, path => $path, payload => $payload };
+        return { id => 99 };
+    };
+
+    GlabGroups::_ensure_target_lfs_enabled( {}, 99 );
+    is( $requests[0]->{path}, "/projects/99", "enables target project LFS by project id" );
+    ok( $requests[0]->{payload}->{lfs_enabled}, "sets lfs_enabled true for discovered LFS repositories" );
+}
+
+{
+    my $sanitized = GlabGroups::_sanitize_payload(
+        {
+            error => "fatal: https://svc:glpat-secret123\@gitlab.com/group/repo.git and ghp_secretvalue",
+            nested => [ "PRIVATE-TOKEN: glpat-other456" ],
+        }
+    );
+    unlike( $sanitized->{error}, qr/glpat-secret123/, "redacts PAT from authenticated URL errors" );
+    unlike( $sanitized->{error}, qr/ghp_secretvalue/, "redacts GitHub-style tokens from errors" );
+    like( $sanitized->{error}, qr{https://<redacted>\@gitlab\.com/group/repo\.git}, "keeps redacted URL shape useful" );
+    is( $sanitized->{nested}->[0], "PRIVATE-TOKEN: <redacted>", "redacts PRIVATE-TOKEN header values" );
 }
 
 done_testing();

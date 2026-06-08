@@ -19,9 +19,10 @@ the configured relative namespace path.
 4. `post_run_analytics.py`
 
 The shared workflow creates one deterministic plan, uploads it as a run
-artifact, and then builds a dynamic matrix with one mirror job per batch. Each
-job processes exactly one batch of 25 repositories, and the workflow caps the
-matrix at five concurrent jobs. The final report job downloads all batch
+artifact, and then builds a dynamic matrix capped at 256 mirror jobs. Small
+plans still use one job per batch. Larger plans use shard starts and strides so
+each job processes a deterministic subset of batches while GitHub Actions runs
+at most five jobs concurrently. The final report job downloads all batch
 artifacts and aggregates them into one report, CSV, JSON analytics file, and
 optional Parquet file.
 
@@ -44,6 +45,8 @@ The plan includes:
 The mirror stage:
 
 - creates or updates target projects before push
+- unarchives archived targets before push and reapplies the desired archive
+  state after refs are mirrored
 - never sets target group or project visibility
 - fetches only the selected branches and tags
 - always includes the source default branch
@@ -57,5 +60,8 @@ The mirror stage:
 
 ## Failure model
 
-Per-repository failures are captured as skipped result rows and do not abort the
-batch job. Fatal configuration or credential failures still stop the workflow.
+Expected policy skips, such as repositories above the selected-ref size budget,
+are captured as skipped result rows. Unexpected per-repository exceptions are
+captured as failed rows so artifacts and summaries are still produced; the final
+report job then fails the workflow if any failed rows remain. Fatal
+configuration or credential failures still stop the workflow before mirroring.

@@ -187,11 +187,17 @@ jobs:
               raise SystemExit("plan batch_size must be greater than zero")
           if total_batches < 0:
               raise SystemExit("plan total_batches must not be negative")
-          if total_batches > 256:
-              raise SystemExit("plan creates more than 256 mirror jobs")
-          include = [{"batch_index": index} for index in range(total_batches)]
-          if not include:
-              include = [{"batch_index": 0}]
+          max_matrix_jobs = 256
+          job_count = min(max(total_batches, 1), max_matrix_jobs)
+          include = [
+              {
+                  "shard_index": index,
+                  "batch_start": index,
+                  "batch_stride": job_count,
+                  "batch_limit": 0,
+              }
+              for index in range(job_count)
+          ]
           matrix = json.dumps({"include": include}, separators=(",", ":"))
           print(f"matrix={matrix}")
           PY
@@ -281,21 +287,21 @@ jobs:
             mirror \
             --plan plan.json \
             --batch-size "${{ inputs.batch-size }}" \
-            --batch-start "${{ matrix.batch_index }}" \
-            --batch-stride 1 \
-            --batch-limit 1 \
-            --output "results-${{ matrix.batch_index }}.json" \
-            --jsonl "results-${{ matrix.batch_index }}.jsonl"
+            --batch-start "${{ matrix.batch_start }}" \
+            --batch-stride "${{ matrix.batch_stride }}" \
+            --batch-limit "${{ matrix.batch_limit }}" \
+            --output "results-${{ matrix.shard_index }}.json" \
+            --jsonl "results-${{ matrix.shard_index }}.jsonl"
 
       - name: Upload batch result artifacts
         # actions/upload-artifact v6.0.0
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
-          name: glab-results-${{ matrix.batch_index }}-${{ github.run_id }}
+          name: glab-results-${{ matrix.shard_index }}-${{ github.run_id }}
           if-no-files-found: error
           path: |
-            results-${{ matrix.batch_index }}.json
-            results-${{ matrix.batch_index }}.jsonl
+            results-${{ matrix.shard_index }}.json
+            results-${{ matrix.shard_index }}.jsonl
 
       - name: Cleanup secrets
         if: always()
@@ -402,3 +408,21 @@ jobs:
             results.csv
             analytics.json
             results.parquet
+
+      - name: Fail on mirror failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          failed_count="$(
+            python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("report.json").read_text(encoding="utf-8"))
+          print(int((report.get("result_counts") or {}).get("failed") or 0))
+          PY
+          )"
+          if [ "${failed_count}" -gt 0 ]; then
+            printf 'mirror reported %s failed repositories\n' "${failed_count}" >&2
+            exit 1
+          fi
