@@ -10,8 +10,10 @@ use File::Spec;
 use File::Temp qw(tempdir tempfile);
 use Getopt::Long qw(GetOptionsFromArray);
 use JSON::PP;
+use MIME::Base64 qw(decode_base64 encode_base64);
 use POSIX qw(strftime);
 use Time::HiRes qw(sleep);
+use Time::Piece ();
 use URI::Escape qw(uri_escape_utf8);
 
 our @EXPORT_OK = qw(
@@ -516,24 +518,96 @@ sub _cmd_resume {
 
 sub _discover_inventory {
     my ($config) = @_;
+    my $source_auth = _load_source_auth();
     my @inventory;
     for my $namespace ( @{ $config->{namespaces} } ) {
-        my ( $base_url, $group_path ) = _parse_group_url( $namespace->{source_group_url} );
-        my $source_client = _make_gitlab_client( $base_url, undef, undef );
         my $policy = _merge_policy( $config->{defaults}, $namespace, {} );
-        my $projects = _list_group_projects( $source_client, $group_path, $policy );
-        push @inventory,
-          {
-            namespace => $namespace,
-            group_path => $group_path,
-            base_url => $base_url,
-            projects => $projects,
-          };
+        push @inventory, @{ _discover_namespace_inventory( $namespace, $policy, $source_auth ) };
     }
     return {
         discovered_at => _timestamp(),
         inventory => \@inventory,
     };
+}
+
+sub _discover_namespace_inventory {
+    my ( $namespace, $policy, $source_auth ) = @_;
+    my $source = _parse_source_url( $namespace->{source_group_url}, $policy );
+
+    if ( $source->{kind} eq "gitlab_group" ) {
+        my $source_client = _make_gitlab_client( $source->{base_url}, undef, undef );
+        my $projects = _list_group_projects( $source_client, $source->{root_path}, $policy );
+        return [
+            {
+                namespace => $namespace,
+                group_path => $source->{root_path},
+                base_url => $source->{base_url},
+                projects => $projects,
+            },
+        ];
+    }
+
+    if ( $source->{kind} eq "gitlab_instance_root" ) {
+        my $source_client = _make_gitlab_client( $source->{base_url}, undef, undef );
+        my @inventory;
+        for my $group ( @{ _list_gitlab_top_level_groups( $source_client, $policy ) } ) {
+            next unless ref($group) eq "HASH";
+            my $group_path = _required_relative_namespace_path(
+                $group->{full_path} || $group->{path},
+                "gitlab top-level group path",
+            );
+            my $projects = _list_group_projects( $source_client, $group_path, $policy );
+            push @inventory,
+              {
+                namespace => {
+                    %{$namespace},
+                    target_namespace_path => _join_path( $namespace->{target_namespace_path}, $group_path ),
+                },
+                group_path => $group_path,
+                base_url => $source->{base_url},
+                projects => $projects,
+              };
+        }
+        return \@inventory;
+    }
+
+    if ( $source->{kind} eq "github_org" ) {
+        my $github_source_auth = _github_installation_source_auth(
+            $source_auth,
+            $source->{base_url},
+            $source->{root_path},
+            $policy,
+        );
+        my $projects = _list_github_org_projects(
+            $source->{base_url},
+            $source->{root_path},
+            $policy,
+            $github_source_auth,
+        );
+        return [
+            {
+                namespace => $namespace,
+                group_path => $source->{root_path},
+                base_url => $source->{base_url},
+                projects => $projects,
+            },
+        ];
+    }
+
+    if ( $source->{kind} eq "cgit_root" ) {
+        my $group_path = _source_root_key( $source->{base_url} );
+        my $projects = _list_cgit_root_projects( $source->{base_url}, $group_path, $policy );
+        return [
+            {
+                namespace => $namespace,
+                group_path => $group_path,
+                base_url => $source->{base_url},
+                projects => $projects,
+            },
+        ];
+    }
+
+    die "unsupported source kind: $source->{kind}\n";
 }
 
 sub _normalize_inventory {
@@ -677,7 +751,8 @@ sub _mirror_entry {
     my $init_result = _run_command( [ "git", "init", $repo_dir ], { timeout => 120 } );
     $init_result->{status} == 0 or die "git init failed: $init_result->{output}\n";
 
-    my $source_url = _maybe_auth_url( $entry->{source_http_url}, $source_auth->{username}, $source_auth->{token} );
+    my $entry_source_auth = _resolve_source_auth_for_entry( $source_auth, $entry );
+    my $source_url = _maybe_auth_url( $entry->{source_http_url}, $entry_source_auth->{username}, $entry_source_auth->{token} );
     my $target_url = _maybe_auth_url( _project_git_url( $target_client->{base_url}, $entry->{target_full_path} ), $target_client->{username}, $target_client->{token} );
 
     my $remote_result = _run_command( [ "git", "-C", $repo_dir, "remote", "add", "source", $source_url ], { timeout => 60 } );
@@ -988,7 +1063,63 @@ sub _load_target_root_group_path {
 sub _load_source_auth {
     my $username = _optional_env_file("GL_GROUPS_SOURCE_USERNAME");
     my $token = _optional_env_file("GL_GROUPS_SOURCE_TOKEN");
-    return { username => $username, token => $token };
+    my $github_app_id = _optional_env_file("GH_ORG_SHARED_APP_ID");
+    my $github_app_pem = _optional_env_file("GH_ORG_SHARED_APP_PEM");
+    if ( defined $github_app_id xor defined $github_app_pem ) {
+        die "GH_ORG_SHARED_APP_ID_FILE and GH_ORG_SHARED_APP_PEM_FILE must be set together\n";
+    }
+    my $github_app;
+    if ( defined $github_app_id && defined $github_app_pem ) {
+        $github_app = {
+            app_id => _required_numeric_string( $github_app_id, "GH_ORG_SHARED_APP_ID" ),
+            pem => _normalize_private_key_secret( $github_app_pem, "GH_ORG_SHARED_APP_PEM" ),
+        };
+    }
+    return {
+        github_app => $github_app,
+        github_installation_tokens => {},
+        token => $token,
+        username => $username,
+    };
+}
+
+sub _parse_source_url {
+    my ( $url, $policy ) = @_;
+    my ( $base_url, $path ) = _split_source_url($url);
+    my $host = _base_url_host($base_url);
+
+    if ( $host eq "github.com" ) {
+        my @segments = split m{/}, $path;
+        @segments == 1
+          or die "GitHub source URL must point to exactly one organization path: $url\n";
+        return {
+            kind => "github_org",
+            base_url => $base_url,
+            root_path => $segments[0],
+        };
+    }
+
+    if ( length $path ) {
+        return {
+            kind => "gitlab_group",
+            base_url => $base_url,
+            root_path => $path,
+        };
+    }
+
+    if ( _is_gitlab_instance_root( $base_url, $policy ) ) {
+        return {
+            kind => "gitlab_instance_root",
+            base_url => $base_url,
+            root_path => q{},
+        };
+    }
+
+    return {
+        kind => "cgit_root",
+        base_url => $base_url,
+        root_path => q{},
+    };
 }
 
 sub _make_gitlab_client {
@@ -1299,6 +1430,189 @@ sub _ensure_target_branch_protected {
     return _get_branch( $client, $project_id, $branch_name );
 }
 
+sub _list_gitlab_top_level_groups {
+    my ( $client, $policy ) = @_;
+    my @groups;
+    my $page = 1;
+    my $page_size = _gitlab_read_page_size($policy);
+    my $request_opt = _gitlab_read_request_opt($policy);
+    while (1) {
+        my $path = sprintf(
+            "/groups?top_level_only=true&per_page=%d&page=%d&order_by=path&sort=asc",
+            $page_size,
+            $page,
+        );
+        my $data = _gitlab_request( $client, "GET", $path, undef, $request_opt );
+        ref($data) eq "ARRAY" or die "top-level groups response must be a list\n";
+        last unless @{$data};
+        push @groups, @{$data};
+        last if @{$data} < $page_size;
+        $page++;
+    }
+    return \@groups;
+}
+
+sub _resolve_source_auth_for_entry {
+    my ( $source_auth, $entry ) = @_;
+    my ( $base_url ) = _split_source_url( $entry->{source_http_url} );
+    if ( _base_url_host($base_url) eq "github.com" ) {
+        return _github_installation_source_auth(
+            $source_auth,
+            $base_url,
+            $entry->{source_group_path},
+            $entry->{policy},
+        );
+    }
+    return {
+        token => $source_auth->{token},
+        username => $source_auth->{username},
+    };
+}
+
+sub _github_installation_source_auth {
+    my ( $source_auth, $base_url, $account, $policy ) = @_;
+    my $github_app = $source_auth->{github_app}
+      or die "GitHub source $account requires GH_ORG_SHARED_APP_ID and GH_ORG_SHARED_APP_PEM secrets\n";
+    my $cache_key = lc( $base_url . "|" . $account );
+    my $cached = $source_auth->{github_installation_tokens}->{$cache_key};
+    if ( $cached && $cached->{expires_at_epoch} > time() + 300 ) {
+        return {
+            token => $cached->{token},
+            username => "x-access-token",
+        };
+    }
+
+    my $jwt = _generate_github_app_jwt( $github_app->{app_id}, $github_app->{pem} );
+    my $installation = _get_github_account_installation(
+        $base_url,
+        $account,
+        $jwt,
+        $policy,
+    );
+    my %request_opt = %{ _source_read_request_opt($policy) };
+    $request_opt{auth_bearer} = $jwt;
+    $request_opt{method} = "POST";
+    my $token_payload = _github_request(
+        $base_url,
+        "/app/installations/" . $installation->{id} . "/access_tokens",
+        undef,
+        \%request_opt,
+    );
+    ref($token_payload) eq "HASH"
+      or die "GitHub installation token response must be an object for $account\n";
+    my $token = _required_string( $token_payload->{token}, "GitHub installation token" );
+    my $expires_at = _required_string( $token_payload->{expires_at}, "GitHub installation token expires_at" );
+    my $token_state = {
+        expires_at_epoch => _parse_iso8601_utc_epoch($expires_at),
+        token => $token,
+    };
+    $source_auth->{github_installation_tokens}->{$cache_key} = $token_state;
+    return {
+        token => $token_state->{token},
+        username => "x-access-token",
+    };
+}
+
+sub _get_github_account_installation {
+    my ( $base_url, $account, $jwt, $policy ) = @_;
+    my %request_opt = %{ _source_read_request_opt($policy) };
+    $request_opt{allow_missing} = 1;
+    $request_opt{auth_bearer} = $jwt;
+
+    my $installation = _github_request(
+        $base_url,
+        "/orgs/" . uri_escape_utf8($account) . "/installation",
+        undef,
+        \%request_opt,
+    );
+    return $installation if $installation;
+
+    $installation = _github_request(
+        $base_url,
+        "/users/" . uri_escape_utf8($account) . "/installation",
+        undef,
+        \%request_opt,
+    );
+    return $installation if $installation;
+
+    die "GitHub App installation not found for source account $account\n";
+}
+
+sub _list_github_org_projects {
+    my ( $base_url, $org_path, $policy, $source_auth ) = @_;
+    my @projects;
+    my $page = 1;
+    my $page_size = 100;
+    while (1) {
+        my $path = sprintf(
+            "/orgs/%s/repos?per_page=%d&page=%d&type=all&sort=full_name&direction=asc",
+            uri_escape_utf8($org_path),
+            $page_size,
+            $page,
+        );
+        my %request_opt = %{ _source_read_request_opt($policy) };
+        $request_opt{auth_bearer} = $source_auth->{token};
+        my $data = _github_request( $base_url, $path, undef, \%request_opt );
+        ref($data) eq "ARRAY" or die "GitHub org repositories response must be a list\n";
+        last unless @{$data};
+        for my $repo ( @{$data} ) {
+            next unless ref($repo) eq "HASH";
+            my $full_name = _required_project_path(
+                $repo->{full_name},
+                "GitHub repository full_name",
+            );
+            push @projects,
+              {
+                archived => $repo->{archived} ? JSON::PP::true : JSON::PP::false,
+                default_branch => defined $repo->{default_branch} ? $repo->{default_branch} : q{},
+                description => defined $repo->{description} ? $repo->{description} : q{},
+                empty_repo => ( defined $repo->{size} && $repo->{size} == 0 ) ? JSON::PP::true : JSON::PP::false,
+                http_url_to_repo => _required_https_url( $repo->{clone_url}, "GitHub clone_url" ),
+                id => $repo->{id},
+                lfs_enabled => JSON::PP::false,
+                last_activity_at => $repo->{pushed_at} || $repo->{updated_at},
+                path_with_namespace => $full_name,
+                ssh_url_to_repo => $repo->{ssh_url} || $repo->{clone_url},
+                visibility => defined $repo->{visibility}
+                  ? $repo->{visibility}
+                  : ( $repo->{private} ? "private" : "public" ),
+              };
+        }
+        last if @{$data} < $page_size;
+        $page++;
+    }
+    return \@projects;
+}
+
+sub _list_cgit_root_projects {
+    my ( $base_url, $group_path, $policy ) = @_;
+    my $html = _http_text_request( $base_url, _source_read_request_opt($policy) );
+    my @projects;
+    my %seen;
+    while ( $html =~ m{<a[^>]+href=(["'])([^"'?#]+)\1[^>]*>([^<]*)</a>}ig ) {
+        my $repo_name = _extract_cgit_repo_name( $2, $3 );
+        next unless defined $repo_name;
+        next if $seen{$repo_name}++;
+        my $repo_url = $base_url . "/" . $repo_name;
+        push @projects,
+          {
+            archived => JSON::PP::false,
+            default_branch => q{},
+            description => defined $3 && length $3 ? $3 : $repo_name,
+            empty_repo => JSON::PP::false,
+            http_url_to_repo => $repo_url,
+            id => "cgit:$repo_url",
+            lfs_enabled => JSON::PP::false,
+            last_activity_at => undef,
+            path_with_namespace => _join_path( $group_path, $repo_name ),
+            ssh_url_to_repo => $repo_url,
+            visibility => "public",
+          };
+    }
+    @projects or die "cgit root discovery found no repositories at $base_url\n";
+    return \@projects;
+}
+
 sub _list_group_projects {
     my ( $client, $group_path, $policy ) = @_;
     my $group = _get_group( $client, $group_path );
@@ -1607,6 +1921,136 @@ sub _gitlab_request {
     die "gitlab request exhausted retries for $method $path\n";
 }
 
+sub _github_request {
+    my ( $base_url, $path, $payload, $opt ) = @_;
+    $opt ||= {};
+    my $url = _github_api_base_url($base_url) . $path;
+    my $attempts = $opt->{retry_attempts} || $DEFAULTS{retry_attempts};
+    my $backoff = $opt->{retry_backoff_seconds} || $DEFAULTS{retry_backoff_seconds};
+    my $max_time = $opt->{max_time_seconds} || 60;
+    my $method = $opt->{method} || ( defined $payload ? "POST" : "GET" );
+    my $timeout = $opt->{timeout_seconds} || 90;
+    my $content = defined $payload ? $JSON->encode($payload) : undef;
+    for my $attempt ( 1 .. $attempts ) {
+        my @command = (
+            "curl",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--max-time",
+            $max_time,
+            "--request",
+            $method,
+            "--header",
+            "Accept: application/vnd.github+json",
+            "--header",
+            "User-Agent: glab-groups-shared",
+            "--write-out",
+            "\n%{http_code}",
+            $url,
+        );
+        if ( $opt->{auth_bearer} ) {
+            push @command, "--header", "Authorization: Bearer " . $opt->{auth_bearer};
+        }
+        for my $header ( @{ $opt->{headers} || [] } ) {
+            push @command, "--header", $header;
+        }
+        if ( defined $content ) {
+            push @command, "--header", "Content-Type: application/json", "--data", $content;
+        }
+
+        my $response = _run_command(
+            \@command,
+            {
+                timeout => $timeout,
+            }
+        );
+
+        my ( $http_status, $body ) = _split_curl_response( $response->{output} );
+        if ( $response->{status} == 0 && $http_status >= 200 && $http_status < 300 ) {
+            return undef if !defined $body || $body eq q{};
+            return _decode_json_response( $body, "GET", $path );
+        }
+        return undef if $opt->{allow_missing} && $http_status == 404;
+
+        if (
+            (
+                $response->{status} != 0
+                || $http_status == 429
+                || $http_status >= 500
+            )
+            && $attempt < $attempts
+          )
+        {
+            sleep( $backoff * $attempt );
+            next;
+        }
+
+        my $status_label = $http_status || $response->{status};
+        my $message = defined $body && length $body ? $body : ( $response->{output} || "unknown error" );
+        die "GitHub request failed [$status_label] $path: $message\n";
+    }
+    die "GitHub request exhausted retries for $path\n";
+}
+
+sub _github_api_base_url {
+    my ($base_url) = @_;
+    return "https://api.github.com" if _base_url_host($base_url) eq "github.com";
+    return $base_url . "/api/v3";
+}
+
+sub _http_text_request {
+    my ( $url, $opt ) = @_;
+    $opt ||= {};
+    my $attempts = $opt->{retry_attempts} || $DEFAULTS{retry_attempts};
+    my $backoff = $opt->{retry_backoff_seconds} || $DEFAULTS{retry_backoff_seconds};
+    my $max_time = $opt->{max_time_seconds} || 60;
+    my $timeout = $opt->{timeout_seconds} || 90;
+    for my $attempt ( 1 .. $attempts ) {
+        my $response = _run_command(
+            [
+                "curl",
+                "--silent",
+                "--show-error",
+                "--location",
+                "--max-time",
+                $max_time,
+                "--header",
+                "User-Agent: glab-groups-shared",
+                "--write-out",
+                "\n%{http_code}",
+                $url,
+            ],
+            {
+                timeout => $timeout,
+            }
+        );
+
+        my ( $http_status, $body ) = _split_curl_response( $response->{output} );
+        if ( $response->{status} == 0 && $http_status >= 200 && $http_status < 300 ) {
+            return $body;
+        }
+
+        if (
+            (
+                $response->{status} != 0
+                || $http_status == 429
+                || $http_status >= 500
+            )
+            && $attempt < $attempts
+          )
+        {
+            sleep( $backoff * $attempt );
+            next;
+        }
+
+        my $status_label = $http_status || $response->{status};
+        my $message = defined $body && length $body ? $body : ( $response->{output} || "unknown error" );
+        die "HTTP request failed [$status_label] $url: $message\n";
+    }
+    die "HTTP request exhausted retries for $url\n";
+}
+
 sub _gitlab_read_page_size {
     return $GITLAB_READ_DEFAULTS{page_size};
 }
@@ -1629,6 +2073,11 @@ sub _gitlab_read_request_opt {
     };
 }
 
+sub _source_read_request_opt {
+    my ($policy) = @_;
+    return _gitlab_read_request_opt($policy);
+}
+
 sub _split_curl_response {
     my ($text) = @_;
     defined $text or return ( 0, q{} );
@@ -1645,6 +2094,75 @@ sub _decode_json_response {
     my ( $text, $method, $path ) = @_;
     return undef if !defined $text || $text eq q{};
     return $JSON->decode($text);
+}
+
+sub _generate_github_app_jwt {
+    my ( $app_id, $pem_text ) = @_;
+    my ( $key_fh, $key_path ) = tempfile();
+    print {$key_fh} $pem_text;
+    close $key_fh;
+
+    my $header = _base64url_encode_json(
+        {
+            alg => "RS256",
+            typ => "JWT",
+        }
+    );
+    my $now = time();
+    my $payload = _base64url_encode_json(
+        {
+            exp => $now + 540,
+            iat => $now,
+            iss => $app_id,
+        }
+    );
+    my $unsigned = $header . "." . $payload;
+    my ( $unsigned_fh, $unsigned_path ) = tempfile();
+    binmode $unsigned_fh;
+    print {$unsigned_fh} $unsigned;
+    close $unsigned_fh;
+
+    my $sign_result = _run_command(
+        [
+            "openssl",
+            "dgst",
+            "-binary",
+            "-sha256",
+            "-sign",
+            $key_path,
+            $unsigned_path,
+        ],
+        {
+            timeout => 60,
+        }
+    );
+    unlink $key_path;
+    unlink $unsigned_path;
+    $sign_result->{status} == 0 or die "GitHub App JWT signing failed: $sign_result->{output}\n";
+    return $unsigned . "." . _base64url_encode_bytes( $sign_result->{output} );
+}
+
+sub _base64url_encode_json {
+    my ($payload) = @_;
+    return _base64url_encode_bytes( $JSON->encode($payload) );
+}
+
+sub _base64url_encode_bytes {
+    my ($value) = @_;
+    my $encoded = encode_base64( $value, q{} );
+    $encoded =~ tr{+/}{-_};
+    $encoded =~ s/=+\z//;
+    return $encoded;
+}
+
+sub _parse_iso8601_utc_epoch {
+    my ($value) = @_;
+    my $text = _required_string( $value, "timestamp" );
+    my $parsed = eval {
+        Time::Piece->strptime( $text, "%Y-%m-%dT%H:%M:%SZ" )->epoch;
+    };
+    defined $parsed or die "invalid UTC timestamp: $text\n";
+    return $parsed;
 }
 
 sub _required_env_file {
@@ -1706,6 +2224,13 @@ sub _required_string {
     return $value;
 }
 
+sub _required_numeric_string {
+    my ( $value, $label ) = @_;
+    $value = _required_string( $value, $label );
+    $value =~ /\A\d+\z/ or die "$label must contain digits only\n";
+    return $value;
+}
+
 sub _required_project_path {
     my ( $value, $label ) = @_;
     return _required_group_path_min_segments( $value, $label, 2 );
@@ -1746,6 +2271,23 @@ sub _required_secret_name {
     $value =~ /\AGL_PAT_GROUP_[A-Z0-9_]+_SVC\z/
       or die "$label must name a GL_PAT_GROUP_*_SVC secret\n";
     return $value;
+}
+
+sub _normalize_private_key_secret {
+    my ( $value, $label ) = @_;
+    my $normalized = _required_string( $value, $label );
+    if ( $normalized !~ /-----BEGIN [A-Z ]+ PRIVATE KEY-----/ ) {
+        my $decoded = eval { decode_base64($normalized) };
+        if ( defined $decoded && $decoded =~ /-----BEGIN [A-Z ]+ PRIVATE KEY-----/ ) {
+            $normalized = $decoded;
+        }
+    }
+    $normalized =~ s/\\n/\n/g;
+    $normalized =~ s/\r//g;
+    $normalized =~ /-----BEGIN [A-Z ]+ PRIVATE KEY-----/
+      or die "$label must contain a PEM-encoded private key\n";
+    $normalized .= "\n" unless $normalized =~ /\n\z/;
+    return $normalized;
 }
 
 sub _reject_visibility_key {
@@ -1842,16 +2384,67 @@ sub _join_path {
     return $left . "/" . $right;
 }
 
-sub _parse_group_url {
+sub _split_source_url {
     my ($url) = @_;
-    $url =~ /\A(https:\/\/[A-Za-z0-9.-]+(?::\d+)?)(\/.+)\z/ or die "invalid group URL: $url\n";
+    $url = _required_https_url( $url, "source_group_url" );
+    $url =~ /\A(https:\/\/[A-Za-z0-9.-]+(?::\d+)?)(?:\/([^?#]+))?\z/
+      or die "invalid source URL: $url\n";
     my $base = $1;
-    my $path = $2;
-    $path =~ s{\A/}{};
+    my $path = defined $2 ? $2 : q{};
     $path =~ s{/\z}{};
-    $path =~ /\A[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*\z/
-      or die "invalid group URL path: $url\n";
+    if ( length $path ) {
+        $path =~ /\A[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*\z/
+          or die "invalid source URL path: $url\n";
+    }
     return ( $base, $path );
+}
+
+sub _base_url_host {
+    my ($base_url) = @_;
+    $base_url =~ /\Ahttps:\/\/([^\/:]+)(?::\d+)?\z/
+      or die "invalid base URL: $base_url\n";
+    return lc($1);
+}
+
+sub _is_gitlab_instance_root {
+    my ( $base_url, $policy ) = @_;
+    my $client = _make_gitlab_client( $base_url, undef, undef );
+    my $ok = eval {
+        my $groups = _gitlab_request(
+            $client,
+            "GET",
+            "/groups?top_level_only=true&per_page=1&page=1&order_by=path&sort=asc",
+            undef,
+            _source_read_request_opt($policy),
+        );
+        ref($groups) eq "ARRAY" or die "GitLab root probe did not return a list\n";
+        1;
+    };
+    return $ok ? 1 : 0;
+}
+
+sub _source_root_key {
+    my ($base_url) = @_;
+    my $host = _base_url_host($base_url);
+    $host =~ /\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
+      or die "unable to derive source root key from $base_url\n";
+    return $host;
+}
+
+sub _extract_cgit_repo_name {
+    my ( $href, $text ) = @_;
+    return undef unless defined $href;
+    return undef if $href =~ /\?/;
+    return undef if $href =~ m{\A(?:https?:)?//}i;
+    my $candidate = $href;
+    $candidate =~ s{#.*\z}{};
+    $candidate =~ s{\A/+}{};
+    $candidate =~ s{/\z}{};
+    return undef unless length $candidate;
+    return undef if $candidate =~ m{/};
+    return undef if $candidate =~ /\A(?:about|favicon\.ico|robots\.txt|cgit\.(?:css|png))\z/i;
+    return undef unless $candidate =~ /\A[A-Za-z0-9][A-Za-z0-9._-]*\z/;
+    return $candidate;
 }
 
 sub _project_git_url {

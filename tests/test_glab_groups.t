@@ -68,6 +68,177 @@ sub run_cmd {
 }
 
 {
+    no warnings 'redefine';
+
+    local *GlabGroups::_load_source_auth = sub { return { github_app => { app_id => "123", pem => "unused" }, github_installation_tokens => {} }; };
+    local *GlabGroups::_github_installation_source_auth = sub {
+        my ( $source_auth, $base_url, $account, $policy ) = @_;
+        return { token => "ghs_install_token", username => "x-access-token" };
+    };
+    local *GlabGroups::_github_request = sub {
+        my ( $base_url, $path, $payload, $opt ) = @_;
+        is( $opt->{auth_bearer}, "ghs_install_token", "GitHub org discovery uses the installation token as a bearer token" );
+        return [
+            {
+                archived => JSON::PP::false,
+                clone_url => "https://github.com/labwc/labwc.git",
+                default_branch => "master",
+                description => "Wayland compositor",
+                full_name => "labwc/labwc",
+                id => 101,
+                private => JSON::PP::false,
+                pushed_at => "2026-06-08T00:00:00Z",
+                size => 128,
+                ssh_url => 'git@github.com:labwc/labwc.git',
+                visibility => "public",
+            },
+        ] if $path =~ /page=1/;
+        return [] if $path =~ /page=2/;
+        die "unexpected GitHub request: $base_url $path";
+    };
+
+    my $inventory = GlabGroups::_discover_inventory(
+        {
+            defaults => { additional_branches => [], additional_tags => [] },
+            namespaces => [
+                {
+                    name => "labwc",
+                    source_group_url => "https://github.com/labwc",
+                    target_namespace_path => "labwc",
+                },
+            ],
+        }
+    );
+
+    is( $inventory->{inventory}->[0]->{group_path}, "labwc", "GitHub org discovery keeps the org path as the source group path" );
+    is( $inventory->{inventory}->[0]->{projects}->[0]->{path_with_namespace}, "labwc/labwc", "GitHub org discovery maps full_name into path_with_namespace" );
+    is( $inventory->{inventory}->[0]->{projects}->[0]->{http_url_to_repo}, "https://github.com/labwc/labwc.git", "GitHub org discovery keeps the clone URL" );
+}
+
+{
+    no warnings 'redefine';
+
+    local *GlabGroups::_get_github_account_installation = sub {
+        my ( $base_url, $account, $jwt, $policy ) = @_;
+        return { id => 77 };
+    };
+    local *GlabGroups::_generate_github_app_jwt = sub { return "jwt-token"; };
+    local *GlabGroups::_github_request = sub {
+        my ( $base_url, $path, $payload, $opt ) = @_;
+        is( $opt->{method}, "POST", "GitHub installation token request uses POST" );
+        is( $opt->{auth_bearer}, "jwt-token", "GitHub installation token request uses the app JWT" );
+        return {
+            expires_at => "2030-01-01T00:00:00Z",
+            token => "ghs_cached_token",
+        };
+    };
+
+    my $source_auth = {
+        github_app => {
+            app_id => "123",
+            pem => "unused",
+        },
+        github_installation_tokens => {},
+    };
+    my $resolved = GlabGroups::_github_installation_source_auth(
+        $source_auth,
+        "https://github.com",
+        "labwc",
+        {},
+    );
+    is_deeply(
+        $resolved,
+        {
+            token => "ghs_cached_token",
+            username => "x-access-token",
+        },
+        "GitHub installation auth resolves an x-access-token source credential",
+    );
+}
+
+{
+    no warnings 'redefine';
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path ) = @_;
+        return [ { id => 1, full_path => "plasma", path => "plasma" } ]
+          if $method eq "GET" && $path =~ m{\A/groups\?top_level_only=true.*page=1};
+        return []
+          if $method eq "GET" && $path =~ m{\A/groups\?top_level_only=true.*page=2};
+        return { id => 1, full_path => "plasma", path => "plasma" }
+          if $method eq "GET" && $path eq "/groups/plasma";
+        return [
+            {
+                archived => JSON::PP::false,
+                default_branch => "master",
+                description => "KWin",
+                empty_repo => JSON::PP::false,
+                http_url_to_repo => "https://invent.kde.org/plasma/kwin.git",
+                id => 202,
+                lfs_enabled => JSON::PP::false,
+                path_with_namespace => "plasma/kwin",
+                ssh_url_to_repo => 'git@invent.kde.org:plasma/kwin.git',
+                visibility => "public",
+            },
+        ] if $method eq "GET" && $path =~ m{\A/groups/1/projects\?};
+        return []
+          if $method eq "GET" && $path =~ m{\A/groups/1/subgroups\?};
+        die "unexpected gitlab request: $method $path";
+    };
+
+    my $inventory = GlabGroups::_discover_inventory(
+        {
+            defaults => { additional_branches => [], additional_tags => [] },
+            namespaces => [
+                {
+                    name => "kde-root",
+                    source_group_url => "https://invent.kde.org",
+                    target_namespace_path => "kde",
+                },
+            ],
+        }
+    );
+
+    is( $inventory->{inventory}->[0]->{group_path}, "plasma", "GitLab instance-root discovery expands the top-level group path" );
+    is( $inventory->{inventory}->[0]->{namespace}->{target_namespace_path}, "kde/plasma", "GitLab instance-root discovery prefixes the target namespace with the top-level group path" );
+    is( $inventory->{inventory}->[0]->{projects}->[0]->{path_with_namespace}, "plasma/kwin", "GitLab instance-root discovery keeps the source project namespace" );
+}
+
+{
+    no warnings 'redefine';
+
+    local *GlabGroups::_is_gitlab_instance_root = sub { return 0; };
+    local *GlabGroups::_http_text_request = sub {
+        return <<'HTML';
+<html>
+  <body>
+    <a href="/iptables/">iptables</a>
+    <a href="/nftables/">nftables</a>
+    <a href="/cgit.css">stylesheet</a>
+  </body>
+</html>
+HTML
+    };
+
+    my $inventory = GlabGroups::_discover_inventory(
+        {
+            defaults => { additional_branches => [], additional_tags => [] },
+            namespaces => [
+                {
+                    name => "netfilter-root",
+                    source_group_url => "https://git.netfilter.org",
+                    target_namespace_path => "netfilter",
+                },
+            ],
+        }
+    );
+
+    is( $inventory->{inventory}->[0]->{group_path}, "git.netfilter.org", "cgit root discovery derives a stable synthetic source root key from the host" );
+    is( $inventory->{inventory}->[0]->{projects}->[0]->{path_with_namespace}, "git.netfilter.org/iptables", "cgit root discovery builds synthetic source project paths beneath the host key" );
+    is( $inventory->{inventory}->[0]->{projects}->[1]->{http_url_to_repo}, "https://git.netfilter.org/nftables", "cgit root discovery derives HTTPS clone URLs from the repository name" );
+}
+
+{
     my $refs = resolve_selected_refs(
         "main",
         {

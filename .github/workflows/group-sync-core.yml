@@ -54,6 +54,7 @@ jobs:
       contents: read
     outputs:
       batch-matrix: ${{ steps.batch_matrix.outputs.matrix }}
+      needs-github-source-auth: ${{ steps.config_meta.outputs.needs-github-source-auth }}
     steps:
       - name: Validate workflow inputs
         shell: bash
@@ -73,7 +74,7 @@ jobs:
               ;;
           esac
           case "${TARGET_TOKEN_SECRET}" in
-            GL_PAT_GROUP_KALI_SVC|GL_PAT_GROUP_DEBIAN_SVC|GL_PAT_GROUP_FREEDESKTOP_SVC)
+            GL_PAT_GROUP_KALI_SVC|GL_PAT_GROUP_DEBIAN_SVC|GL_PAT_GROUP_FREEDESKTOP_SVC|GL_PAT_GROUP_SMALL_SVC|GL_PAT_GROUP_KDE_SVC|GL_PAT_GROUP_GNOME_SVC)
               ;;
             *)
               printf 'invalid target-token-secret: %s\n' \
@@ -90,6 +91,15 @@ jobs:
               ;;
             glab-groups-freedesktop)
               expected_token_secret="GL_PAT_GROUP_FREEDESKTOP_SVC"
+              ;;
+            glab-groups-small)
+              expected_token_secret="GL_PAT_GROUP_SMALL_SVC"
+              ;;
+            glab-groups-kde)
+              expected_token_secret="GL_PAT_GROUP_KDE_SVC"
+              ;;
+            glab-groups-gnome)
+              expected_token_secret="GL_PAT_GROUP_GNOME_SVC"
               ;;
             *)
               printf 'unsupported config-path: %s\n' "${CONFIG_PATH}" >&2
@@ -134,13 +144,38 @@ jobs:
         id: config_meta
         shell: bash
         env:
+          CONFIG_DIR: gh-actions-cfg/${{ inputs.config-path }}
           TARGET_TOKEN_SECRET: ${{ inputs.target-token-secret }}
         run: |
           set -euo pipefail
+          needs_github_source_auth="$(
+            python3 - "${CONFIG_DIR}" <<'PY'
+            import json
+            import sys
+            from pathlib import Path
+
+            config_dir = Path(sys.argv[1])
+            found = False
+            for path in sorted(config_dir.glob("*.json")):
+                data = json.loads(path.read_text(encoding="utf-8"))
+                for namespace in data.get("namespaces", []):
+                    source_url = namespace.get("source_group_url", "")
+                    if isinstance(source_url, str) and source_url.startswith("https://github.com/"):
+                        found = True
+                        break
+                if found:
+                    break
+            print("true" if found else "false")
+            PY
+          )"
           secret_list="GL_BASE_URL,GL_BRIDGE_FORK_USER_GLAB"
           secret_list="${secret_list},${TARGET_TOKEN_SECRET}"
           secret_list="${secret_list},GL_GROUP_TOP_GLAB_OWNER"
+          if [ "${needs_github_source_auth}" = "true" ]; then
+            secret_list="${secret_list},GH_ORG_SHARED_APP_ID,GH_ORG_SHARED_APP_PEM"
+          fi
           printf 'secrets=%s\n' "${secret_list}" >> "${GITHUB_OUTPUT}"
+          printf 'needs-github-source-auth=%s\n' "${needs_github_source_auth}" >> "${GITHUB_OUTPUT}"
 
       - name: Fetch target secrets from BWS
         uses: >-
@@ -252,12 +287,16 @@ jobs:
         id: config_meta
         shell: bash
         env:
+          NEEDS_GITHUB_SOURCE_AUTH: ${{ needs.plan.outputs.needs-github-source-auth }}
           TARGET_TOKEN_SECRET: ${{ inputs.target-token-secret }}
         run: |
           set -euo pipefail
           secret_list="GL_BASE_URL,GL_BRIDGE_FORK_USER_GLAB"
           secret_list="${secret_list},${TARGET_TOKEN_SECRET}"
           secret_list="${secret_list},GL_GROUP_TOP_GLAB_OWNER"
+          if [ "${NEEDS_GITHUB_SOURCE_AUTH}" = "true" ]; then
+            secret_list="${secret_list},GH_ORG_SHARED_APP_ID,GH_ORG_SHARED_APP_PEM"
+          fi
           printf 'secrets=%s\n' "${secret_list}" >> "${GITHUB_OUTPUT}"
 
       - name: Fetch target secrets from BWS

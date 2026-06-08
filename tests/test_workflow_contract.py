@@ -37,7 +37,13 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("GL_PAT_GROUP_KALI_SVC", text)
         self.assertIn("GL_PAT_GROUP_DEBIAN_SVC", text)
         self.assertIn("GL_PAT_GROUP_FREEDESKTOP_SVC", text)
+        self.assertIn("GL_PAT_GROUP_SMALL_SVC", text)
+        self.assertIn("GL_PAT_GROUP_KDE_SVC", text)
+        self.assertIn("GL_PAT_GROUP_GNOME_SVC", text)
         self.assertIn("GL_TARGET_TOKEN_SECRET_NAME: ${{ inputs.target-token-secret }}", text)
+        self.assertIn("GH_ORG_SHARED_APP_ID", text)
+        self.assertIn("GH_ORG_SHARED_APP_PEM", text)
+        self.assertIn("needs-github-source-auth", text)
 
     def test_report_aggregates_batch_artifacts(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
