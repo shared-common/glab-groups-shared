@@ -148,39 +148,41 @@ jobs:
           TARGET_TOKEN_SECRET: ${{ inputs.target-token-secret }}
         run: |
           set -euo pipefail
-          config_meta_json="$(
-            python3 - "${CONFIG_DIR}" <<'PY'
-            import json
-            import sys
-            from pathlib import Path
+          python3 - "${CONFIG_DIR}" "${TARGET_TOKEN_SECRET}" "${GITHUB_OUTPUT}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
 
-            config_dir = Path(sys.argv[1])
-            found = False
-            for path in sorted(config_dir.glob("*.json")):
-                data = json.loads(path.read_text(encoding="utf-8"))
-                for namespace in data.get("namespaces", []):
-                    source_url = namespace.get("source_group_url", "")
-                    if isinstance(source_url, str) and source_url.startswith("https://github.com/"):
-                        found = True
-            print(json.dumps({
-                "needs_github_source_auth": found,
-            }))
-            PY
-          )"
-          needs_github_source_auth="$(
-            python3 - "${config_meta_json}" <<'PY'
-            import json
-            import sys
-            print("true" if json.loads(sys.argv[1])["needs_github_source_auth"] else "false")
-            PY
-          )"
-          secret_list="GL_BASE_URL,GL_BRIDGE_FORK_USER_GLAB"
-          secret_list="${secret_list},${TARGET_TOKEN_SECRET}"
-          if [ "${needs_github_source_auth}" = "true" ]; then
-            secret_list="${secret_list},GH_ORG_SHARED_APP_ID,GH_ORG_SHARED_APP_PEM"
-          fi
-          printf 'secrets=%s\n' "${secret_list}" >> "${GITHUB_OUTPUT}"
-          printf 'needs-github-source-auth=%s\n' "${needs_github_source_auth}" >> "${GITHUB_OUTPUT}"
+          config_dir = Path(sys.argv[1])
+          target_token_secret = sys.argv[2]
+          github_output = Path(sys.argv[3])
+
+          found = False
+          for path in sorted(config_dir.glob("*.json")):
+              data = json.loads(path.read_text(encoding="utf-8"))
+              for namespace in data.get("namespaces", []):
+                  source_url = namespace.get("source_group_url", "")
+                  if isinstance(source_url, str) and source_url.startswith("https://github.com/"):
+                      found = True
+
+          secret_names = [
+              "GL_BASE_URL",
+              "GL_BRIDGE_FORK_USER_GLAB",
+              target_token_secret,
+          ]
+          if found:
+              secret_names.extend([
+                  "GH_ORG_SHARED_APP_ID",
+                  "GH_ORG_SHARED_APP_PEM",
+              ])
+
+          with github_output.open("a", encoding="utf-8") as handle:
+              handle.write(f"secrets={','.join(secret_names)}\n")
+              handle.write(
+                  "needs-github-source-auth="
+                  f"{'true' if found else 'false'}\n"
+              )
+          PY
 
       - name: Fetch target secrets from BWS
         uses: >-
