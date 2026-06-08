@@ -112,6 +112,7 @@ sub run_cmd {
 
     local *GlabGroups::_load_target_client = sub { return {}; };
     local *GlabGroups::_load_target_root_group_path = sub { return "owner"; };
+    local *GlabGroups::_ensure_group_path = sub { return 42; };
     local *GlabGroups::_build_target_project_index = sub { return {}; };
 
     my $plan = GlabGroups::_build_plan(
@@ -190,6 +191,7 @@ sub run_cmd {
 
     local *GlabGroups::_load_target_client = sub { return {}; };
     local *GlabGroups::_load_target_root_group_path = sub { return "owner"; };
+    local *GlabGroups::_ensure_group_path = sub { return 42; };
     local *GlabGroups::_build_target_project_index = sub { return {}; };
 
     my $plan = GlabGroups::_build_plan(
@@ -226,6 +228,7 @@ sub run_cmd {
     );
     is( $plan->{plan}->[0]->{action}, "create_project", "missing target projects are planned for creation" );
     ok( !defined $plan->{plan}->[0]->{skip_reason}, "missing target projects do not get a skip reason" );
+    is( $plan->{plan}->[0]->{target_namespace_id}, 42, "missing target projects keep resolved target namespace id for creation" );
 }
 
 {
@@ -396,6 +399,52 @@ sub run_cmd {
     is( scalar @{ $report->{results} }, 2, "merged report preserves all batch rows" );
     is( $report->{result_counts}->{mirrored}, 1, "merged report counts mirrored rows" );
     is( $report->{result_counts}->{skipped}, 1, "merged report counts skipped rows" );
+}
+
+{
+    no warnings 'redefine';
+    my $dir = tempdir( CLEANUP => 1 );
+    my $plan_path = File::Spec->catfile( $dir, "plan.json" );
+    my $output_path = File::Spec->catfile( $dir, "prepared.json" );
+    my @prepared_paths;
+
+    write_json_file(
+        $plan_path,
+        {
+            plan => [
+                {
+                    action => "create_project",
+                    target_full_path => "owner/group/project-a",
+                },
+                {
+                    action => "skip",
+                    target_full_path => "owner/group/project-b",
+                },
+            ],
+        }
+    );
+
+    local *GlabGroups::_load_target_client = sub { return {}; };
+    local *GlabGroups::_ensure_target_project = sub {
+        my ( $client, $entry ) = @_;
+        push @prepared_paths, $entry->{target_full_path};
+        return { project_id => 99 };
+    };
+
+    is(
+        GlabGroups::run_cli(
+            "prepare-target",
+            "--plan", $plan_path,
+            "--output", $output_path,
+        ),
+        0,
+        "prepare-target accepts create_project entries",
+    );
+    is_deeply(
+        \@prepared_paths,
+        [ "owner/group/project-a" ],
+        "prepare-target prepares missing target projects",
+    );
 }
 
 {
@@ -635,6 +684,46 @@ sub run_cmd {
     is( $requests[0]->{method}, "POST", "issues project creation API calls when target is missing" );
     is( $requests[0]->{path}, "/projects", "creates project through the GitLab projects API" );
     ok( !exists $requests[0]->{payload}->{visibility}, "project creation payload does not set visibility" );
+}
+
+{
+    no warnings 'redefine';
+    my $dir = tempdir( CLEANUP => 1 );
+    my $plan_path = File::Spec->catfile( $dir, "plan.json" );
+    my $output_path = File::Spec->catfile( $dir, "results.json" );
+    my $jsonl_path = File::Spec->catfile( $dir, "results.jsonl" );
+
+    write_json_file(
+        $plan_path,
+        {
+            plan => [
+                {
+                    action => "create_project",
+                    target_full_path => "owner/group/project-a",
+                },
+            ],
+        }
+    );
+
+    local *GlabGroups::_load_target_client = sub { return {}; };
+    local *GlabGroups::_load_source_auth = sub { return {}; };
+    local *GlabGroups::_mirror_entry = sub {
+        die "create project failed\n";
+    };
+
+    is(
+        GlabGroups::run_cli(
+            "mirror",
+            "--plan", $plan_path,
+            "--output", $output_path,
+            "--jsonl", $jsonl_path,
+        ),
+        0,
+        "mirror command completes and records create_project failures",
+    );
+    my $results = JSON::PP->new->decode( do { open( my $fh, "<:encoding(UTF-8)", $output_path ) or die $!; local $/; <$fh> } );
+    is( $results->{results}->[0]->{status}, "failed", "unexpected mirror exceptions are reported as failed rows" );
+    is( $results->{results}->[0]->{reason}, "Repository failed after unrecoverable mirror error.", "failed row keeps a clear error reason" );
 }
 
 {

@@ -66,6 +66,6 @@ The mirror stage:
 
 Expected policy skips, such as repositories above the selected-ref size budget,
 are captured as skipped result rows. Unexpected per-repository exceptions are
-also captured as skipped rows with error details so artifacts and summaries are
-still produced and the rest of the run keeps going. Fatal
+captured as failed rows with error details so artifacts and summaries are still
+produced and the rest of the run keeps going. Fatal
 configuration or credential failures still stop the workflow before mirroring.

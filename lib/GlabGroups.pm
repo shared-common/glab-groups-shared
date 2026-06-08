@@ -341,7 +341,7 @@ sub _cmd_prepare_target {
     my $client = _load_target_client();
     my @prepared;
     for my $entry ( @{ $plan->{plan} || [] } ) {
-        next if $entry->{action} eq "skip" || $entry->{action} eq "fail" || $entry->{action} eq "create_project";
+        next if $entry->{action} eq "skip" || $entry->{action} eq "fail";
         push @prepared, _ensure_target_project( $client, $entry );
     }
     _write_json(
@@ -404,8 +404,8 @@ sub _cmd_mirror {
                 $result = {
                     target_full_path => $entry->{target_full_path},
                     planned_action => $entry->{action},
-                    status => "skipped",
-                    reason => "Repository skipped after unrecoverable mirror error.",
+                    status => "failed",
+                    reason => "Repository failed after unrecoverable mirror error.",
                     error => _trim_error($@),
                 };
             }
@@ -585,6 +585,7 @@ sub _build_plan {
             my $target_namespace_path = dirname($target_full_path);
             my $override = $config->{overrides}->{$target_relative_project_path} || {};
             my $policy = _merge_policy( $config->{defaults}, $namespace, $override );
+            my $target_namespace_id = _ensure_group_path( $target_client, $target_namespace_path, \%group_cache );
             my $target_project = $target_projects_by_path->{$target_full_path};
             my $skip_reason = $config->{exclusions}->{$target_relative_project_path};
             if ( !$skip_reason && $source_project->{archived} ) {
@@ -616,7 +617,7 @@ sub _build_plan {
                 source_visibility => $source_project->{visibility},
                 target_full_path => $target_full_path,
                 target_relative_project_path => $target_relative_project_path,
-                target_namespace_id => undef,
+                target_namespace_id => $target_namespace_id,
                 target_namespace_path => $target_namespace_path,
                 target_project_id => $target_project ? $target_project->{id} : undef,
                 target_visibility => $target_project ? $target_project->{visibility} : undef,
