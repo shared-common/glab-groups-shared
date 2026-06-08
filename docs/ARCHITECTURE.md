@@ -43,10 +43,10 @@ The plan includes:
 
 The mirror stage:
 
-- updates existing target projects before push
-- skips missing target projects instead of creating them
-- skips archived source projects and archived existing target projects instead of
-  mutating archive state
+- creates missing target projects and updates existing target projects before
+  push
+- skips source repositories when the upstream API marks them as archived
+- does not mutate GitLab archive state as part of mirror execution
 - never sets target group or project visibility
 - discovers group inventory through direct-project and subgroup traversal rather
   than a single `include_subgroups=true` API query

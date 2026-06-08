@@ -199,7 +199,7 @@ sub classify_plan_action {
     my ( $source_project, $target_project, $policy, $exclusion_reason ) = @_;
     return "skip" if $exclusion_reason;
     return "fail" if !$source_project || ref($source_project) ne "HASH";
-    return "skip" if !$target_project;
+    return "create_project" if !$target_project;
 
     my $source_description = _normalize_description( $source_project->{description} );
     my $target_description = _normalize_description( $target_project->{description} );
@@ -590,12 +590,6 @@ sub _build_plan {
             if ( !$skip_reason && $source_project->{archived} ) {
                 $skip_reason = "Archived source repository is excluded from mirroring.";
             }
-            if ( !$skip_reason && !$target_project ) {
-                $skip_reason = "Missing target repository is excluded from mirroring.";
-            }
-            if ( !$skip_reason && $target_project && $target_project->{archived} ) {
-                $skip_reason = "Archived target repository is excluded from mirroring.";
-            }
             my $action = classify_plan_action(
                 $source_project,
                 $target_project,
@@ -658,14 +652,6 @@ sub _mirror_entry {
             status => "skipped",
             reason => "Repository skipped after plan error.",
             error => "Plan marked target as failed",
-        };
-    }
-    if ( $entry->{action} eq "create_project" ) {
-        return {
-            target_full_path => $entry->{target_full_path},
-            planned_action => $entry->{action},
-            status => "skipped",
-            reason => "Missing target repository is excluded from mirroring.",
         };
     }
 
@@ -1141,7 +1127,18 @@ sub _ensure_target_project {
     my $created = JSON::PP::false;
     my $updated = JSON::PP::false;
     if ( !$existing ) {
-        die "target project missing and project creation is disabled: $entry->{target_full_path}\n";
+        $project = _gitlab_request(
+            $client,
+            "POST",
+            "/projects",
+            {
+                %payload,
+                name => $name,
+                namespace_id => $entry->{target_namespace_id},
+                path => $name,
+            }
+        );
+        $created = JSON::PP::true;
     }
     else {
         $project = $existing;

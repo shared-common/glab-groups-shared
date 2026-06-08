@@ -102,9 +102,52 @@ sub run_cmd {
         {
             force_lfs => JSON::PP::false,
         },
-        "Missing target repository is excluded from mirroring.",
+        undef,
     );
-    is( $action, "skip", "missing target repositories are skipped instead of created" );
+    is( $action, "create_project", "missing target repositories are created" );
+}
+
+{
+    no warnings 'redefine';
+
+    local *GlabGroups::_load_target_client = sub { return {}; };
+    local *GlabGroups::_load_target_root_group_path = sub { return "owner"; };
+    local *GlabGroups::_build_target_project_index = sub { return {}; };
+
+    my $plan = GlabGroups::_build_plan(
+        {
+            defaults => { additional_branches => [], additional_tags => [], force_lfs => JSON::PP::false },
+            exclusions => {},
+            overrides => {},
+        },
+        {
+            inventory => [
+                {
+                    group_path => "root",
+                    namespace => {
+                        target_namespace_path => "mirror",
+                    },
+                    projects => [
+                        {
+                            archived => JSON::PP::true,
+                            default_branch => "main",
+                            description => "source",
+                            empty_repo => JSON::PP::false,
+                            http_url_to_repo => "https://example.invalid/root/project.git",
+                            id => 10,
+                            lfs_enabled => JSON::PP::false,
+                            path_with_namespace => "root/project",
+                            ssh_url_to_repo => 'git@example.invalid:root/project.git',
+                            visibility => "public",
+                        },
+                    ],
+                },
+            ],
+        },
+        25,
+    );
+    is( $plan->{plan}->[0]->{action}, "skip", "archived source projects are skipped during planning" );
+    is( $plan->{plan}->[0]->{skip_reason}, "Archived source repository is excluded from mirroring.", "records the archived source skip reason" );
 }
 
 {
@@ -147,104 +190,6 @@ sub run_cmd {
 
     local *GlabGroups::_load_target_client = sub { return {}; };
     local *GlabGroups::_load_target_root_group_path = sub { return "owner"; };
-    local *GlabGroups::_ensure_group_path = sub { return 42; };
-    local *GlabGroups::_build_target_project_index = sub { return {}; };
-
-    my $plan = GlabGroups::_build_plan(
-        {
-            defaults => { additional_branches => [], additional_tags => [], force_lfs => JSON::PP::false },
-            exclusions => {},
-            overrides => {},
-        },
-        {
-            inventory => [
-                {
-                    group_path => "root",
-                    namespace => {
-                        target_namespace_path => "mirror",
-                    },
-                    projects => [
-                        {
-                            archived => JSON::PP::true,
-                            default_branch => "main",
-                            description => "source",
-                            empty_repo => JSON::PP::false,
-                            http_url_to_repo => "https://example.invalid/root/project.git",
-                            id => 10,
-                            lfs_enabled => JSON::PP::false,
-                            path_with_namespace => "root/project",
-                            ssh_url_to_repo => 'git@example.invalid:root/project.git',
-                            visibility => "public",
-                        },
-                    ],
-                },
-            ],
-        },
-        25,
-    );
-    is( $plan->{plan}->[0]->{action}, "skip", "archived source projects are skipped during planning" );
-    is( $plan->{plan}->[0]->{skip_reason}, "Archived source repository is excluded from mirroring.", "records the archived source skip reason" );
-}
-
-{
-    no warnings 'redefine';
-
-    local *GlabGroups::_load_target_client = sub { return {}; };
-    local *GlabGroups::_load_target_root_group_path = sub { return "owner"; };
-    local *GlabGroups::_ensure_group_path = sub { return 42; };
-    local *GlabGroups::_build_target_project_index = sub {
-        return {
-            "owner/mirror/project" => {
-                archived => JSON::PP::true,
-                description => "source",
-                id => 99,
-                lfs_enabled => JSON::PP::false,
-                visibility => "private",
-            },
-        };
-    };
-
-    my $plan = GlabGroups::_build_plan(
-        {
-            defaults => { additional_branches => [], additional_tags => [], force_lfs => JSON::PP::false },
-            exclusions => {},
-            overrides => {},
-        },
-        {
-            inventory => [
-                {
-                    group_path => "root",
-                    namespace => {
-                        target_namespace_path => "mirror",
-                    },
-                    projects => [
-                        {
-                            archived => JSON::PP::false,
-                            default_branch => "main",
-                            description => "source",
-                            empty_repo => JSON::PP::false,
-                            http_url_to_repo => "https://example.invalid/root/project.git",
-                            id => 10,
-                            lfs_enabled => JSON::PP::false,
-                            path_with_namespace => "root/project",
-                            ssh_url_to_repo => 'git@example.invalid:root/project.git',
-                            visibility => "public",
-                        },
-                    ],
-                },
-            ],
-        },
-        25,
-    );
-    is( $plan->{plan}->[0]->{action}, "skip", "archived target projects are skipped during planning" );
-    is( $plan->{plan}->[0]->{skip_reason}, "Archived target repository is excluded from mirroring.", "records the archived target skip reason" );
-}
-
-{
-    no warnings 'redefine';
-
-    local *GlabGroups::_load_target_client = sub { return {}; };
-    local *GlabGroups::_load_target_root_group_path = sub { return "owner"; };
     local *GlabGroups::_build_target_project_index = sub { return {}; };
 
     my $plan = GlabGroups::_build_plan(
@@ -279,8 +224,8 @@ sub run_cmd {
         },
         25,
     );
-    is( $plan->{plan}->[0]->{action}, "skip", "missing target projects are skipped during planning" );
-    is( $plan->{plan}->[0]->{skip_reason}, "Missing target repository is excluded from mirroring.", "records the missing target skip reason" );
+    is( $plan->{plan}->[0]->{action}, "create_project", "missing target projects are planned for creation" );
+    ok( !defined $plan->{plan}->[0]->{skip_reason}, "missing target projects do not get a skip reason" );
 }
 
 {
@@ -406,7 +351,7 @@ sub run_cmd {
     write_json_file(
         $plan_path,
         {
-            counts => { create_project => 0, fail => 0, mirror_only => 1, skip => 1, update_project => 0 },
+            counts => { create_project => 1, fail => 0, mirror_only => 1, skip => 0, update_project => 0 },
         }
     );
     write_json_file(
@@ -415,9 +360,8 @@ sub run_cmd {
             results => [
                 {
                     target_full_path => "owner/debian/demo",
-                    planned_action => "skip",
-                    reason => "Missing target repository is excluded from mirroring.",
-                    status => "skipped",
+                    planned_action => "create_project",
+                    status => "mirrored",
                 },
             ],
         }
@@ -450,8 +394,8 @@ sub run_cmd {
     );
     my $report = JSON::PP->new->decode( do { open( my $fh, "<:encoding(UTF-8)", $report_path ) or die $!; local $/; <$fh> } );
     is( scalar @{ $report->{results} }, 2, "merged report preserves all batch rows" );
-    is( $report->{result_counts}->{mirrored}, 0, "merged report counts mirrored rows" );
-    is( $report->{result_counts}->{skipped}, 2, "merged report counts skipped rows" );
+    is( $report->{result_counts}->{mirrored}, 1, "merged report counts mirrored rows" );
+    is( $report->{result_counts}->{skipped}, 1, "merged report counts skipped rows" );
 }
 
 {
@@ -676,23 +620,21 @@ sub run_cmd {
         return { id => 99, archived => JSON::PP::false };
     };
 
-    my $ok = eval {
-        GlabGroups::_ensure_target_project(
-            {},
-            {
-                policy => { force_lfs => JSON::PP::false },
-                source_archived => JSON::PP::false,
-                source_description => "source",
-                source_lfs_enabled => JSON::PP::false,
-                target_full_path => "owner/group/project",
-                target_namespace_id => 42,
-            }
-        );
-        1;
-    };
-    ok( !$ok, "refuses to create missing target project" );
-    like( $@, qr/target project missing and project creation is disabled/i, "reports that project creation is disabled" );
-    is( scalar @requests, 0, "does not issue project creation API calls when target is missing" );
+    my $result = GlabGroups::_ensure_target_project(
+        {},
+        {
+            policy => { force_lfs => JSON::PP::false },
+            source_archived => JSON::PP::false,
+            source_description => "source",
+            source_lfs_enabled => JSON::PP::false,
+            target_full_path => "owner/group/project",
+            target_namespace_id => 42,
+        }
+    );
+    ok( $result->{created}, "creates missing target project" );
+    is( $requests[0]->{method}, "POST", "issues project creation API calls when target is missing" );
+    is( $requests[0]->{path}, "/projects", "creates project through the GitLab projects API" );
+    ok( !exists $requests[0]->{payload}->{visibility}, "project creation payload does not set visibility" );
 }
 
 {
