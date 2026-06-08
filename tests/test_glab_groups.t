@@ -276,6 +276,36 @@ YAML
 {
     no warnings 'redefine';
 
+    local *GlabGroups::_github_installation_source_auth = sub {
+        die "_github_installation_source_auth should not be called for explicit project sources";
+    };
+
+    my $resolved = GlabGroups::_resolve_source_auth_for_entry(
+        {
+            github_app => {
+                app_id => "123",
+                install_id => "88",
+                pem => "unused",
+            },
+        },
+        {
+            source_auth_mode => "none",
+            source_http_url => "https://github.com/labwc/labwc.git",
+        },
+    );
+    is_deeply(
+        $resolved,
+        {
+            token => undef,
+            username => undef,
+        },
+        "explicit project mirror entries skip source auth injection entirely",
+    );
+}
+
+{
+    no warnings 'redefine';
+
     local *GlabGroups::_gitlab_request = sub {
         my ( $client, $method, $path ) = @_;
         return [ { id => 1, full_path => "plasma", path => "plasma" } ]

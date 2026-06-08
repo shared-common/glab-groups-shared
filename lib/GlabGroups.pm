@@ -642,9 +642,8 @@ sub _discover_namespace_inventory {
 sub _discover_project_inventory {
     my ( $project, $policy, $source_auth ) = @_;
     my $source = _parse_source_project_url( $project->{source_project_url}, $project->{name} );
-    my $project_source_auth = _resolve_source_auth_for_project_source( $source_auth, $source, $policy );
     my $chosen_clone_url = $source->{clone_url};
-    my $available = _discover_project_remote_refs( $source, $project_source_auth, $policy, \$chosen_clone_url );
+    my $available = _discover_project_remote_refs( $source, {}, $policy, \$chosen_clone_url );
     my $has_refs =
          scalar( keys %{ $available->{branches} || {} } )
       || scalar( keys %{ $available->{tags} || {} } );
@@ -654,6 +653,7 @@ sub _discover_project_inventory {
             base_url => $source->{base_url},
             group_path => $source->{group_path},
             project_entry => $project,
+            source_auth_mode => "none",
             projects => [
                 {
                     archived => JSON::PP::false,
@@ -747,6 +747,7 @@ sub _build_plan {
                     source_empty_repo => !!$source_project->{empty_repo},
                     source_full_path => $source_full_path,
                     source_group_path => $bucket->{group_path},
+                    source_auth_mode => $bucket->{source_auth_mode} || "",
                     source_http_url => $source_project->{http_url_to_repo},
                     source_lfs_enabled => !!$source_project->{lfs_enabled},
                     source_lfs_enabled_known => $source_project->{lfs_enabled_known},
@@ -1759,6 +1760,12 @@ sub _list_gitlab_top_level_groups {
 
 sub _resolve_source_auth_for_entry {
     my ( $source_auth, $entry ) = @_;
+    if ( ( $entry->{source_auth_mode} || q{} ) eq "none" ) {
+        return {
+            token => undef,
+            username => undef,
+        };
+    }
     my ( $base_url ) = _split_source_url( $entry->{source_http_url} );
     if ( _base_url_host($base_url) eq "github.com" ) {
         return _github_installation_source_auth(
@@ -1766,22 +1773,6 @@ sub _resolve_source_auth_for_entry {
             $base_url,
             $entry->{source_group_path},
             $entry->{policy},
-        );
-    }
-    return {
-        token => $source_auth->{token},
-        username => $source_auth->{username},
-    };
-}
-
-sub _resolve_source_auth_for_project_source {
-    my ( $source_auth, $source, $policy ) = @_;
-    if ( $source->{kind} eq "github_project" ) {
-        return _github_installation_source_auth(
-            $source_auth,
-            $source->{base_url},
-            $source->{group_path},
-            $policy,
         );
     }
     return {
