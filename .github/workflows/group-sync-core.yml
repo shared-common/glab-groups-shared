@@ -148,7 +148,7 @@ jobs:
           TARGET_TOKEN_SECRET: ${{ inputs.target-token-secret }}
         run: |
           set -euo pipefail
-          needs_github_source_auth="$(
+          config_meta_json="$(
             python3 - "${CONFIG_DIR}" <<'PY'
             import json
             import sys
@@ -162,15 +162,20 @@ jobs:
                     source_url = namespace.get("source_group_url", "")
                     if isinstance(source_url, str) and source_url.startswith("https://github.com/"):
                         found = True
-                        break
-                if found:
-                    break
-            print("true" if found else "false")
+            print(json.dumps({
+                "needs_github_source_auth": found,
+            }))
+            PY
+          )"
+          needs_github_source_auth="$(
+            python3 - "${config_meta_json}" <<'PY'
+            import json
+            import sys
+            print("true" if json.loads(sys.argv[1])["needs_github_source_auth"] else "false")
             PY
           )"
           secret_list="GL_BASE_URL,GL_BRIDGE_FORK_USER_GLAB"
           secret_list="${secret_list},${TARGET_TOKEN_SECRET}"
-          secret_list="${secret_list},GL_GROUP_TOP_GLAB_OWNER"
           if [ "${needs_github_source_auth}" = "true" ]; then
             secret_list="${secret_list},GH_ORG_SHARED_APP_ID,GH_ORG_SHARED_APP_PEM"
           fi
@@ -293,7 +298,6 @@ jobs:
           set -euo pipefail
           secret_list="GL_BASE_URL,GL_BRIDGE_FORK_USER_GLAB"
           secret_list="${secret_list},${TARGET_TOKEN_SECRET}"
-          secret_list="${secret_list},GL_GROUP_TOP_GLAB_OWNER"
           if [ "${NEEDS_GITHUB_SOURCE_AUTH}" = "true" ]; then
             secret_list="${secret_list},GH_ORG_SHARED_APP_ID,GH_ORG_SHARED_APP_PEM"
           fi

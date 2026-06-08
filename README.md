@@ -46,7 +46,7 @@ Config files store relative target namespace paths. The runtime resolves the
 real destination as:
 
 - `GL_BASE_URL`
-- `GL_GROUP_TOP_GLAB_OWNER`
+- config `target_owner_path`
 - config `target_namespace_path`
 
 and authenticates with:

@@ -56,6 +56,7 @@ sub run_cmd {
                 {
                     name => "kali",
                     source_group_url => "https://gitlab.com/kalilinux",
+                    target_owner_path => "glab-forks",
                     target_namespace_path => "kalilinux",
                 },
             ],
@@ -65,6 +66,35 @@ sub run_cmd {
     is( scalar @{ $config->{namespaces} }, 1, "loads namespace roots" );
     is( $config->{defaults}->{additional_branches}->[0]->{name}, "release", "normalizes default branches" );
     is( $config->{defaults}->{batch_size}, 25, "keeps default batch size at 25" );
+}
+
+{
+    my $dir = tempdir( CLEANUP => 1 );
+    write_json_file(
+        File::Spec->catfile( $dir, "defaults.json" ),
+        {
+            kind => "glab-groups/defaults",
+            version => 1,
+            defaults => {},
+        }
+    );
+    write_json_file(
+        File::Spec->catfile( $dir, "namespaces.json" ),
+        {
+            kind => "glab-groups/namespaces",
+            version => 1,
+            namespaces => [
+                {
+                    name => "kali",
+                    source_group_url => "https://gitlab.com/kalilinux",
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "kalilinux",
+                },
+            ],
+        }
+    );
+    my $config = load_config_dir($dir);
+    is( $config->{namespaces}->[0]->{target_owner_path}, "glab-forks", "loads target owner path from namespace entries" );
 }
 
 {
@@ -282,7 +312,6 @@ HTML
     no warnings 'redefine';
 
     local *GlabGroups::_load_target_client = sub { return {}; };
-    local *GlabGroups::_load_target_root_group_path = sub { return "owner"; };
     local *GlabGroups::_ensure_group_path = sub { return 42; };
     local *GlabGroups::_build_target_project_index = sub { return {}; };
 
@@ -297,6 +326,7 @@ HTML
                 {
                     group_path => "root",
                     namespace => {
+                        target_owner_path => "owner",
                         target_namespace_path => "mirror",
                     },
                     projects => [
@@ -361,7 +391,6 @@ HTML
     no warnings 'redefine';
 
     local *GlabGroups::_load_target_client = sub { return {}; };
-    local *GlabGroups::_load_target_root_group_path = sub { return "owner"; };
     local *GlabGroups::_ensure_group_path = sub { return 42; };
     local *GlabGroups::_build_target_project_index = sub { return {}; };
 
@@ -376,6 +405,7 @@ HTML
                 {
                     group_path => "root",
                     namespace => {
+                        target_owner_path => "owner",
                         target_namespace_path => "mirror",
                     },
                     projects => [
@@ -400,6 +430,54 @@ HTML
     is( $plan->{plan}->[0]->{action}, "create_project", "missing target projects are planned for creation" );
     ok( !defined $plan->{plan}->[0]->{skip_reason}, "missing target projects do not get a skip reason" );
     is( $plan->{plan}->[0]->{target_namespace_id}, 42, "missing target projects keep resolved target namespace id for creation" );
+}
+
+{
+    no warnings 'redefine';
+
+    local *GlabGroups::_load_target_client = sub { return {}; };
+    local *GlabGroups::_ensure_group_path = sub { return 77; };
+    local *GlabGroups::_build_target_project_index = sub { return {}; };
+
+    my $plan = GlabGroups::_build_plan(
+        {
+            defaults => {
+                additional_branches => [],
+                additional_tags => [],
+                force_lfs => JSON::PP::false,
+            },
+            exclusions => {},
+            overrides => {},
+        },
+        {
+            inventory => [
+                {
+                    group_path => "root",
+                    namespace => {
+                        target_owner_path => "glab-forks",
+                        target_namespace_path => "mirror",
+                    },
+                    projects => [
+                        {
+                            archived => JSON::PP::false,
+                            default_branch => "main",
+                            description => "source",
+                            empty_repo => JSON::PP::false,
+                            http_url_to_repo => "https://example.invalid/root/project.git",
+                            id => 10,
+                            lfs_enabled => JSON::PP::false,
+                            path_with_namespace => "root/project",
+                            ssh_url_to_repo => 'git@example.invalid:root/project.git',
+                            visibility => "public",
+                        },
+                    ],
+                },
+            ],
+        },
+        25,
+    );
+    is( $plan->{plan}->[0]->{target_full_path}, "glab-forks/mirror/project", "plan uses namespace target_owner_path as the target root" );
+    is( $plan->{plan}->[0]->{target_namespace_path}, "glab-forks/mirror", "target namespace path is rooted under namespace target_owner_path" );
 }
 
 {
@@ -442,6 +520,7 @@ HTML
                 {
                     name => "kali",
                     source_group_url => "https://gitlab.com/kalilinux",
+                    target_owner_path => "glab-forks",
                     target_namespace_path => "kalilinux",
                 },
             ],

@@ -633,7 +633,6 @@ sub _normalize_inventory {
 sub _build_plan {
     my ( $config, $inventory, $batch_size ) = @_;
     my $target_client = _load_target_client();
-    my $target_root_path = _load_target_root_group_path();
     my %group_cache;
     my %project_index_cache;
     my @plan;
@@ -648,6 +647,7 @@ sub _build_plan {
     for my $bucket ( @{ $inventory->{inventory} || [] } ) {
         my $namespace = $bucket->{namespace};
         my $source_group_path = $bucket->{group_path};
+        my $target_root_path = _resolve_target_root_group_path($namespace);
         my $target_namespace_root_path = _join_path( $target_root_path, $namespace->{target_namespace_path} );
         my $target_projects_by_path =
           $project_index_cache{$target_namespace_root_path}
@@ -986,6 +986,7 @@ sub _normalize_namespace {
         size_limit_bytes => _optional_bounded_positive_int( $payload->{size_limit_bytes}, $DEFAULTS{size_limit_bytes}, "$label.size_limit_bytes" ),
         max_blob_bytes => _optional_bounded_positive_int( $payload->{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, "$label.max_blob_bytes" ),
         source_group_url => _required_https_url( $payload->{source_group_url}, "$label.source_group_url" ),
+        target_owner_path => _required_relative_namespace_path( $payload->{target_owner_path}, "$label.target_owner_path" ),
         target_namespace_path => _required_relative_namespace_path( $payload->{target_namespace_path}, "$label.target_namespace_path" ),
     };
 }
@@ -1056,8 +1057,12 @@ sub _load_target_client {
     );
 }
 
-sub _load_target_root_group_path {
-    return _required_group_path_min_segments( _required_env_file("GL_GROUP_TOP_GLAB_OWNER"), "GL_GROUP_TOP_GLAB_OWNER", 1 );
+sub _resolve_target_root_group_path {
+    my ($namespace) = @_;
+    return _required_relative_namespace_path(
+        $namespace->{target_owner_path},
+        "target_owner_path",
+    );
 }
 
 sub _load_source_auth {

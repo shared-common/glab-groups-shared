@@ -44,6 +44,7 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("GH_ORG_SHARED_APP_ID", text)
         self.assertIn("GH_ORG_SHARED_APP_PEM", text)
         self.assertIn("needs-github-source-auth", text)
+        self.assertNotIn("GL_GROUP_TOP_GLAB_OWNER", text)
 
     def test_report_aggregates_batch_artifacts(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")

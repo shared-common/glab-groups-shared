@@ -217,6 +217,9 @@
             "source_group_url": {
               "$ref": "#/$defs/httpsUrl"
             },
+            "target_owner_path": {
+              "$ref": "#/$defs/namespacePath"
+            },
             "target_namespace_path": {
               "$ref": "#/$defs/namespacePath"
             }
