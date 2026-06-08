@@ -34,7 +34,6 @@ The plan includes:
 - target full path and target namespace id
 - source inventory fields required for mirroring and verification
 - deterministic action selection:
-  - `create_project`
   - `update_project`
   - `mirror_only`
   - `skip`
@@ -44,7 +43,8 @@ The plan includes:
 
 The mirror stage:
 
-- creates or updates target projects before push
+- updates existing target projects before push
+- skips missing target projects instead of creating them
 - skips archived source projects and archived existing target projects instead of
   mutating archive state
 - never sets target group or project visibility

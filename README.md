@@ -46,6 +46,10 @@ Target group and project visibility is not created, updated, or finalized by
 this workflow. Configure visibility directly on the target GitLab owner/group
 outside the mirror run to avoid denied metadata writes and rate-limit pressure.
 
+Target project creation and deletion are outside this workflow too. The shared
+runtime only updates already-existing target projects and skips missing or
+archived targets.
+
 ## Ref selection
 
 Each config directory exposes these defaults:

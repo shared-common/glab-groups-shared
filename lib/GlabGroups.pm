@@ -199,7 +199,7 @@ sub classify_plan_action {
     my ( $source_project, $target_project, $policy, $exclusion_reason ) = @_;
     return "skip" if $exclusion_reason;
     return "fail" if !$source_project || ref($source_project) ne "HASH";
-    return "create_project" if !$target_project;
+    return "skip" if !$target_project;
 
     my $source_description = _normalize_description( $source_project->{description} );
     my $target_description = _normalize_description( $target_project->{description} );
@@ -341,7 +341,7 @@ sub _cmd_prepare_target {
     my $client = _load_target_client();
     my @prepared;
     for my $entry ( @{ $plan->{plan} || [] } ) {
-        next if $entry->{action} eq "skip" || $entry->{action} eq "fail";
+        next if $entry->{action} eq "skip" || $entry->{action} eq "fail" || $entry->{action} eq "create_project";
         push @prepared, _ensure_target_project( $client, $entry );
     }
     _write_json(
@@ -585,11 +585,13 @@ sub _build_plan {
             my $target_namespace_path = dirname($target_full_path);
             my $override = $config->{overrides}->{$target_relative_project_path} || {};
             my $policy = _merge_policy( $config->{defaults}, $namespace, $override );
-            my $target_namespace_id = _ensure_group_path( $target_client, $target_namespace_path, \%group_cache );
             my $target_project = $target_projects_by_path->{$target_full_path};
             my $skip_reason = $config->{exclusions}->{$target_relative_project_path};
             if ( !$skip_reason && $source_project->{archived} ) {
                 $skip_reason = "Archived source repository is excluded from mirroring.";
+            }
+            if ( !$skip_reason && !$target_project ) {
+                $skip_reason = "Missing target repository is excluded from mirroring.";
             }
             if ( !$skip_reason && $target_project && $target_project->{archived} ) {
                 $skip_reason = "Archived target repository is excluded from mirroring.";
@@ -620,7 +622,7 @@ sub _build_plan {
                 source_visibility => $source_project->{visibility},
                 target_full_path => $target_full_path,
                 target_relative_project_path => $target_relative_project_path,
-                target_namespace_id => $target_namespace_id,
+                target_namespace_id => undef,
                 target_namespace_path => $target_namespace_path,
                 target_project_id => $target_project ? $target_project->{id} : undef,
                 target_visibility => $target_project ? $target_project->{visibility} : undef,
@@ -655,6 +657,14 @@ sub _mirror_entry {
             planned_action => $entry->{action},
             status => "failed",
             error => "Plan marked target as failed",
+        };
+    }
+    if ( $entry->{action} eq "create_project" ) {
+        return {
+            target_full_path => $entry->{target_full_path},
+            planned_action => $entry->{action},
+            status => "skipped",
+            reason => "Missing target repository is excluded from mirroring.",
         };
     }
 
@@ -1130,18 +1140,7 @@ sub _ensure_target_project {
     my $created = JSON::PP::false;
     my $updated = JSON::PP::false;
     if ( !$existing ) {
-        $project = _gitlab_request(
-            $client,
-            "POST",
-            "/projects",
-            {
-                %payload,
-                name => $name,
-                namespace_id => $entry->{target_namespace_id},
-                path => $name,
-            }
-        );
-        $created = JSON::PP::true;
+        die "target project missing and project creation is disabled: $entry->{target_full_path}\n";
     }
     else {
         $project = $existing;
