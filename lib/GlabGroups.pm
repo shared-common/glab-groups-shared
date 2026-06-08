@@ -36,6 +36,14 @@ my %DEFAULTS = (
     size_limit_bytes => 10 * 1024 * 1024 * 1024,
 );
 
+my %GITLAB_READ_DEFAULTS = (
+    max_time_seconds => 120,
+    page_size => 50,
+    retry_attempts => 6,
+    retry_backoff_seconds => 5,
+    timeout_seconds => 150,
+);
+
 sub run_cli {
     my (@argv) = @_;
     my $command = shift @argv or die _usage();
@@ -510,7 +518,8 @@ sub _discover_inventory {
     for my $namespace ( @{ $config->{namespaces} } ) {
         my ( $base_url, $group_path ) = _parse_group_url( $namespace->{source_group_url} );
         my $source_client = _make_gitlab_client( $base_url, undef, undef );
-        my $projects = _list_group_projects( $source_client, $group_path );
+        my $policy = _merge_policy( $config->{defaults}, $namespace, {} );
+        my $projects = _list_group_projects( $source_client, $group_path, $policy );
         push @inventory,
           {
             namespace => $namespace,
@@ -1192,23 +1201,83 @@ sub _get_tag {
 }
 
 sub _list_group_projects {
-    my ( $client, $group_path ) = @_;
+    my ( $client, $group_path, $policy ) = @_;
+    my $group = _get_group( $client, $group_path );
+    return [] unless $group;
+
+    my @projects;
+    my @queue = ($group);
+    my %seen_group_ids;
+    my %seen_project_ids;
+
+    while (@queue) {
+        my $current = shift @queue;
+        next unless ref($current) eq "HASH";
+        my $group_id = $current->{id};
+        next unless defined $group_id;
+        next if $seen_group_ids{$group_id}++;
+
+        for my $project ( @{ _list_direct_group_projects( $client, $group_id, $policy ) } ) {
+            next unless ref($project) eq "HASH";
+            my $project_id = $project->{id};
+            next if defined $project_id && $seen_project_ids{$project_id}++;
+            push @projects, $project;
+        }
+
+        push @queue, sort {
+            ( lc( $a->{full_path} || $a->{path} || q{} ) )
+              cmp
+            ( lc( $b->{full_path} || $b->{path} || q{} ) )
+        } @{ _list_group_subgroups( $client, $group_id, $policy ) };
+    }
+
+    return \@projects;
+}
+
+sub _list_direct_group_projects {
+    my ( $client, $group_id, $policy ) = @_;
     my @projects;
     my $page = 1;
+    my $page_size = _gitlab_read_page_size($policy);
+    my $request_opt = _gitlab_read_request_opt($policy);
     while (1) {
         my $path = sprintf(
-            "/groups/%s/projects?include_subgroups=true&with_shared=false&per_page=100&page=%d",
-            _encode_path($group_path),
+            "/groups/%s/projects?include_subgroups=false&with_shared=false&per_page=%d&page=%d",
+            $group_id,
+            $page_size,
             $page,
         );
-        my $data = _gitlab_request( $client, "GET", $path, undef );
+        my $data = _gitlab_request( $client, "GET", $path, undef, $request_opt );
         ref($data) eq "ARRAY" or die "group projects response must be a list\n";
         last unless @{$data};
         push @projects, @{$data};
-        last if @{$data} < 100;
+        last if @{$data} < $page_size;
         $page++;
     }
     return \@projects;
+}
+
+sub _list_group_subgroups {
+    my ( $client, $group_id, $policy ) = @_;
+    my @groups;
+    my $page = 1;
+    my $page_size = _gitlab_read_page_size($policy);
+    my $request_opt = _gitlab_read_request_opt($policy);
+    while (1) {
+        my $path = sprintf(
+            "/groups/%s/subgroups?per_page=%d&page=%d",
+            $group_id,
+            $page_size,
+            $page,
+        );
+        my $data = _gitlab_request( $client, "GET", $path, undef, $request_opt );
+        ref($data) eq "ARRAY" or die "group subgroups response must be a list\n";
+        last unless @{$data};
+        push @groups, @{$data};
+        last if @{$data} < $page_size;
+        $page++;
+    }
+    return \@groups;
 }
 
 sub _build_target_project_index {
@@ -1373,8 +1442,10 @@ sub _gitlab_request {
     my ( $client, $method, $path, $payload, $opt ) = @_;
     $opt ||= {};
     my $url = $client->{base_url} . "/api/v4" . $path;
-    my $attempts = $DEFAULTS{retry_attempts};
-    my $backoff = $DEFAULTS{retry_backoff_seconds};
+    my $attempts = $opt->{retry_attempts} || $DEFAULTS{retry_attempts};
+    my $backoff = $opt->{retry_backoff_seconds} || $DEFAULTS{retry_backoff_seconds};
+    my $max_time = $opt->{max_time_seconds} || 60;
+    my $timeout = $opt->{timeout_seconds} || 90;
     my $content = defined $payload ? $JSON->encode($payload) : undef;
     for my $attempt ( 1 .. $attempts ) {
         my @command = (
@@ -1383,7 +1454,7 @@ sub _gitlab_request {
             "--show-error",
             "--location",
             "--max-time",
-            "60",
+            $max_time,
             "--request",
             $method,
             "--header",
@@ -1402,7 +1473,7 @@ sub _gitlab_request {
         my $response = _run_command(
             \@command,
             {
-                timeout => 90,
+                timeout => $timeout,
             }
         );
 
@@ -1431,6 +1502,28 @@ sub _gitlab_request {
         die "gitlab request failed [$status_label] $method $path: $message\n";
     }
     die "gitlab request exhausted retries for $method $path\n";
+}
+
+sub _gitlab_read_page_size {
+    return $GITLAB_READ_DEFAULTS{page_size};
+}
+
+sub _gitlab_read_request_opt {
+    my ($policy) = @_;
+    my $retry_attempts = $GITLAB_READ_DEFAULTS{retry_attempts};
+    my $retry_backoff = $GITLAB_READ_DEFAULTS{retry_backoff_seconds};
+    if ( $policy && ref($policy) eq "HASH" ) {
+        $retry_attempts = $policy->{retry_attempts}
+          if $policy->{retry_attempts} && $policy->{retry_attempts} > $retry_attempts;
+        $retry_backoff = $policy->{retry_backoff_seconds}
+          if $policy->{retry_backoff_seconds} && $policy->{retry_backoff_seconds} > $retry_backoff;
+    }
+    return {
+        max_time_seconds => $GITLAB_READ_DEFAULTS{max_time_seconds},
+        retry_attempts => $retry_attempts,
+        retry_backoff_seconds => $retry_backoff,
+        timeout_seconds => $GITLAB_READ_DEFAULTS{timeout_seconds},
+    };
 }
 
 sub _split_curl_response {

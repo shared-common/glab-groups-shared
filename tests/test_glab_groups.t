@@ -346,6 +346,53 @@ sub run_cmd {
 
 {
     no warnings 'redefine';
+    my @requests;
+
+    local *GlabGroups::_get_group = sub {
+        my ( $client, $group_path ) = @_;
+        return { id => 1, full_path => "root" } if $group_path eq "root";
+        die "unexpected group lookup: $group_path";
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        push @requests, { method => $method, path => $path, opt => $opt };
+        return [
+            { id => 101, path_with_namespace => "root/project-a" },
+        ] if $method eq "GET" && $path eq "/groups/1/projects?include_subgroups=false&with_shared=false&per_page=50&page=1";
+        return [
+            { id => 2, full_path => "root/sub", path => "sub" },
+        ] if $method eq "GET" && $path eq "/groups/1/subgroups?per_page=50&page=1";
+        return [
+            { id => 102, path_with_namespace => "root/sub/project-b" },
+        ] if $method eq "GET" && $path eq "/groups/2/projects?include_subgroups=false&with_shared=false&per_page=50&page=1";
+        return [] if $method eq "GET" && $path eq "/groups/2/subgroups?per_page=50&page=1";
+        die "unexpected gitlab request: $method $path";
+    };
+
+    my $projects = GlabGroups::_list_group_projects(
+        {},
+        "root",
+        {
+            retry_attempts => 7,
+            retry_backoff_seconds => 9,
+        }
+    );
+    is_deeply(
+        [ map { $_->{path_with_namespace} } @{$projects} ],
+        [ "root/project-a", "root/sub/project-b" ],
+        "lists direct group projects and recurses through subgroups",
+    );
+    ok(
+        !( scalar grep { $_->{path} =~ /include_subgroups=true/ } @requests ),
+        "group inventory no longer relies on include_subgroups project listing",
+    );
+    is( $requests[0]->{opt}->{retry_attempts}, 7, "group inventory forwards stronger read retry attempts" );
+    is( $requests[0]->{opt}->{retry_backoff_seconds}, 9, "group inventory forwards stronger read retry backoff" );
+}
+
+{
+    no warnings 'redefine';
     my %cache;
     my @payloads;
 

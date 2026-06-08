@@ -48,6 +48,10 @@ The mirror stage:
 - unarchives archived targets before push and reapplies the desired archive
   state after refs are mirrored
 - never sets target group or project visibility
+- discovers group inventory through direct-project and subgroup traversal rather
+  than a single `include_subgroups=true` API query
+- uses longer bounded retries for GitLab read requests during discovery to ride
+  out transient 5xx and timeout failures from upstream GitLab/Varnish
 - fetches only the selected branches and tags
 - always includes the source default branch
 - auto-detects `pristine-tar`
