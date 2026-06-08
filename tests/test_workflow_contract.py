@@ -81,7 +81,7 @@ class SharedWorkflowContractTests(unittest.TestCase):
     def test_plan_uses_inventory_cache(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("Restore source inventory cache", text)
-        self.assertIn("actions/cache@v4", text)
+        self.assertIn("actions/cache@v5", text)
         self.assertIn("inventory-cache", text)
         self.assertIn("--inventory-input \"inventory-cache/discover.json\"", text)
         self.assertIn("--inventory-output \"inventory-cache/discover.json\"", text)
