@@ -1001,6 +1001,8 @@ sub _build_plan {
                     source_ssh_url => $source_project->{ssh_url_to_repo},
                     source_visibility => $source_project->{visibility},
                     target_full_path => $target_full_path,
+                    target_namespace_locked =>
+                      defined $project_entry->{target_group_id} ? JSON::PP::true : JSON::PP::false,
                     target_relative_project_path => $target_full_path,
                     target_namespace_id =>
                       defined $project_entry->{target_group_id}
@@ -1063,6 +1065,11 @@ sub _build_plan {
                 source_ssh_url => $source_project->{ssh_url_to_repo},
                 source_visibility => $source_project->{visibility},
                 target_full_path => $target_full_path,
+                target_namespace_locked =>
+                  defined $namespace->{target_namespace_id}
+                  && $target_namespace_path eq _join_path( $target_root_path, $namespace->{target_namespace_path} )
+                  ? JSON::PP::true
+                  : JSON::PP::false,
                 target_relative_project_path => $target_relative_project_path,
                 target_namespace_id =>
                   defined $namespace->{target_namespace_id}
@@ -1827,6 +1834,9 @@ sub _ensure_target_project {
                     $group_cache->{ $entry->{target_namespace_path} } = $entry->{target_namespace_id};
                 }
                 else {
+                    if ( $entry->{target_namespace_locked} ) {
+                        die "configured target namespace path could not be resolved after invalid namespace response: $entry->{target_namespace_path}\n";
+                    }
                     delete $entry->{target_namespace_id};
                     $entry->{target_namespace_id} = _ensure_group_path(
                         $client,

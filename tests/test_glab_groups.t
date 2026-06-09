@@ -1766,6 +1766,61 @@ HTML
 
 {
     no warnings 'redefine';
+    my @requests;
+    my @ensured_groups;
+
+    local *GlabGroups::_get_group = sub {
+        my ( $client, $group_path ) = @_;
+        return undef;
+    };
+
+    local *GlabGroups::_ensure_group_path = sub {
+        my ( $client, $group_path, $cache ) = @_;
+        push @ensured_groups, $group_path;
+        return 99;
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        push @requests, { method => $method, path => $path, payload => $payload };
+        die "gitlab request failed [400] POST /projects: {\"message\":{\"namespace\":[\"is not valid\"]}}\n"
+          if $method eq "POST" && $path eq "/projects";
+        die "unexpected request: $method $path";
+    };
+
+    my $error = eval {
+        GlabGroups::_ensure_target_project(
+            {},
+            {
+                policy => { force_lfs => JSON::PP::false },
+                source_archived => JSON::PP::false,
+                source_description => "source",
+                source_lfs_enabled => JSON::PP::false,
+                target_full_path => "glab-forks/labwc/darkman",
+                target_namespace_id => 42,
+                target_namespace_locked => JSON::PP::true,
+                target_namespace_path => "glab-forks/labwc",
+            }
+        );
+        1;
+    };
+    my $error_text = $@;
+    ok( !$error, "locked configured target namespaces fail closed when GitLab rejects the namespace id" );
+    like(
+        $error_text,
+        qr/configured target namespace path could not be resolved after invalid namespace response: glab-forks\/labwc/,
+        "locked target namespace errors explain that the configured group path was not resolved",
+    );
+    is_deeply( \@ensured_groups, [], "locked configured target namespaces never fall through to group creation" );
+    is_deeply(
+        [ map { $_->{path} } @requests ],
+        [ "/projects" ],
+        "locked configured target namespaces only attempt project creation before failing",
+    );
+}
+
+{
+    no warnings 'redefine';
     my $dir = tempdir( CLEANUP => 1 );
     my $plan_path = File::Spec->catfile( $dir, "plan.json" );
     my $output_path = File::Spec->catfile( $dir, "results.json" );
