@@ -717,6 +717,50 @@ HTML
 }
 
 {
+    no warnings 'redefine';
+
+    local *GlabGroups::_load_target_client = sub { return {}; };
+    local *GlabGroups::_build_target_namespace_state = sub {
+        return { groups => {}, projects => {} };
+    };
+
+    my $plan = GlabGroups::_build_plan(
+        {
+            defaults => { additional_branches => [], additional_tags => [], force_lfs => JSON::PP::false },
+            exclusions => {},
+            overrides => {},
+        },
+        {
+            inventory => [
+                {
+                    group_path => "crowdsecurity",
+                    namespace => {
+                        target_owner_path => "glab-forks",
+                        target_namespace_path => "crowdsecurity",
+                    },
+                    projects => [
+                        {
+                            archived => JSON::PP::false,
+                            default_branch => "main",
+                            description => "",
+                            empty_repo => JSON::PP::false,
+                            http_url_to_repo => "https://github.com/crowdsecurity/.github.git",
+                            id => 10,
+                            lfs_enabled => JSON::PP::false,
+                            path_with_namespace => "crowdsecurity/.github",
+                            ssh_url_to_repo => "https://github.com/crowdsecurity/.github.git",
+                            visibility => "public",
+                        },
+                    ],
+                },
+            ],
+        },
+        25,
+    );
+    is( $plan->{plan}->[0]->{target_full_path}, "glab-forks/crowdsecurity/.github", "planning accepts GitHub repo names like .github in the source-relative path" );
+}
+
+{
     my $action = classify_plan_action(
         {
             visibility => "public",

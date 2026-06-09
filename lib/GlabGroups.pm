@@ -2940,8 +2940,12 @@ sub _relative_path {
     index( $path, $normalized_prefix ) == 0
       or die "source project path is outside configured group: $path\n";
     my $relative = substr( $path, length($normalized_prefix) );
-    $relative =~ /\A[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*\z/
+    $relative =~ /\A[A-Za-z0-9.][A-Za-z0-9._-]*(?:\/[A-Za-z0-9.][A-Za-z0-9._-]*)*\z/
       or die "invalid relative project path: $relative\n";
+    for my $segment ( split m{/}, $relative ) {
+        $segment ne "." && $segment ne ".."
+          or die "invalid relative project path: $relative\n";
+    }
     return $relative;
 }
 
