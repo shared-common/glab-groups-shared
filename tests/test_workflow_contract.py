@@ -33,6 +33,7 @@ class SharedWorkflowContractTests(unittest.TestCase):
 
     def test_uses_config_specific_target_pat_secret(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("mirror-secret-list: ${{ steps.config_meta.outputs.mirror-secrets }}", text)
         self.assertIn("target-token-secret:", text)
         self.assertIn("GL_PAT_GROUP_ANDROID_SVC", text)
         self.assertIn("GL_PAT_GROUP_CHROMIUM_SVC", text)
@@ -54,11 +55,14 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("glab-groups-openai", text)
         self.assertIn("glab-groups-nvidia", text)
         self.assertIn("GL_TARGET_TOKEN_SECRET_NAME: ${{ inputs.target-token-secret }}", text)
+        self.assertIn("plan-secrets=", text)
+        self.assertIn("mirror-secrets=", text)
+        self.assertIn("secrets: ${{ steps.config_meta.outputs.plan-secrets }}", text)
+        self.assertIn("secrets: ${{ needs.plan.outputs.mirror-secret-list }}", text)
         self.assertIn("GH_SSH_GROUPS_METADATA_KEY", text)
         self.assertIn("GH_ORG_READ_APP_ID", text)
         self.assertIn("GH_ORG_READ_APP_INSTALL_ID", text)
         self.assertIn("GH_ORG_READ_APP_PEM", text)
-        self.assertIn("needs-github-source-auth", text)
         self.assertNotIn("GL_GROUP_TOP_GLAB_OWNER", text)
         self.assertNotIn("GL_BRIDGE_FORK_USER_GLAB", text)
         self.assertIn(
@@ -68,7 +72,7 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("$config->{projects}", text)
         self.assertIn("inventory-cache-max-age-seconds", text)
         self.assertNotIn('config_meta_json="$(', text)
-        self.assertNotIn('needs_github_source_auth="$(', text)
+        self.assertNotIn("NEEDS_GITHUB_SOURCE_AUTH", text)
         self.assertEqual(
             text.count("python3 shared/.github/scripts/write_github_output_multiline.py"),
             2,
@@ -114,6 +118,12 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn('if [ "${FORCE_REFRESH_DISCOVERY}" != "true" ]; then', text)
         self.assertIn('inventory_args+=(--inventory-input "inventory-cache/discover.json")', text)
         self.assertIn("rm -rf inventory-cache", text)
+        self.assertIn("steps.inventory_cache_key.outputs.content-hash", text)
+        self.assertIn(
+            "glab-groups-inventory-{0}-{1}-",
+            text,
+        )
+        self.assertNotIn("format('glab-groups-inventory-{0}-', inputs.config-path)", text)
 
     def test_metadata_repo_is_read_and_written(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")

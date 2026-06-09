@@ -58,7 +58,7 @@ jobs:
       contents: read
     outputs:
       batch-matrix: ${{ steps.batch_matrix.outputs.matrix }}
-      needs-github-source-auth: ${{ steps.config_meta.outputs.needs-github-source-auth }}
+      mirror-secret-list: ${{ steps.config_meta.outputs.mirror-secrets }}
     steps:
       - name: Validate workflow inputs
         shell: bash
@@ -196,11 +196,15 @@ jobs:
             ${{ format(
               'glab-groups-inventory-{0}-{1}-{2}',
               inputs.config-path,
-              steps.inventory_cache_key.outputs.bucket,
-              steps.inventory_cache_key.outputs.content-hash
+              steps.inventory_cache_key.outputs.content-hash,
+              steps.inventory_cache_key.outputs.bucket
             ) }}
           restore-keys: |
-            ${{ format('glab-groups-inventory-{0}-', inputs.config-path) }}
+            ${{ format(
+              'glab-groups-inventory-{0}-{1}-',
+              inputs.config-path,
+              steps.inventory_cache_key.outputs.content-hash
+            ) }}
 
       - name: Resolve BWS secret list
         id: config_meta
@@ -235,20 +239,20 @@ jobs:
               }
           }
 
-          my @secret_names = (
+          my @mirror_secret_names = (
               "GL_BASE_URL",
-              "GH_SSH_GROUPS_METADATA_KEY",
               $target_token_secret,
           );
           if ($needs_github_source_auth) {
-              push @secret_names, "GH_ORG_READ_APP_ID", "GH_ORG_READ_APP_INSTALL_ID", "GH_ORG_READ_APP_PEM";
+              push @mirror_secret_names, "GH_ORG_READ_APP_ID", "GH_ORG_READ_APP_INSTALL_ID", "GH_ORG_READ_APP_PEM";
           }
+          my @plan_secret_names = ( "GH_SSH_GROUPS_METADATA_KEY", @mirror_secret_names );
 
           open( my $fh, ">>:encoding(UTF-8)", $github_output )
             or die "unable to append to \$GITHUB_OUTPUT: $github_output\n";
           print {$fh} "inventory-cache-max-age-seconds=", $config->{defaults}->{inventory_cache_max_age_seconds}, "\n";
-          print {$fh} "secrets=", join( ",", @secret_names ), "\n";
-          print {$fh} "needs-github-source-auth=", ( $needs_github_source_auth ? "true" : "false" ), "\n";
+          print {$fh} "plan-secrets=", join( ",", @plan_secret_names ), "\n";
+          print {$fh} "mirror-secrets=", join( ",", @mirror_secret_names ), "\n";
           close $fh;
           PERL
 
@@ -260,13 +264,13 @@ jobs:
           project-id: ${{ secrets.BWS_PROJECT_ID }}
           bws-version: ${{ inputs.bws-version }}
           bws-sha256: ${{ inputs.bws-sha256 }}
-          secrets: ${{ steps.config_meta.outputs.secrets }}
+          secrets: ${{ steps.config_meta.outputs.plan-secrets }}
           output-dir: .secrets
 
       - name: Mask fetched secrets
         shell: bash
         env:
-          SECRET_NAMES: ${{ steps.config_meta.outputs.secrets }}
+          SECRET_NAMES: ${{ steps.config_meta.outputs.plan-secrets }}
         run: |
           set -euo pipefail
           python3 shared/.github/scripts/mask_secret_files.py
@@ -392,21 +396,6 @@ jobs:
           name: glab-groups-plan-${{ github.run_id }}
           path: .
 
-      - name: Resolve BWS secret list
-        id: config_meta
-        shell: bash
-        env:
-          NEEDS_GITHUB_SOURCE_AUTH: ${{ needs.plan.outputs.needs-github-source-auth }}
-          TARGET_TOKEN_SECRET: ${{ inputs.target-token-secret }}
-        run: |
-          set -euo pipefail
-          secret_list="GL_BASE_URL"
-          secret_list="${secret_list},${TARGET_TOKEN_SECRET}"
-          if [ "${NEEDS_GITHUB_SOURCE_AUTH}" = "true" ]; then
-            secret_list="${secret_list},GH_ORG_READ_APP_ID,GH_ORG_READ_APP_INSTALL_ID,GH_ORG_READ_APP_PEM"
-          fi
-          printf 'secrets=%s\n' "${secret_list}" >> "${GITHUB_OUTPUT}"
-
       - name: Fetch target secrets from BWS
         uses: >-
           shared-common/gh-actions-shared/.github/actions/bws-fetch@v0.0.41
@@ -415,13 +404,13 @@ jobs:
           project-id: ${{ secrets.BWS_PROJECT_ID }}
           bws-version: ${{ inputs.bws-version }}
           bws-sha256: ${{ inputs.bws-sha256 }}
-          secrets: ${{ steps.config_meta.outputs.secrets }}
+          secrets: ${{ needs.plan.outputs.mirror-secret-list }}
           output-dir: .secrets
 
       - name: Mask fetched secrets
         shell: bash
         env:
-          SECRET_NAMES: ${{ steps.config_meta.outputs.secrets }}
+          SECRET_NAMES: ${{ needs.plan.outputs.mirror-secret-list }}
         run: |
           set -euo pipefail
           python3 shared/.github/scripts/mask_secret_files.py

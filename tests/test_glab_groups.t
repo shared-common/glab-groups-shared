@@ -679,6 +679,100 @@ HTML
 }
 
 {
+    no warnings 'redefine';
+    my $dir = tempdir( CLEANUP => 1 );
+    my $cache_path = File::Spec->catfile( $dir, "discover.json" );
+
+    write_json_file(
+        $cache_path,
+        {
+            discovered_at => GlabGroups::_timestamp(),
+            inventory => [],
+        }
+    );
+
+    local *GlabGroups::_discover_inventory = sub {
+        return {
+            discovered_at => GlabGroups::_timestamp(),
+            inventory => [
+                {
+                    group_path => "root",
+                    projects => [
+                        {
+                            path_with_namespace => "root/project-b",
+                        },
+                    ],
+                },
+            ],
+        };
+    };
+
+    my $warning = q{};
+    local $SIG{__WARN__} = sub { $warning .= $_[0] };
+    my $inventory = GlabGroups::_load_or_discover_inventory(
+        {},
+        {
+            input_path => $cache_path,
+            max_age_seconds => 64_800,
+        }
+    );
+    is( $inventory->{inventory}->[0]->{projects}->[0]->{path_with_namespace}, "root/project-b", "empty cached inventory forces live rediscovery" );
+    like( $warning, qr/contained zero discovered projects; performing live rediscovery/, "empty cached inventory is rejected even while fresh" );
+}
+
+{
+    no warnings 'redefine';
+    my $dir = tempdir( CLEANUP => 1 );
+    my $plan_path = File::Spec->catfile( $dir, "plan.json" );
+    my $discover_path = File::Spec->catfile( $dir, "discover.json" );
+    my $summary_path = File::Spec->catfile( $dir, "plan.md" );
+
+    write_json_file(
+        File::Spec->catfile( $dir, "defaults.json" ),
+        {
+            kind => "glab-groups/defaults",
+            version => 1,
+            defaults => {},
+        }
+    );
+    write_json_file(
+        File::Spec->catfile( $dir, "namespaces.json" ),
+        {
+            kind => "glab-groups/namespaces",
+            version => 1,
+            namespaces => [
+                {
+                    name => "kali",
+                    source_group_url => "https://gitlab.com/kalilinux",
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "kalilinux",
+                },
+            ],
+        }
+    );
+
+    local *GlabGroups::_load_or_discover_inventory = sub {
+        return {
+            discovered_at => GlabGroups::_timestamp(),
+            inventory => [],
+        };
+    };
+
+    my $error = q{};
+    eval {
+        GlabGroups::_cmd_plan(
+            "--config-dir",     $dir,
+            "--discover-output", $discover_path,
+            "--output",         $plan_path,
+            "--summary",        $summary_path,
+        );
+        1;
+    } or $error = $@;
+
+    like( $error, qr/discovery produced zero targets; refusing to continue with a no-op mirror plan/, "plan fails closed when discovery yields zero mirror targets" );
+}
+
+{
     my $refs = resolve_selected_refs(
         "main",
         {

@@ -430,6 +430,8 @@ sub _cmd_plan {
             target_group_cache_input => $opt{target_group_cache_input},
         }
     );
+    $plan->{total_targets} > 0
+      or die "discovery produced zero targets; refusing to continue with a no-op mirror plan\n";
     _write_json( $opt{output}, $plan );
     _write_text( $opt{summary}, _render_plan_summary($plan) );
     return 0;
@@ -447,12 +449,18 @@ sub _load_or_discover_inventory {
         };
         if ($cached) {
             if ( _inventory_cache_is_fresh( $cached, $opt->{max_age_seconds} ) ) {
+                if ( _inventory_project_count($cached) > 0 ) {
+                    my $discovered_at = $cached->{discovered_at} || "unknown";
+                    warn "reusing cached inventory from $input_path discovered_at=$discovered_at\n";
+                    return $cached;
+                }
                 my $discovered_at = $cached->{discovered_at} || "unknown";
-                warn "reusing cached inventory from $input_path discovered_at=$discovered_at\n";
-                return $cached;
+                warn "inventory cache at $input_path discovered_at=$discovered_at contained zero discovered projects; performing live rediscovery\n";
             }
-            my $discovered_at = $cached->{discovered_at} || "unknown";
-            warn "inventory cache stale at $input_path discovered_at=$discovered_at; performing live rediscovery\n";
+            else {
+                my $discovered_at = $cached->{discovered_at} || "unknown";
+                warn "inventory cache stale at $input_path discovered_at=$discovered_at; performing live rediscovery\n";
+            }
         }
         else {
             warn "ignoring unreadable inventory cache $input_path: " . _trim_error($@) . "\n";
@@ -473,6 +481,19 @@ sub _inventory_cache_is_fresh {
     return 0 unless defined $discovered_epoch;
     return 1 if !defined $max_age_seconds || $max_age_seconds < 1;
     return ( time() - $discovered_epoch ) <= $max_age_seconds ? 1 : 0;
+}
+
+sub _inventory_project_count {
+    my ($inventory) = @_;
+    return 0 unless ref($inventory) eq "HASH";
+    my $count = 0;
+    for my $bucket ( @{ $inventory->{inventory} || [] } ) {
+        next unless ref($bucket) eq "HASH";
+        for my $project ( @{ $bucket->{projects} || [] } ) {
+            $count++ if ref($project) eq "HASH";
+        }
+    }
+    return $count;
 }
 
 sub _load_target_group_cache_seed {
