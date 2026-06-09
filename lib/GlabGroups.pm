@@ -902,6 +902,8 @@ sub _discover_project_inventory {
             projects => [
                 {
                     archived => JSON::PP::false,
+                    available_branches => [ sort keys %{ $available->{branches} || {} } ],
+                    available_tags => [ sort keys %{ $available->{tags} || {} } ],
                     default_branch => $available->{default_branch},
                     description => "",
                     description_known => JSON::PP::false,
@@ -977,6 +979,14 @@ sub _build_plan {
                     policy => $policy,
                     skip_reason => $skip_reason,
                     source_archived => !!$source_project->{archived},
+                    source_available_branches =>
+                      ref( $source_project->{available_branches} ) eq "ARRAY"
+                      ? [ @{ $source_project->{available_branches} } ]
+                      : undef,
+                    source_available_tags =>
+                      ref( $source_project->{available_tags} ) eq "ARRAY"
+                      ? [ @{ $source_project->{available_tags} } ]
+                      : undef,
                     source_default_branch => $source_project->{default_branch},
                     source_description => _normalize_description( $source_project->{description} ),
                     source_description_known => $source_project->{description_known},
@@ -1042,6 +1052,14 @@ sub _build_plan {
                 policy => $policy,
                 skip_reason => $skip_reason,
                 source_archived => !!$source_project->{archived},
+                source_available_branches =>
+                  ref( $source_project->{available_branches} ) eq "ARRAY"
+                  ? [ @{ $source_project->{available_branches} } ]
+                  : undef,
+                source_available_tags =>
+                  ref( $source_project->{available_tags} ) eq "ARRAY"
+                  ? [ @{ $source_project->{available_tags} } ]
+                  : undef,
                 source_default_branch => $source_project->{default_branch},
                 source_description => _normalize_description( $source_project->{description} ),
                 source_description_known => $source_project->{description_known},
@@ -1145,11 +1163,27 @@ sub _mirror_entry {
     my $entry_source_auth = _resolve_source_auth_for_entry( $source_auth, $entry );
     my $source_url = _maybe_auth_url( $entry->{source_http_url}, $entry_source_auth->{username}, $entry_source_auth->{token} );
     my $chosen_source_url = $source_url;
-    my $available = _discover_remote_refs_from_urls(
-        [ $source_url, _fallback_clone_url($source_url) ],
-        $entry->{policy},
-        \$chosen_source_url,
-    );
+    my $available;
+    if (
+        ref( $entry->{source_available_branches} ) eq "ARRAY"
+        || ref( $entry->{source_available_tags} ) eq "ARRAY"
+      )
+    {
+        my %branches = map { $_ => 1 } @{ $entry->{source_available_branches} || [] };
+        my %tags = map { $_ => 1 } @{ $entry->{source_available_tags} || [] };
+        $available = {
+            branches => \%branches,
+            default_branch => $entry->{source_default_branch} || "",
+            tags => \%tags,
+        };
+    }
+    else {
+        $available = _discover_remote_refs_from_urls(
+            [ $source_url, _fallback_clone_url($source_url) ],
+            $entry->{policy},
+            \$chosen_source_url,
+        );
+    }
     my $target_url = _maybe_auth_url( _project_git_url( $target_client->{base_url}, $entry->{target_full_path} ), $target_client->{username}, $target_client->{token} );
 
     my $remote_result = _run_command( [ "git", "-C", $repo_dir, "remote", "add", "source", $chosen_source_url ], { timeout => 60 } );

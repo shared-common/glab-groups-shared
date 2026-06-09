@@ -796,6 +796,8 @@ HTML
                     projects => [
                         {
                             archived => JSON::PP::false,
+                            available_branches => [ "main", "release" ],
+                            available_tags => [ "v1.0.0" ],
                             default_branch => "main",
                             description => "",
                             description_known => JSON::PP::false,
@@ -816,6 +818,8 @@ HTML
     is( $plan->{plan}->[0]->{target_full_path}, "glab-forks/labwc/darkman", "explicit project planning uses the configured target group path without deriving namespace segments from the source path" );
     is( $plan->{plan}->[0]->{target_namespace_path}, "glab-forks/labwc", "explicit project planning keeps the configured target group path as the target namespace path" );
     is( $plan->{plan}->[0]->{target_relative_project_path}, "glab-forks/labwc/darkman", "explicit project planning keys overrides and exclusions by the full explicit target project path" );
+    is_deeply( $plan->{plan}->[0]->{source_available_branches}, [ "main", "release" ], "explicit project planning carries discovered source branches into the plan" );
+    is_deeply( $plan->{plan}->[0]->{source_available_tags}, [ "v1.0.0" ], "explicit project planning carries discovered source tags into the plan" );
 }
 
 {
