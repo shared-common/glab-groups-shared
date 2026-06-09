@@ -69,6 +69,11 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("inventory-cache-max-age-seconds", text)
         self.assertNotIn('config_meta_json="$(', text)
         self.assertNotIn('needs_github_source_auth="$(', text)
+        self.assertEqual(
+            text.count("python3 shared/.github/scripts/write_github_output_multiline.py"),
+            2,
+        )
+        self.assertNotIn("cat .secrets/GH_SSH_GROUPS_METADATA_KEY", text)
 
     def test_report_aggregates_batch_artifacts(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")

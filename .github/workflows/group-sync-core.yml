@@ -271,11 +271,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          {
-            printf 'ssh-key<<__KEY__\n'
-            cat .secrets/GH_SSH_GROUPS_METADATA_KEY
-            printf '__KEY__\n'
-          } >> "${GITHUB_OUTPUT}"
+          python3 shared/.github/scripts/write_github_output_multiline.py \
+            --output-file "${GITHUB_OUTPUT}" \
+            --name 'ssh-key' \
+            --value-file .secrets/GH_SSH_GROUPS_METADATA_KEY
 
       - name: Checkout metadata repository
         # actions/checkout v6.0.2
@@ -555,11 +554,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          {
-            printf 'ssh-key<<__KEY__\n'
-            cat .secrets/GH_SSH_GROUPS_METADATA_KEY
-            printf '__KEY__\n'
-          } >> "${GITHUB_OUTPUT}"
+          python3 shared/.github/scripts/write_github_output_multiline.py \
+            --output-file "${GITHUB_OUTPUT}" \
+            --name 'ssh-key' \
+            --value-file .secrets/GH_SSH_GROUPS_METADATA_KEY
 
       - name: Checkout metadata repository
         # actions/checkout v6.0.2
