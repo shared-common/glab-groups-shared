@@ -1624,7 +1624,7 @@ sub _ensure_service_user_group_membership_owner {
 }
 
 sub _reconcile_managed_group {
-    my ( $client, $group, $parent_id ) = @_;
+    my ( $client, $group ) = @_;
     return $group unless ref($group) eq "HASH" && defined $group->{id};
 
     my %desired = _managed_group_settings_payload();
@@ -1683,9 +1683,6 @@ sub _ensure_group_path {
         if ($created_group) {
             _ensure_main_user_group_membership_owner( $client, $group->{id} );
             _ensure_service_user_group_membership_owner( $client, $group->{id} );
-        }
-        else {
-            $group = _reconcile_managed_group( $client, $group, $parent_id );
         }
         $parent_id = $group->{id};
         $cache->{$current} = $parent_id;

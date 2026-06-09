@@ -1152,7 +1152,7 @@ HTML
     my %cache = ( owner => 7 );
 
     local *GlabGroups::_ensure_main_user_group_membership_owner = sub { return 1; };
-    local *GlabGroups::_remove_service_user_direct_group_membership = sub { return 1; };
+    local *GlabGroups::_ensure_service_user_group_membership_owner = sub { return 1; };
 
     local *GlabGroups::_get_group = sub {
         my ( $client, $group_path ) = @_;
@@ -1201,7 +1201,7 @@ HTML
     my %cache = ( owner => 7 );
 
     local *GlabGroups::_ensure_main_user_group_membership_owner = sub { return 1; };
-    local *GlabGroups::_remove_service_user_direct_group_membership = sub { return 1; };
+    local *GlabGroups::_ensure_service_user_group_membership_owner = sub { return 1; };
 
     local *GlabGroups::_get_group = sub {
         my ( $client, $group_path ) = @_;
@@ -1253,7 +1253,7 @@ HTML
     );
 
     local *GlabGroups::_ensure_main_user_group_membership_owner = sub { return 1; };
-    local *GlabGroups::_remove_service_user_direct_group_membership = sub { return 1; };
+    local *GlabGroups::_ensure_service_user_group_membership_owner = sub { return 1; };
 
     local *GlabGroups::_get_group = sub {
         my ( $client, $group_path ) = @_;
@@ -1305,7 +1305,7 @@ HTML
     my %cache = ( owner => 7 );
 
     local *GlabGroups::_ensure_main_user_group_membership_owner = sub { return 1; };
-    local *GlabGroups::_remove_service_user_direct_group_membership = sub { return 1; };
+    local *GlabGroups::_ensure_service_user_group_membership_owner = sub { return 1; };
 
     local *GlabGroups::_get_group = sub {
         my ( $client, $group_path ) = @_;
@@ -1446,7 +1446,7 @@ HTML
     my @payloads;
 
     local *GlabGroups::_ensure_main_user_group_membership_owner = sub { return 1; };
-    local *GlabGroups::_remove_service_user_direct_group_membership = sub { return 1; };
+    local *GlabGroups::_ensure_service_user_group_membership_owner = sub { return 1; };
 
     local *GlabGroups::_get_group = sub {
         my ( $client, $group_path ) = @_;
@@ -1474,7 +1474,6 @@ HTML
 {
     no warnings 'redefine';
     my %cache = ( owner => 7 );
-    my @requests;
 
     local *GlabGroups::_required_env_file = sub {
         my ($name) = @_;
@@ -1497,40 +1496,11 @@ HTML
 
     local *GlabGroups::_gitlab_request = sub {
         my ( $client, $method, $path, $payload, $opt ) = @_;
-        push @requests, { method => $method, path => $path, payload => $payload };
-        return {
-            id => 11,
-            full_path => "owner/team",
-            path => "team",
-            project_creation_level => $payload->{project_creation_level},
-            shared_runners_setting => $payload->{shared_runners_setting},
-            subgroup_creation_level => $payload->{subgroup_creation_level},
-        } if $method eq "PUT" && $path eq "/groups/11";
-        return [ { id => 88, username => "imcramer" } ]
-          if $method eq "GET" && $path eq "/users?username=imcramer";
-        return undef
-          if $method eq "GET" && $path eq "/groups/11/members/88";
-        return { access_level => 50, id => 88 }
-          if $method eq "POST" && $path eq "/groups/11/members";
-        return { id => 55, username => "svc-glab" }
-          if $method eq "GET" && $path eq "/user";
-        return { access_level => 50, id => 55 }
-          if $method eq "GET" && $path eq "/groups/11/members/55";
-        return undef
-          if $method eq "DELETE" && $path eq "/groups/11/members/55";
         die "unexpected gitlab request: $method $path";
     };
 
     my $group_id = GlabGroups::_ensure_group_path( {}, "owner/team", \%cache );
-    is( $group_id, 11, "reuses existing subgroup" );
-    is( $requests[0]->{path}, "/groups/11", "existing subgroup settings are updated through the groups API" );
-    is( $requests[0]->{payload}->{shared_runners_setting}, "disabled_and_unoverridable", "existing subgroup disables instance runners" );
-    is( $requests[0]->{payload}->{project_creation_level}, "maintainer", "existing subgroup uses maintainer project creation level" );
-    is( $requests[0]->{payload}->{subgroup_creation_level}, "maintainer", "existing subgroup uses maintainer subgroup creation level" );
-    is( $requests[1]->{path}, "/users?username=imcramer", "main owner username is resolved through the users API" );
-    is( $requests[3]->{path}, "/groups/11/members", "main user is added as a direct group member when missing" );
-    is( $requests[3]->{payload}->{access_level}, 50, "main user is set as direct owner on managed subgroups" );
-    is( $requests[-1]->{path}, "/groups/11/members/55", "service user direct subgroup membership is removed after owner reconciliation" );
+    is( $group_id, 11, "reuses existing target group without mutating ancestor groups" );
 }
 
 {
