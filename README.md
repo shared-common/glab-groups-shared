@@ -67,6 +67,8 @@ and authenticates with:
 - `GL_PAT_GROUP_DEBIAN_SVC` for `glab-groups-debian`
 - `GL_PAT_GROUP_FREEDESKTOP_SVC` for `glab-groups-freedesktop`
 - `GL_PAT_GROUP_SMALL_SVC` for `glab-groups-small`
+- `GL_PAT_GROUP_OPENAI_SVC` for `glab-groups-openai`
+- `GL_PAT_GROUP_NVIDIA_SVC` for `glab-groups-nvidia`
 - `GL_PAT_GROUP_KDE_SVC` for `glab-groups-kde`
 - `GL_PAT_GROUP_GNOME_SVC` for `glab-groups-gnome`
 - `GL_PAT_GROUP_PROJ_SVC` for `glab-groups-projects`

@@ -74,7 +74,7 @@ jobs:
               ;;
           esac
           case "${TARGET_TOKEN_SECRET}" in
-            GL_PAT_GROUP_KALI_SVC|GL_PAT_GROUP_DEBIAN_SVC|GL_PAT_GROUP_FREEDESKTOP_SVC|GL_PAT_GROUP_SMALL_SVC|GL_PAT_GROUP_KDE_SVC|GL_PAT_GROUP_GNOME_SVC|GL_PAT_GROUP_PROJ_SVC)
+            GL_PAT_GROUP_KALI_SVC|GL_PAT_GROUP_DEBIAN_SVC|GL_PAT_GROUP_FREEDESKTOP_SVC|GL_PAT_GROUP_SMALL_SVC|GL_PAT_GROUP_OPENAI_SVC|GL_PAT_GROUP_NVIDIA_SVC|GL_PAT_GROUP_KDE_SVC|GL_PAT_GROUP_GNOME_SVC|GL_PAT_GROUP_PROJ_SVC)
               ;;
             *)
               printf 'invalid target-token-secret: %s\n' \
@@ -94,6 +94,12 @@ jobs:
               ;;
             glab-groups-small)
               expected_token_secret="GL_PAT_GROUP_SMALL_SVC"
+              ;;
+            glab-groups-openai)
+              expected_token_secret="GL_PAT_GROUP_OPENAI_SVC"
+              ;;
+            glab-groups-nvidia)
+              expected_token_secret="GL_PAT_GROUP_NVIDIA_SVC"
               ;;
             glab-groups-kde)
               expected_token_secret="GL_PAT_GROUP_KDE_SVC"
