@@ -1694,7 +1694,8 @@ HTML
     local *GlabGroups::_get_group = sub {
         my ( $client, $group_path ) = @_;
         push @group_lookups, $group_path;
-        return { id => 88, full_path => $group_path, path => "group" };
+        return { id => 88, full_path => $group_path, path => "group" } if $group_path eq "glab-forks/crowdsecurity";
+        return undef;
     };
 
     local *GlabGroups::_gitlab_request = sub {
@@ -1716,8 +1717,12 @@ HTML
         }
     );
     ok( $result->{created}, "creates missing target project after resolving the live target group id" );
-    is_deeply( \@group_lookups, [ "glab-forks/crowdsecurity" ], "looks up the configured target group path once before project creation" );
-    is( $requests[0]->{payload}->{namespace_id}, 88, "project creation prefers the live group id over the preseeded target namespace id" );
+    is_deeply( \@group_lookups, [], "does not preflight locked namespaces before the first project create attempt" );
+    is_deeply(
+        [ map { $_->{payload}->{namespace_id} } grep { $_->{method} eq "POST" && $_->{path} eq "/projects" } @requests ],
+        [42],
+        "uses the configured namespace id on the first project create attempt",
+    );
 }
 
 {
@@ -1730,7 +1735,8 @@ HTML
         my ( $client, $group_path ) = @_;
         push @group_lookups, $group_path;
         $lookup_count++;
-        return { id => 77, full_path => $group_path, path => "group" } if $lookup_count >= 2;
+        return undef if $group_path eq "glab-forks";
+        return { id => 77, full_path => $group_path, path => "google" } if $group_path eq "glab-forks/google" && $lookup_count >= 2;
         return undef;
     };
 
@@ -1741,6 +1747,22 @@ HTML
           if $method eq "POST"
           && $path eq "/projects"
           && $payload->{namespace_id} == 42;
+        return [
+            {
+                id => 66,
+                full_path => "glab-forks",
+                path => "glab-forks",
+            },
+        ] if $method eq "GET"
+          && $path eq "/groups?top_level_only=true&per_page=100&page=1&search=glab-forks";
+        return [
+            {
+                id => 77,
+                full_path => "glab-forks/google",
+                path => "google",
+            },
+        ] if $method eq "GET"
+          && $path eq "/groups/66/subgroups?per_page=100&page=1&search=google";
         return { id => 124, archived => JSON::PP::false };
     };
 
@@ -1761,6 +1783,11 @@ HTML
         [ map { $_->{payload}->{namespace_id} } grep { $_->{method} eq "POST" && $_->{path} eq "/projects" } @requests ],
         [ 42, 77 ],
         "invalid namespace retries use the refreshed target group id",
+    );
+    is_deeply(
+        \@group_lookups,
+        [ "glab-forks", "glab-forks/google" ],
+        "invalid namespace refresh falls back to read-only parent and subgroup lookup when direct full-path lookup misses",
     );
 }
 
@@ -1785,6 +1812,8 @@ HTML
         push @requests, { method => $method, path => $path, payload => $payload };
         die "gitlab request failed [400] POST /projects: {\"message\":{\"namespace\":[\"is not valid\"]}}\n"
           if $method eq "POST" && $path eq "/projects";
+        return [] if $method eq "GET" && $path eq "/groups?top_level_only=true&per_page=100&page=1&search=glab-forks";
+        return [] if $method eq "GET" && $path eq "/groups?top_level_only=true&per_page=100&page=1&all_available=true";
         die "unexpected request: $method $path";
     };
 
@@ -1812,10 +1841,9 @@ HTML
         "locked target namespace errors explain that the configured group path was not resolved",
     );
     is_deeply( \@ensured_groups, [], "locked configured target namespaces never fall through to group creation" );
-    is_deeply(
-        [ map { $_->{path} } @requests ],
-        [ "/projects" ],
-        "locked configured target namespaces only attempt project creation before failing",
+    ok(
+        !grep( { $_->{method} eq "POST" && $_->{path} eq "/groups" } @requests ),
+        "locked configured target namespaces never attempt group creation",
     );
 }
 

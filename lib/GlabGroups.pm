@@ -1738,6 +1738,34 @@ sub _clear_group_path_cache_tree {
     }
 }
 
+sub _resolve_existing_group_path {
+    my ( $client, $group_path, $cache ) = @_;
+    return undef unless defined $group_path && length $group_path;
+    return $cache->{$group_path} if ref($cache) eq "HASH" && exists $cache->{$group_path};
+
+    my @parts = split m{/}, $group_path;
+    my $current = q{};
+    my $parent_id;
+    my $group;
+    for my $part (@parts) {
+        $current = length $current ? "$current/$part" : $part;
+        if ( ref($cache) eq "HASH" && exists $cache->{$current} ) {
+            $parent_id = $cache->{$current};
+            next;
+        }
+
+        $group = _get_group( $client, $current );
+        if ( !$group ) {
+            $group = _find_group_by_parent_and_path( $client, $parent_id, $current, $part );
+        }
+        return undef unless $group;
+        $parent_id = $group->{id};
+        $cache->{$current} = $parent_id if ref($cache) eq "HASH";
+    }
+
+    return $parent_id;
+}
+
 sub _ensure_target_project {
     my ( $client, $entry ) = @_;
     my $group_cache = $client->{group_path_cache} ||= {};
@@ -1761,13 +1789,8 @@ sub _ensure_target_project {
         if ( exists $group_cache->{ $entry->{target_namespace_path} } ) {
             $entry->{target_namespace_id} = $group_cache->{ $entry->{target_namespace_path} };
         }
-        elsif ( !$existing && defined $entry->{target_namespace_id} ) {
-            my $live_group = _get_group( $client, $entry->{target_namespace_path} );
-            if ($live_group) {
-                $entry->{target_namespace_id} = 0 + $live_group->{id};
-            }
-            $group_cache->{ $entry->{target_namespace_path} } = $entry->{target_namespace_id}
-              if defined $entry->{target_namespace_id};
+        elsif ( defined $entry->{target_namespace_id} ) {
+            $group_cache->{ $entry->{target_namespace_path} } = $entry->{target_namespace_id};
         }
     }
     if ( !defined $entry->{target_namespace_id} ) {
@@ -1828,9 +1851,13 @@ sub _ensure_target_project {
               )
             {
                 _clear_group_path_cache_tree( $group_cache, $entry->{target_namespace_path} );
-                my $live_group = _get_group( $client, $entry->{target_namespace_path} );
-                if ($live_group) {
-                    $entry->{target_namespace_id} = 0 + $live_group->{id};
+                my $resolved_group_id = _resolve_existing_group_path(
+                    $client,
+                    $entry->{target_namespace_path},
+                    $group_cache,
+                );
+                if ($resolved_group_id) {
+                    $entry->{target_namespace_id} = 0 + $resolved_group_id;
                     $group_cache->{ $entry->{target_namespace_path} } = $entry->{target_namespace_id};
                 }
                 else {
