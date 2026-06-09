@@ -803,6 +803,7 @@ HTML
             visibility => "private",
             description => "target",
             archived => JSON::PP::false,
+            group_runners_enabled => JSON::PP::true,
             lfs_enabled => JSON::PP::false,
         },
         {
@@ -1438,6 +1439,7 @@ HTML
     ok( $result->{created}, "creates missing target project" );
     is( $requests[0]->{method}, "POST", "issues project creation API calls when target is missing" );
     is( $requests[0]->{path}, "/projects", "creates project through the GitLab projects API" );
+    ok( !$requests[0]->{payload}->{group_runners_enabled}, "project creation disables group runners" );
     ok( !exists $requests[0]->{payload}->{visibility}, "project creation payload does not set visibility" );
 }
 
@@ -1534,6 +1536,7 @@ HTML
         my ( $client, $method, $path, $payload, $opt ) = @_;
         push @requests, { method => $method, path => $path, payload => $payload };
         if ( $method eq "POST" && $path eq "/projects/99/repository/branches" ) {
+            die "Branch already exists\n" if exists $branches{ $payload->{branch} };
             $branches{ $payload->{branch} } = {
                 name => $payload->{branch},
                 protected => JSON::PP::false,
@@ -1572,6 +1575,7 @@ HTML
             source_lfs_enabled => JSON::PP::false,
             target_full_path => "owner/group/project",
             target_description => "old",
+            target_group_runners_enabled => JSON::PP::true,
             target_lfs_enabled => JSON::PP::false,
             target_namespace_path => "owner/group",
             target_namespace_id => 42,
@@ -1580,6 +1584,7 @@ HTML
     );
     ok( !$result->{created}, "does not create when project already exists" );
     ok( $result->{updated}, "updates existing target project metadata when needed" );
+    ok( !$requests[0]->{payload}->{group_runners_enabled}, "project update disables group runners" );
     ok( !exists $requests[0]->{payload}->{visibility}, "project update payload does not set visibility" );
 
     GlabGroups::_finalize_target_project(
@@ -1650,6 +1655,7 @@ HTML
             source_lfs_enabled_known => JSON::PP::false,
             target_description => "keep me",
             target_full_path => "glab-forks/labwc/darkman",
+            target_group_runners_enabled => JSON::PP::false,
             target_lfs_enabled => JSON::PP::true,
             target_namespace_path => "glab-forks/labwc",
             target_namespace_id => 42,
@@ -1658,6 +1664,48 @@ HTML
     );
     ok( !$result->{updated}, "explicit project updates skip description and LFS metadata drift when the source does not provide authoritative values" );
     is( scalar @requests, 0, "explicit project metadata gaps do not trigger project update API calls" );
+}
+
+{
+    no warnings 'redefine';
+    my @requests;
+
+    local *GlabGroups::_get_project = sub {
+        die "_get_project should not be called when plan already supplied the target project metadata";
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        push @requests, { method => $method, path => $path, payload => $payload };
+        return {
+            id => 88,
+            archived => JSON::PP::false,
+            description => "source",
+            group_runners_enabled => JSON::PP::false,
+            lfs_enabled => JSON::PP::false,
+        };
+    };
+
+    my $result = GlabGroups::_ensure_target_project(
+        {},
+        {
+            policy => { force_lfs => JSON::PP::false },
+            source_description => "source",
+            source_lfs_enabled => JSON::PP::false,
+            source_lfs_enabled_known => JSON::PP::true,
+            target_description => "source",
+            target_full_path => "glab-forks/labwc/group-runners-drift",
+            target_group_runners_enabled => JSON::PP::true,
+            target_lfs_enabled => JSON::PP::false,
+            target_namespace_path => "glab-forks/labwc",
+            target_namespace_id => 42,
+            target_project_id => 88,
+        }
+    );
+
+    ok( $result->{updated}, "existing projects update when group runners remain enabled" );
+    is( scalar @requests, 1, "group runners drift triggers exactly one project update call" );
+    ok( !$requests[0]->{payload}->{group_runners_enabled}, "group runners drift is corrected by disabling group runners" );
 }
 
 {

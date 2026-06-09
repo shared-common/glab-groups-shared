@@ -243,6 +243,10 @@ sub classify_plan_action {
         return "update_project" if $target_lfs_enabled != $source_lfs_enabled;
     }
 
+    if ( exists $target_project->{group_runners_enabled} ) {
+        return "update_project" if !!$target_project->{group_runners_enabled};
+    }
+
     return "mirror_only";
 }
 
@@ -838,6 +842,10 @@ sub _build_plan {
                     target_namespace_id => $target_namespace_id,
                     target_namespace_path => $target_namespace_path,
                     target_description => $target_project ? _normalize_description( $target_project->{description} ) : undef,
+                    target_group_runners_enabled =>
+                      $target_project && exists $target_project->{group_runners_enabled}
+                      ? !!$target_project->{group_runners_enabled}
+                      : undef,
                     target_lfs_enabled => $target_project ? !!$target_project->{lfs_enabled} : undef,
                     target_project_id => $target_project ? $target_project->{id} : undef,
                     target_visibility => $target_project ? $target_project->{visibility} : undef,
@@ -903,6 +911,10 @@ sub _build_plan {
                 target_namespace_id => $target_namespace_id,
                 target_namespace_path => $target_namespace_path,
                 target_description => $target_project ? _normalize_description( $target_project->{description} ) : undef,
+                target_group_runners_enabled =>
+                  $target_project && exists $target_project->{group_runners_enabled}
+                  ? !!$target_project->{group_runners_enabled}
+                  : undef,
                 target_lfs_enabled => $target_project ? !!$target_project->{lfs_enabled} : undef,
                 target_project_id => $target_project ? $target_project->{id} : undef,
                 target_visibility => $target_project ? $target_project->{visibility} : undef,
@@ -1634,6 +1646,10 @@ sub _ensure_target_project {
       defined $entry->{target_project_id}
       ? {
             description => $entry->{target_description},
+            group_runners_enabled =>
+              defined $entry->{target_group_runners_enabled}
+              ? ( $entry->{target_group_runners_enabled} ? JSON::PP::true : JSON::PP::false )
+              : undef,
             id => $entry->{target_project_id},
             lfs_enabled => $entry->{target_lfs_enabled} ? JSON::PP::true : JSON::PP::false,
         }
@@ -1654,6 +1670,7 @@ sub _ensure_target_project {
           ? JSON::PP::true
           : JSON::PP::false;
     }
+    $payload{group_runners_enabled} = JSON::PP::false;
 
     my $project;
     my $created = JSON::PP::false;
@@ -1697,6 +1714,10 @@ sub _ensure_target_project {
         if ( exists $payload{lfs_enabled} ) {
             $needs_update = 1
               if !!$project->{lfs_enabled} != !!$payload{lfs_enabled};
+        }
+        if ( exists $project->{group_runners_enabled} ) {
+            $needs_update = 1
+              if !!$project->{group_runners_enabled} != !!$payload{group_runners_enabled};
         }
         if ($needs_update) {
             $project = _gitlab_request( $client, "PUT", "/projects/" . $project->{id}, \%payload );
