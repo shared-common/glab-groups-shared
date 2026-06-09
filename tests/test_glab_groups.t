@@ -1550,6 +1550,12 @@ HTML
                   grep { $_->{protected} } values %branches
             ];
         }
+        if ( $method eq "GET" && $path =~ m{\A/projects/99/protected_branches/} ) {
+            my ($branch_name) = $path =~ m{\A/projects/99/protected_branches/(.+)\z};
+            $branch_name =~ s/%2F/\//g;
+            return undef if !exists $branches{$branch_name} || !$branches{$branch_name}->{protected};
+            return { %{ $branches{$branch_name} } };
+        }
         if ( $method eq "POST" && $path eq "/projects/99/protected_branches" ) {
             $branches{ $payload->{name} } ||= { name => $payload->{name} };
             $branches{ $payload->{name} }->{protected} = JSON::PP::true;
@@ -1706,6 +1712,29 @@ HTML
     ok( $result->{updated}, "existing projects update when group runners remain enabled" );
     is( scalar @requests, 1, "group runners drift triggers exactly one project update call" );
     ok( !$requests[0]->{payload}->{group_runners_enabled}, "group runners drift is corrected by disabling group runners" );
+}
+
+{
+    no warnings 'redefine';
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        return undef
+          if $method eq "GET"
+          && $path eq "/projects/99/protected_branches/gitlab%2Fmcr%2Fmain";
+        die "already exists\n"
+          if $method eq "POST"
+          && $path eq "/projects/99/protected_branches";
+        die "unexpected request: $method $path";
+    };
+
+    my $ok = eval {
+        GlabGroups::_ensure_target_branch_protected( {}, 99, "gitlab/mcr/main" );
+        1;
+    };
+
+    ok( !$ok, "protect branch fails when GitLab reports already exists but the exact protected branch is still missing" );
+    like( $@, qr/protected branch missing after already-exists response: gitlab\/mcr\/main/, "protect branch reports the missing exact protected branch" );
 }
 
 {

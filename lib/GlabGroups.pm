@@ -1790,6 +1790,17 @@ sub _get_tag {
     );
 }
 
+sub _get_protected_branch {
+    my ( $client, $project_id, $branch_name ) = @_;
+    return _gitlab_request(
+        $client,
+        "GET",
+        "/projects/$project_id/protected_branches/" . _encode_path($branch_name),
+        undef,
+        { allow_missing => 1 }
+    );
+}
+
 sub _ensure_managed_target_branches {
     my ( $client, $project_id, $source_default_branch, $policy ) = @_;
     return q{} unless $source_default_branch;
@@ -1911,6 +1922,8 @@ sub _ensure_target_branch_from_ref {
 
 sub _ensure_target_branch_protected {
     my ( $client, $project_id, $branch_name ) = @_;
+    return 1 if _get_protected_branch( $client, $project_id, $branch_name );
+
     my $protect_ok = eval {
         _gitlab_request(
             $client,
@@ -1925,7 +1938,10 @@ sub _ensure_target_branch_protected {
     return 1 if $protect_ok;
 
     my $protect_error = $@ || "unknown protected branch error\n";
-    return 1 if _is_gitlab_already_exists_error($protect_error);
+    if ( _is_gitlab_already_exists_error($protect_error) ) {
+        return 1 if _get_protected_branch( $client, $project_id, $branch_name );
+        die "protected branch missing after already-exists response: $branch_name\n";
+    }
     die $protect_error;
 }
 
