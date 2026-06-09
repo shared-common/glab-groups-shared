@@ -51,6 +51,7 @@ sub run_cmd {
             defaults => {
                 additional_branches => ["release"],
                 mirror_pristine_tar => JSON::PP::true,
+                target_branches_protect => ["gitlab/mcr/main"],
             },
         }
     );
@@ -63,6 +64,7 @@ sub run_cmd {
                 {
                     name => "kali",
                     source_group_url => "https://gitlab.com/kalilinux",
+                    target_branches_protect => ["gitlab/mcr/main"],
                     target_owner_path => "glab-forks",
                     target_namespace_path => "kalilinux",
                 },
@@ -72,7 +74,9 @@ sub run_cmd {
     my $config = load_config_dir($dir);
     is( scalar @{ $config->{namespaces} }, 1, "loads namespace roots" );
     is( $config->{defaults}->{additional_branches}->[0]->{name}, "release", "normalizes default branches" );
+    is( $config->{defaults}->{target_branches_protect}->[0]->{name}, "gitlab/mcr/main", "normalizes default protected target branches" );
     is( $config->{defaults}->{batch_size}, 25, "keeps default batch size at 25" );
+    is( $config->{namespaces}->[0]->{target_branches_protect}->[0]->{name}, "gitlab/mcr/main", "loads namespace protected target branches" );
 }
 
 {
@@ -117,6 +121,8 @@ defaults:
   additional_tags:
     - v1.0.0
   mirror_pristine_tar: true
+  target_branches_protect:
+    - gitlab/mcr/main
 YAML
     );
     write_text_file(
@@ -132,6 +138,8 @@ projects:
       - stable
     additional_tags:
       - v2.0.0
+    target_branches_protect:
+      - gitlab/mcr/main
 YAML
     );
 
@@ -140,6 +148,29 @@ YAML
     is( $config->{projects}->[0]->{target_group_path}, "glab-forks/labwc", "keeps the full explicit target group path" );
     is( $config->{defaults}->{additional_branches}->[0]->{name}, "release", "loads default branches from YAML config" );
     is( $config->{projects}->[0]->{additional_branches}->[0]->{name}, "stable", "loads per-project branch overrides from YAML config" );
+    is( $config->{projects}->[0]->{target_branches_protect}->[0]->{name}, "gitlab/mcr/main", "loads per-project protected target branches from YAML config" );
+}
+
+{
+    my $policy = GlabGroups::_merge_policy(
+        {
+            additional_branches => [],
+            additional_tags => [],
+            target_branches_protect => [ { name => "gitlab/mcr/main" } ],
+        },
+        {
+            target_branches_protect => [ { name => "mcr/feature/init" } ],
+        },
+        {
+            target_branches_protect => [ { name => "mcr/feature/init" } ],
+        },
+    );
+
+    is_deeply(
+        [ map { $_->{name} } @{ $policy->{target_branches_protect} } ],
+        [ "gitlab/mcr/main", "mcr/feature/init", "mcr/feature/init" ],
+        "merge policy carries configured protected target branches into the runtime policy",
+    );
 }
 
 {
@@ -1488,6 +1519,8 @@ HTML
     my @requests;
     my %branches = (
         main => { name => "main", protected => JSON::PP::false },
+        "mcr/release" => { name => "mcr/release", protected => JSON::PP::true },
+        "mcr/staging" => { name => "mcr/staging", protected => JSON::PP::true },
     );
 
     local *GlabGroups::_get_branch = sub {
@@ -1507,10 +1540,25 @@ HTML
             };
             return { %{ $branches{ $payload->{branch} } } };
         }
+        if ( $method eq "GET" && $path eq "/projects/99/protected_branches" ) {
+            return [
+                map { { %{$_} } }
+                  sort { $a->{name} cmp $b->{name} }
+                  grep { $_->{protected} } values %branches
+            ];
+        }
         if ( $method eq "POST" && $path eq "/projects/99/protected_branches" ) {
             $branches{ $payload->{name} } ||= { name => $payload->{name} };
             $branches{ $payload->{name} }->{protected} = JSON::PP::true;
             return { %{ $branches{ $payload->{name} } } };
+        }
+        if ( $method eq "DELETE" && $path =~ m{\A/projects/99/protected_branches/} ) {
+            my ($branch_name) = $path =~ m{\A/projects/99/protected_branches/(.+)\z};
+            $branch_name =~ s/%2F/\//g;
+            if ( exists $branches{$branch_name} ) {
+                $branches{$branch_name}->{protected} = JSON::PP::false;
+            }
+            return undef;
         }
         return { id => 99, archived => JSON::PP::false, description => "source", lfs_enabled => JSON::PP::false };
     };
@@ -1539,6 +1587,11 @@ HTML
         99,
         "main",
         {
+            policy => {
+                target_branches_protect => [
+                    { name => "gitlab/mcr/main" },
+                ],
+            },
             source_description => "source",
         }
     );
@@ -1558,8 +1611,15 @@ HTML
       grep { $_->{method} eq "POST" && $_->{path} eq "/projects/99/protected_branches" } @requests;
     is_deeply(
         [ map { $_->{payload}->{name} } @protect_requests ],
-        [ "mcr/staging", "mcr/release" ],
-        "finalize protects the managed promotion branches",
+        [ "gitlab/mcr/main" ],
+        "finalize protects only the configured target branches",
+    );
+    my @unprotect_requests =
+      grep { $_->{method} eq "DELETE" && $_->{path} =~ m{\A/projects/99/protected_branches/} } @requests;
+    is_deeply(
+        [ map { my ($name) = $_->{path} =~ m{\A/projects/99/protected_branches/(.+)\z}; $name =~ s/%2F/\//gr } @unprotect_requests ],
+        [ "mcr/release", "mcr/staging" ],
+        "finalize removes legacy protection from managed branches not present in config",
     );
     my @project_put_requests = grep { $_->{method} eq "PUT" && $_->{path} eq "/projects/99" } @requests;
     ok( !exists $project_put_requests[-1]->{payload}->{visibility}, "project finalize payload does not set visibility" );

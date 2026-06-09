@@ -106,7 +106,12 @@ sub load_config_dir {
     closedir($dh);
 
     my %config = (
-        defaults => { %DEFAULTS, additional_branches => [], additional_tags => [] },
+        defaults => {
+            %DEFAULTS,
+            additional_branches => [],
+            additional_tags => [],
+            target_branches_protect => [],
+        },
         namespaces => [],
         projects => [],
         overrides => {},
@@ -1172,6 +1177,7 @@ sub _normalize_defaults_payload {
         retry_attempts => _defaulted_positive_int( $payload->{retry_attempts}, $DEFAULTS{retry_attempts}, "$label.defaults.retry_attempts" ),
         retry_backoff_seconds => _defaulted_positive_int( $payload->{retry_backoff_seconds}, $DEFAULTS{retry_backoff_seconds}, "$label.defaults.retry_backoff_seconds" ),
         size_limit_bytes => _defaulted_bounded_positive_int( $payload->{size_limit_bytes}, $DEFAULTS{size_limit_bytes}, $DEFAULTS{size_limit_bytes}, "$label.defaults.size_limit_bytes" ),
+        target_branches_protect => _normalize_ref_specs( $payload->{target_branches_protect}, "$label.defaults.target_branches_protect" ),
     };
 }
 
@@ -1195,6 +1201,7 @@ sub _normalize_namespace {
         size_limit_bytes => _optional_bounded_positive_int( $payload->{size_limit_bytes}, $DEFAULTS{size_limit_bytes}, "$label.size_limit_bytes" ),
         max_blob_bytes => _optional_bounded_positive_int( $payload->{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, "$label.max_blob_bytes" ),
         source_group_url => _required_https_url( $payload->{source_group_url}, "$label.source_group_url" ),
+        target_branches_protect => _normalize_ref_specs( $payload->{target_branches_protect}, "$label.target_branches_protect" ),
         target_owner_path => _required_relative_namespace_path( $payload->{target_owner_path}, "$label.target_owner_path" ),
         target_namespace_path => _required_relative_namespace_path( $payload->{target_namespace_path}, "$label.target_namespace_path" ),
     };
@@ -1220,6 +1227,7 @@ sub _normalize_project {
         size_limit_bytes => _optional_bounded_positive_int( $payload->{size_limit_bytes}, $DEFAULTS{size_limit_bytes}, "$label.size_limit_bytes" ),
         max_blob_bytes => _optional_bounded_positive_int( $payload->{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, "$label.max_blob_bytes" ),
         source_project_url => _required_https_url( $payload->{source_project_url}, "$label.source_project_url" ),
+        target_branches_protect => _normalize_ref_specs( $payload->{target_branches_protect}, "$label.target_branches_protect" ),
         target_group_path => _required_relative_namespace_path( $payload->{target_group_path}, "$label.target_group_path" ),
     };
 }
@@ -1243,6 +1251,7 @@ sub _normalize_override {
         size_limit_bytes => _optional_bounded_positive_int( $payload->{size_limit_bytes}, $DEFAULTS{size_limit_bytes}, "$label.size_limit_bytes" ),
         max_blob_bytes => _optional_bounded_positive_int( $payload->{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, "$label.max_blob_bytes" ),
         target_project_path => _required_relative_project_path( $payload->{target_project_path}, "$label.target_project_path" ),
+        target_branches_protect => _normalize_ref_specs( $payload->{target_branches_protect}, "$label.target_branches_protect" ),
     };
 }
 
@@ -1278,6 +1287,11 @@ sub _merge_policy {
         @{ $defaults->{additional_tags} || [] },
         @{ $namespace->{additional_tags} || [] },
         @{ $override->{additional_tags} || [] },
+    ];
+    $policy->{target_branches_protect} = [
+        @{ $defaults->{target_branches_protect} || [] },
+        @{ $namespace->{target_branches_protect} || [] },
+        @{ $override->{target_branches_protect} || [] },
     ];
     $policy->{git_timeout_seconds} ||= $DEFAULTS{git_timeout_seconds};
     $policy->{read_retry_attempts} ||= $GITLAB_READ_DEFAULTS{retry_attempts};
@@ -1699,7 +1713,7 @@ sub _ensure_target_project {
 
 sub _finalize_target_project {
     my ( $client, $project_id, $default_branch, $entry ) = @_;
-    my $managed_default_branch = _ensure_managed_target_branches( $client, $project_id, $default_branch );
+    my $managed_default_branch = _ensure_managed_target_branches( $client, $project_id, $default_branch, $entry->{policy} );
     my %payload;
     if ( !exists( $entry->{source_description_known} ) || $entry->{source_description_known} ) {
         $payload{description} = $entry->{source_description};
@@ -1756,7 +1770,7 @@ sub _get_tag {
 }
 
 sub _ensure_managed_target_branches {
-    my ( $client, $project_id, $source_default_branch ) = @_;
+    my ( $client, $project_id, $source_default_branch, $policy ) = @_;
     return q{} unless $source_default_branch;
 
     my @specs = (
@@ -1775,18 +1789,17 @@ sub _ensure_managed_target_branches {
         },
         {
             name => "mcr/staging",
-            protect => JSON::PP::true,
             ref => $TARGET_DEFAULT_BRANCH,
         },
         {
             name => "mcr/release",
-            protect => JSON::PP::true,
             ref => $TARGET_DEFAULT_BRANCH,
         },
     );
 
     my $managed_default_branch = q{};
     my %branch_exists;
+    my %managed_branch_names = map { $_->{name} => 1 } @specs;
     for my $spec (@specs) {
         my $exists = _ensure_target_branch_from_ref(
             $client,
@@ -1796,14 +1809,53 @@ sub _ensure_managed_target_branches {
             \%branch_exists,
         );
         next unless $exists;
-        _ensure_target_branch_protected( $client, $project_id, $spec->{name} ) if $spec->{protect};
         $branch_exists{ $spec->{name} } = 1;
         $managed_default_branch = $spec->{name} if $spec->{default} && $branch_exists{ $spec->{name} };
+    }
+
+    my $configured_target_branches_to_protect = _configured_target_branches_to_protect($policy);
+    my %configured_target_branch_names = map { $_ => 1 } @{$configured_target_branches_to_protect};
+    for my $branch_name ( @{ _list_target_protected_branch_names( $client, $project_id ) } ) {
+        next unless $managed_branch_names{$branch_name};
+        next if $configured_target_branch_names{$branch_name};
+        _ensure_target_branch_unprotected( $client, $project_id, $branch_name );
+    }
+
+    for my $branch_name ( @{$configured_target_branches_to_protect} ) {
+        next unless $branch_exists{$branch_name};
+        _ensure_target_branch_protected( $client, $project_id, $branch_name );
     }
 
     return $managed_default_branch && $branch_exists{$managed_default_branch}
       ? $managed_default_branch
       : q{};
+}
+
+sub _configured_target_branches_to_protect {
+    my ($policy) = @_;
+    return [] unless ref($policy) eq "HASH";
+    my @names;
+    my %seen;
+    for my $spec ( @{ $policy->{target_branches_protect} || [] } ) {
+        next unless ref($spec) eq "HASH";
+        my $name = _required_string( $spec->{name}, "target_branches_protect.name" );
+        next if $seen{$name}++;
+        push @names, $name;
+    }
+    return \@names;
+}
+
+sub _list_target_protected_branch_names {
+    my ( $client, $project_id ) = @_;
+    my $protected = _gitlab_request( $client, "GET", "/projects/$project_id/protected_branches" );
+    ref($protected) eq "ARRAY" or die "protected branches response must be a list\n";
+    my @names;
+    for my $item ( @{$protected} ) {
+        next unless ref($item) eq "HASH";
+        next unless defined $item->{name} && length $item->{name};
+        push @names, $item->{name};
+    }
+    return \@names;
 }
 
 sub _ensure_target_branch_from_ref {
@@ -1854,6 +1906,18 @@ sub _ensure_target_branch_protected {
     my $protect_error = $@ || "unknown protected branch error\n";
     return 1 if _is_gitlab_already_exists_error($protect_error);
     die $protect_error;
+}
+
+sub _ensure_target_branch_unprotected {
+    my ( $client, $project_id, $branch_name ) = @_;
+    _gitlab_request(
+        $client,
+        "DELETE",
+        "/projects/$project_id/protected_branches/" . _encode_path($branch_name),
+        undef,
+        { allow_missing => 1 }
+    );
+    return 1;
 }
 
 sub _list_gitlab_top_level_groups {

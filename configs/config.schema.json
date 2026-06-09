@@ -189,6 +189,12 @@
             "$ref": "#/$defs/refSpec"
           }
         },
+        "target_branches_protect": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/refSpec"
+          }
+        },
         "batch_size": {
           "type": "integer",
           "minimum": 1,

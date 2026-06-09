@@ -112,8 +112,13 @@ branch lands, the runtime bootstraps these target-only branches when missing:
 
 - `mcr/main` from `gitlab/mcr/main` and sets it as the target default branch
 - `mcr/feature/init` from `mcr/main`
-- `mcr/staging` from `mcr/main`, then protects it
-- `mcr/release` from `mcr/main`, then protects it
+- `mcr/staging` from `mcr/main`
+- `mcr/release` from `mcr/main`
+
+After bootstrap, the runtime reconciles protection for the managed target
+branches so that only the branch names listed in the config entry
+`target_branches_protect` remain protected. The checked-in configs currently
+protect `gitlab/mcr/main`.
 
 Those `mcr/*` branches are one-shot target bootstrap branches. They are not
 force-synced from source on later runs.

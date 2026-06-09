@@ -85,7 +85,8 @@ The mirror stage:
 - bootstraps target-only `mcr/main`, `mcr/feature/init`, `mcr/staging`, and
   `mcr/release` branches when missing
 - sets target `mcr/main` as the default branch when bootstrap succeeds
-- protects target `mcr/staging` and `mcr/release`
+- reconciles managed branch protection so only the branches configured by
+  `target_branches_protect` remain protected
 - enforces a 9 GiB packed selected-ref storage budget that better matches GitLab
   repository storage behavior than an uncompressed object-size sum
 - attempts LFS migration for blobs larger than 100 MiB before falling back to
