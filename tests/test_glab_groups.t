@@ -1688,6 +1688,84 @@ HTML
 
 {
     no warnings 'redefine';
+    my @requests;
+    my @group_lookups;
+
+    local *GlabGroups::_get_group = sub {
+        my ( $client, $group_path ) = @_;
+        push @group_lookups, $group_path;
+        return { id => 88, full_path => $group_path, path => "group" };
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        push @requests, { method => $method, path => $path, payload => $payload };
+        return { id => 123, archived => JSON::PP::false };
+    };
+
+    my $result = GlabGroups::_ensure_target_project(
+        {},
+        {
+            policy => { force_lfs => JSON::PP::false },
+            source_archived => JSON::PP::false,
+            source_description => "source",
+            source_lfs_enabled => JSON::PP::false,
+            target_full_path => "glab-forks/crowdsecurity/crowdsec",
+            target_namespace_path => "glab-forks/crowdsecurity",
+            target_namespace_id => 42,
+        }
+    );
+    ok( $result->{created}, "creates missing target project after resolving the live target group id" );
+    is_deeply( \@group_lookups, [ "glab-forks/crowdsecurity" ], "looks up the configured target group path once before project creation" );
+    is( $requests[0]->{payload}->{namespace_id}, 88, "project creation prefers the live group id over the preseeded target namespace id" );
+}
+
+{
+    no warnings 'redefine';
+    my @requests;
+    my @group_lookups;
+    my $lookup_count = 0;
+
+    local *GlabGroups::_get_group = sub {
+        my ( $client, $group_path ) = @_;
+        push @group_lookups, $group_path;
+        $lookup_count++;
+        return { id => 77, full_path => $group_path, path => "group" } if $lookup_count >= 2;
+        return undef;
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        push @requests, { method => $method, path => $path, payload => $payload };
+        die "gitlab request failed [400] POST /projects: {\"message\":{\"namespace\":[\"is not valid\"]}}\n"
+          if $method eq "POST"
+          && $path eq "/projects"
+          && $payload->{namespace_id} == 42;
+        return { id => 124, archived => JSON::PP::false };
+    };
+
+    my $result = GlabGroups::_ensure_target_project(
+        {},
+        {
+            policy => { force_lfs => JSON::PP::false },
+            source_archived => JSON::PP::false,
+            source_description => "source",
+            source_lfs_enabled => JSON::PP::false,
+            target_full_path => "glab-forks/google/user-recovery-tools",
+            target_namespace_path => "glab-forks/google",
+            target_namespace_id => 42,
+        }
+    );
+    ok( $result->{created}, "retries project creation after refreshing an invalid target namespace id" );
+    is_deeply(
+        [ map { $_->{payload}->{namespace_id} } grep { $_->{method} eq "POST" && $_->{path} eq "/projects" } @requests ],
+        [ 42, 77 ],
+        "invalid namespace retries use the refreshed target group id",
+    );
+}
+
+{
+    no warnings 'redefine';
     my $dir = tempdir( CLEANUP => 1 );
     my $plan_path = File::Spec->catfile( $dir, "plan.json" );
     my $output_path = File::Spec->catfile( $dir, "results.json" );

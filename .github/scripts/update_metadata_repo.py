@@ -53,6 +53,13 @@ def append_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
             handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
 
 
+def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+
+
 def validate_config_path(config_path: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", config_path):
         raise SystemExit(f"invalid config-path: {config_path}")
@@ -71,15 +78,8 @@ def run_identity(args: argparse.Namespace) -> dict[str, str]:
     }
 
 
-def append_run_record(path: Path, record: dict[str, Any]) -> None:
-    existing = load_jsonl(str(path))
-    run_id = record["run"]["run_id"]
-    run_attempt = record["run"]["run_attempt"]
-    for row in existing:
-        row_run = row.get("run") or {}
-        if row_run.get("run_id") == run_id and row_run.get("run_attempt") == run_attempt:
-            return
-    append_jsonl(path, [record])
+def overwrite_run_record(path: Path, record: dict[str, Any]) -> None:
+    write_jsonl(path, [record])
 
 
 def extract_source_gitlab_group_records(
@@ -243,19 +243,19 @@ def main() -> int:
         "target_group_id",
     )
 
-    append_run_record(
+    overwrite_run_record(
         runs_dir / "discovery.jsonl",
         make_run_record("glab-groups/discovery-summary", run, discovery_summary(discovery)),
     )
-    append_run_record(
+    overwrite_run_record(
         runs_dir / "plan.jsonl",
         make_run_record("glab-groups/plan-summary", run, plan_summary(plan)),
     )
-    append_run_record(
+    overwrite_run_record(
         runs_dir / "report.jsonl",
         make_run_record("glab-groups/report-summary", run, report_summary(report)),
     )
-    append_run_record(
+    overwrite_run_record(
         runs_dir / "analytics.jsonl",
         make_run_record("glab-groups/analytics-summary", run, analytics_summary(analytics)),
     )

@@ -128,7 +128,10 @@ class UpdateMetadataRepoTests(unittest.TestCase):
                 "shared-common/glab-groups-freedesktop/.github/workflows/group-sync.yml@refs/heads/mcr/main",
             ]
             subprocess.run(cmd, check=True)
-            subprocess.run(cmd, check=True)
+            cmd_second = [*cmd]
+            cmd_second[cmd_second.index("--run-attempt") + 1] = "2"
+            cmd_second[cmd_second.index("--run-id") + 1] = "1000"
+            subprocess.run(cmd_second, check=True)
 
             source_cache = load_jsonl(metadata_dir / "cache" / "glab-groups-freedesktop" / "source-groups.jsonl")
             target_cache = load_jsonl(metadata_dir / "cache" / "glab-groups-freedesktop" / "target-groups.jsonl")
@@ -142,8 +145,10 @@ class UpdateMetadataRepoTests(unittest.TestCase):
         self.assertEqual(len(target_cache), 1)
         self.assertEqual(target_cache[0]["target_group_id"], 303)
         self.assertEqual(len(discovery_runs), 1)
+        self.assertEqual(discovery_runs[0]["run"]["run_attempt"], "2")
         self.assertEqual(discovery_runs[0]["summary"]["inventory_projects"], 2)
         self.assertEqual(len(plan_runs), 1)
+        self.assertEqual(plan_runs[0]["run"]["run_id"], "1000")
         self.assertEqual(plan_runs[0]["summary"]["total_groups"], 2)
         self.assertEqual(len(report_runs), 1)
         self.assertEqual(report_runs[0]["summary"]["result_counts"]["mirrored"], 3)
