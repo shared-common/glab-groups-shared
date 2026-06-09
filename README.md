@@ -51,6 +51,8 @@ Config `source_project_url` values can point at:
 
 - a single GitLab or GitHub repository URL, such as
   `https://gitlab.com/WhyNotHugo/darkman`
+- a SourceHut Git-over-HTTPS repository URL, such as
+  `https://git.sr.ht/~kennylevinsen/seatd`
 - a public Git-over-HTTPS repository URL, such as
   `https://chromium.googlesource.com/chromiumos/user-recovery-tools`
 - a public cgit-style repository URL, such as

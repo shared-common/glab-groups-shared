@@ -629,6 +629,14 @@ HTML
         "darkman",
     );
     is( $parsed->{path_with_namespace}, "WhyNotHugo/darkman", "repo-shaped direct project URLs strip an optional .git suffix from the source path" );
+
+    $parsed = GlabGroups::_parse_source_project_url(
+        "https://git.sr.ht/~kennylevinsen/seatd",
+        "seatd",
+    );
+    is( $parsed->{clone_url}, "https://git.sr.ht/~kennylevinsen/seatd", "SourceHut project URLs preserve the Git-over-HTTPS clone URL" );
+    is( $parsed->{group_path}, "~kennylevinsen", "SourceHut project URLs preserve the tilde-prefixed owner path" );
+    is( $parsed->{path_with_namespace}, "~kennylevinsen/seatd", "SourceHut project URLs preserve the owner and project path" );
 }
 
 {

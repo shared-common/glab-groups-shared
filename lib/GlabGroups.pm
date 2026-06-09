@@ -3290,7 +3290,7 @@ sub _split_source_url {
     my $path = defined $2 ? $2 : q{};
     $path =~ s{/\z}{};
     if ( length $path ) {
-        $path =~ /\A[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*\z/
+        $path =~ /\A(?:~?[A-Za-z0-9][A-Za-z0-9._-]*)(?:\/(?:~?[A-Za-z0-9][A-Za-z0-9._-]*))*\z/
           or die "invalid source URL path: $url\n";
     }
     return ( $base, $path );
