@@ -604,12 +604,12 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          if git diff --quiet --exit-code; then
+          git add "cache/${CONFIG_PATH}" "runs/${CONFIG_PATH}"
+          if [ -z "$(git status --short --untracked-files=all -- "cache/${CONFIG_PATH}" "runs/${CONFIG_PATH}")" ]; then
             exit 0
           fi
-          git add "cache/${CONFIG_PATH}" "runs/${CONFIG_PATH}"
           if git diff --cached --quiet --exit-code; then
-            exit 0
+            git add -A "cache/${CONFIG_PATH}" "runs/${CONFIG_PATH}"
           fi
           git commit -m "Update ${CONFIG_PATH} metadata for run ${RUN_ID}-${RUN_ATTEMPT}"
           for attempt in 1 2 3 4 5; do
