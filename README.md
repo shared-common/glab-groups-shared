@@ -42,6 +42,10 @@ Config `source_group_url` values can point at:
   from `GH_ORG_READ_APP_ID` and `GH_ORG_READ_APP_PEM`
 - a cgit root URL, such as `https://git.netfilter.org`, which mirrors the
   current root-level repositories discovered from the cgit index page
+- a Gitiles root URL, such as `https://chromium.googlesource.com` or
+  `https://android.googlesource.com`, which mirrors the current repositories
+  discovered from the Gitiles root index while preserving nested repository
+  paths beneath the configured target prefix
 
 Config `source_project_url` values can point at:
 
@@ -64,9 +68,13 @@ real destination as:
 and authenticates with:
 
 - `GL_PAT_GROUP_KALI_SVC` for `glab-groups-kali`
+- `GL_PAT_GROUP_ANDROID_SVC` for `glab-groups-android`
+- `GL_PAT_GROUP_CHROMIUM_SVC` for `glab-groups-chromium`
 - `GL_PAT_GROUP_DEBIAN_SVC` for `glab-groups-debian`
 - `GL_PAT_GROUP_FREEDESKTOP_SVC` for `glab-groups-freedesktop`
 - `GL_PAT_GROUP_SMALL_SVC` for `glab-groups-small`
+- `GL_PAT_GROUP_HASHICORP_SVC` for `glab-groups-hashicorp`
+- `GL_PAT_GROUP_MICROSOFT_SVC` for `glab-groups-microsoft`
 - `GL_PAT_GROUP_OPENAI_SVC` for `glab-groups-openai`
 - `GL_PAT_GROUP_NVIDIA_SVC` for `glab-groups-nvidia`
 - `GL_PAT_GROUP_KDE_SVC` for `glab-groups-kde`

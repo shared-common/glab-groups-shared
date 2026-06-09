@@ -3,10 +3,11 @@
 ## Overview
 
 `glab-groups-shared` is the reusable control plane for the Kali, Debian,
-freedesktop, small, KDE, GNOME, and explicit-project wrapper repositories. The
-shared workflow checks out this repository and the shared config repository,
-fetches target GitLab credentials from BWS, and then runs the Perl and Python
-tooling in a deterministic order.
+freedesktop, small, OpenAI, NVIDIA, HashiCorp, Microsoft, Android, Chromium,
+KDE, GNOME, and explicit-project wrapper repositories. The shared workflow
+checks out this repository and the shared config repository, fetches target
+GitLab credentials from BWS, and then runs the Perl and Python tooling in a
+deterministic order.
 
 Target paths in config are stored relative to the target owner group. The
 runtime composes full paths from `GL_BASE_URL`, namespace `target_owner_path`,
@@ -68,8 +69,8 @@ The mirror stage:
 - never sets target group or project visibility
 - discovers source inventory through GitLab group traversal, GitLab top-level
   group expansion, GitHub organization repository pagination, direct repository
-  inspection for explicit project URLs, and cgit root scraping instead of
-  relying on one source-specific integration path
+  inspection for explicit project URLs, and cgit or Gitiles root scraping
+  instead of relying on one source-specific integration path
 - can use GitLab `include_subgroups=true` project enumeration for source group
   discovery when the config enables `gitlab_source_include_subgroups`
 - persists GitLab-backed source group IDs and target group IDs to append-only
@@ -80,6 +81,8 @@ The mirror stage:
   installation, and minting short-lived installation access tokens
 - keeps explicit public project URLs on plain HTTPS git without source-auth
   injection during discovery or mirror execution
+- retries repo-shaped root-discovered clone URLs with an appended `.git` suffix
+  before failing when the human-facing URL does not expose refs over Git
 - uses longer bounded retries for GitLab read requests during discovery to ride
   out transient 5xx and timeout failures from upstream GitLab/Varnish
 - lets each config directory tune discovery/read retry counts separately from

@@ -74,7 +74,7 @@ jobs:
               ;;
           esac
           case "${TARGET_TOKEN_SECRET}" in
-            GL_PAT_GROUP_KALI_SVC|GL_PAT_GROUP_DEBIAN_SVC|GL_PAT_GROUP_FREEDESKTOP_SVC|GL_PAT_GROUP_SMALL_SVC|GL_PAT_GROUP_OPENAI_SVC|GL_PAT_GROUP_NVIDIA_SVC|GL_PAT_GROUP_KDE_SVC|GL_PAT_GROUP_GNOME_SVC|GL_PAT_GROUP_PROJ_SVC)
+            GL_PAT_GROUP_ANDROID_SVC|GL_PAT_GROUP_CHROMIUM_SVC|GL_PAT_GROUP_DEBIAN_SVC|GL_PAT_GROUP_FREEDESKTOP_SVC|GL_PAT_GROUP_GNOME_SVC|GL_PAT_GROUP_HASHICORP_SVC|GL_PAT_GROUP_KALI_SVC|GL_PAT_GROUP_KDE_SVC|GL_PAT_GROUP_MICROSOFT_SVC|GL_PAT_GROUP_NVIDIA_SVC|GL_PAT_GROUP_OPENAI_SVC|GL_PAT_GROUP_PROJ_SVC|GL_PAT_GROUP_SMALL_SVC)
               ;;
             *)
               printf 'invalid target-token-secret: %s\n' \
@@ -83,6 +83,12 @@ jobs:
               ;;
           esac
           case "${CONFIG_PATH}" in
+            glab-groups-android)
+              expected_token_secret="GL_PAT_GROUP_ANDROID_SVC"
+              ;;
+            glab-groups-chromium)
+              expected_token_secret="GL_PAT_GROUP_CHROMIUM_SVC"
+              ;;
             glab-groups-kali)
               expected_token_secret="GL_PAT_GROUP_KALI_SVC"
               ;;
@@ -106,6 +112,12 @@ jobs:
               ;;
             glab-groups-gnome)
               expected_token_secret="GL_PAT_GROUP_GNOME_SVC"
+              ;;
+            glab-groups-hashicorp)
+              expected_token_secret="GL_PAT_GROUP_HASHICORP_SVC"
+              ;;
+            glab-groups-microsoft)
+              expected_token_secret="GL_PAT_GROUP_MICROSOFT_SVC"
               ;;
             glab-groups-projects)
               expected_token_secret="GL_PAT_GROUP_PROJ_SVC"

@@ -462,6 +462,41 @@ HTML
 
 {
     no warnings 'redefine';
+    local *GlabGroups::_is_gitlab_instance_root = sub {
+        die "_is_gitlab_instance_root should not be probed for googlesource roots";
+    };
+    local *GlabGroups::_http_text_request = sub {
+        return <<'HTML';
+<html>
+  <body>
+    <a href="/device/google/akita/">device/google/akita</a>
+    <a href="/platform/frameworks/base/">platform/frameworks/base</a>
+    <a href="/cgit.css">stylesheet</a>
+  </body>
+</html>
+HTML
+    };
+
+    my $inventory = GlabGroups::_discover_inventory(
+        {
+            defaults => { additional_branches => [], additional_tags => [] },
+            namespaces => [
+                {
+                    name => "android-root",
+                    source_group_url => "https://android.googlesource.com",
+                    target_namespace_path => "android",
+                },
+            ],
+        }
+    );
+
+    is( $inventory->{inventory}->[0]->{group_path}, "android.googlesource.com", "gitiles root discovery derives a stable synthetic source root key from the host" );
+    is( $inventory->{inventory}->[0]->{projects}->[0]->{path_with_namespace}, "android.googlesource.com/device/google/akita", "gitiles root discovery keeps nested repository paths under the synthetic source root" );
+    is( $inventory->{inventory}->[0]->{projects}->[1]->{http_url_to_repo}, "https://android.googlesource.com/platform/frameworks/base", "gitiles root discovery derives HTTPS clone URLs for nested repository paths" );
+}
+
+{
+    no warnings 'redefine';
     my @seen_source_urls;
 
     local *GlabGroups::_discover_remote_refs = sub {
@@ -506,6 +541,48 @@ HTML
             "https://gitlab.com/WhyNotHugo/darkman.git",
         ],
         "explicit GitLab project discovery retries the .git clone URL when the human-facing URL has no branches",
+    );
+}
+
+{
+    no warnings 'redefine';
+    my @seen_source_urls;
+
+    local *GlabGroups::_discover_remote_refs = sub {
+        my ( $source_url, $policy ) = @_;
+        push @seen_source_urls, $source_url;
+        return {
+            branches => {},
+            default_branch => "",
+            tags => {},
+        } if $source_url eq "https://android.googlesource.com/platform/frameworks/base";
+        return {
+            branches => { main => 1 },
+            default_branch => "main",
+            tags => {},
+        } if $source_url eq "https://android.googlesource.com/platform/frameworks/base.git";
+        die "unexpected source url: $source_url";
+    };
+
+    my $chosen_source_url = "https://android.googlesource.com/platform/frameworks/base";
+    my $available = GlabGroups::_discover_remote_refs_from_urls(
+        [
+            $chosen_source_url,
+            GlabGroups::_fallback_clone_url($chosen_source_url),
+        ],
+        {},
+        \$chosen_source_url,
+    );
+
+    is( $available->{default_branch}, "main", "generic source ref discovery returns the discovered ref set from the working candidate URL" );
+    is( $chosen_source_url, "https://android.googlesource.com/platform/frameworks/base.git", "generic source ref discovery keeps the working .git URL when the human-facing URL has no refs" );
+    is_deeply(
+        \@seen_source_urls,
+        [
+            "https://android.googlesource.com/platform/frameworks/base",
+            "https://android.googlesource.com/platform/frameworks/base.git",
+        ],
+        "generic source ref discovery retries a .git suffix before failing",
     );
 }
 

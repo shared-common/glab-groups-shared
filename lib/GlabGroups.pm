@@ -849,6 +849,24 @@ sub _discover_namespace_inventory {
         ];
     }
 
+    if ( $source->{kind} eq "gitiles_root" ) {
+        my $group_path = _source_root_key( $source->{base_url} );
+        my $projects = _list_root_index_projects(
+            $source->{base_url},
+            $group_path,
+            $policy,
+            { allow_nested_paths => 1 },
+        );
+        return [
+            {
+                namespace => $namespace,
+                group_path => $group_path,
+                base_url => $source->{base_url},
+                projects => $projects,
+            },
+        ];
+    }
+
     die "unsupported source kind: $source->{kind}\n";
 }
 
@@ -1105,14 +1123,19 @@ sub _mirror_entry {
 
     my $entry_source_auth = _resolve_source_auth_for_entry( $source_auth, $entry );
     my $source_url = _maybe_auth_url( $entry->{source_http_url}, $entry_source_auth->{username}, $entry_source_auth->{token} );
+    my $chosen_source_url = $source_url;
+    my $available = _discover_remote_refs_from_urls(
+        [ $source_url, _fallback_clone_url($source_url) ],
+        $entry->{policy},
+        \$chosen_source_url,
+    );
     my $target_url = _maybe_auth_url( _project_git_url( $target_client->{base_url}, $entry->{target_full_path} ), $target_client->{username}, $target_client->{token} );
 
-    my $remote_result = _run_command( [ "git", "-C", $repo_dir, "remote", "add", "source", $source_url ], { timeout => 60 } );
+    my $remote_result = _run_command( [ "git", "-C", $repo_dir, "remote", "add", "source", $chosen_source_url ], { timeout => 60 } );
     $remote_result->{status} == 0 or die "git remote add source failed: $remote_result->{output}\n";
     $remote_result = _run_command( [ "git", "-C", $repo_dir, "remote", "add", "target", $target_url ], { timeout => 60 } );
     $remote_result->{status} == 0 or die "git remote add target failed: $remote_result->{output}\n";
 
-    my $available = _discover_remote_refs( $source_url, $entry->{policy} );
     my $default_branch = $entry->{source_default_branch} || $available->{default_branch} || "";
     my $selected = resolve_selected_refs( $default_branch, $entry->{policy}, $available );
     @{ $selected->{branches} } or die "no source branches resolved for $entry->{source_full_path}\n";
@@ -1522,6 +1545,14 @@ sub _parse_source_url {
         };
     }
 
+    if ( _is_gitiles_host($base_url) ) {
+        return {
+            kind => "gitiles_root",
+            base_url => $base_url,
+            root_path => q{},
+        };
+    }
+
     if ( _is_gitlab_instance_root( $base_url, $policy ) ) {
         return {
             kind => "gitlab_instance_root",
@@ -1582,40 +1613,19 @@ sub _parse_source_project_url {
 
 sub _discover_project_remote_refs {
     my ( $source, $project_source_auth, $policy, $chosen_clone_url_ref ) = @_;
-    my $source_url = _maybe_auth_url(
-        $source->{clone_url},
-        $project_source_auth->{username},
-        $project_source_auth->{token},
-    );
-    my $available = eval { _discover_remote_refs( $source_url, $policy ) };
-    my $discover_error = $@;
-    my $fallback_clone_url = $source->{fallback_clone_url};
-    if (
-        defined $fallback_clone_url
-        && length $fallback_clone_url
-        && (
-            !$available
-            || !scalar( keys %{ $available->{branches} || {} } ) && !( $available->{default_branch} || q{} )
-        )
-      )
-    {
-        my $fallback_source_url = _maybe_auth_url(
-            $fallback_clone_url,
+    my @candidate_urls = (
+        _maybe_auth_url(
+            $source->{clone_url},
             $project_source_auth->{username},
             $project_source_auth->{token},
-        );
-        my $fallback_available = eval { _discover_remote_refs( $fallback_source_url, $policy ) };
-        if ($fallback_available) {
-            $available = $fallback_available;
-            $discover_error = q{};
-            $$chosen_clone_url_ref = $fallback_clone_url if defined $chosen_clone_url_ref;
-        }
-        else {
-            $discover_error ||= $@;
-        }
-    }
-    die $discover_error if !$available;
-    return $available;
+        ),
+        _maybe_auth_url(
+            $source->{fallback_clone_url},
+            $project_source_auth->{username},
+            $project_source_auth->{token},
+        ),
+    );
+    return _discover_remote_refs_from_urls( \@candidate_urls, $policy, $chosen_clone_url_ref );
 }
 
 sub _make_gitlab_client {
@@ -2281,30 +2291,41 @@ sub _list_github_org_projects {
 
 sub _list_cgit_root_projects {
     my ( $base_url, $group_path, $policy ) = @_;
+    return _list_root_index_projects(
+        $base_url,
+        $group_path,
+        $policy,
+        { allow_nested_paths => 0 },
+    );
+}
+
+sub _list_root_index_projects {
+    my ( $base_url, $group_path, $policy, $opt ) = @_;
+    $opt ||= {};
     my $html = _http_text_request( $base_url, _source_read_request_opt($policy) );
     my @projects;
     my %seen;
     while ( $html =~ m{<a[^>]+href=(["'])([^"'?#]+)\1[^>]*>([^<]*)</a>}ig ) {
-        my $repo_name = _extract_cgit_repo_name( $2, $3 );
-        next unless defined $repo_name;
-        next if $seen{$repo_name}++;
-        my $repo_url = $base_url . "/" . $repo_name;
+        my $repo_path = _extract_root_repo_path( $2, $3, $opt );
+        next unless defined $repo_path;
+        next if $seen{$repo_path}++;
+        my $repo_url = $base_url . "/" . $repo_path;
         push @projects,
           {
             archived => JSON::PP::false,
             default_branch => q{},
-            description => defined $3 && length $3 ? $3 : $repo_name,
+            description => defined $3 && length $3 ? $3 : $repo_path,
             empty_repo => JSON::PP::false,
             http_url_to_repo => $repo_url,
             id => "cgit:$repo_url",
             lfs_enabled => JSON::PP::false,
             last_activity_at => undef,
-            path_with_namespace => _join_path( $group_path, $repo_name ),
+            path_with_namespace => _join_path( $group_path, $repo_path ),
             ssh_url_to_repo => $repo_url,
             visibility => "public",
           };
     }
-    @projects or die "cgit root discovery found no repositories at $base_url\n";
+    @projects or die "root index discovery found no repositories at $base_url\n";
     return \@projects;
 }
 
@@ -3299,6 +3320,12 @@ sub _is_gitlab_instance_root {
     return $ok ? 1 : 0;
 }
 
+sub _is_gitiles_host {
+    my ($base_url) = @_;
+    my $host = _base_url_host($base_url);
+    return $host =~ /(?:^|\.)googlesource\.com\z/ ? 1 : 0;
+}
+
 sub _source_root_key {
     my ($base_url) = @_;
     my $host = _base_url_host($base_url);
@@ -3307,8 +3334,9 @@ sub _source_root_key {
     return $host;
 }
 
-sub _extract_cgit_repo_name {
-    my ( $href, $text ) = @_;
+sub _extract_root_repo_path {
+    my ( $href, $text, $opt ) = @_;
+    $opt ||= {};
     return undef unless defined $href;
     return undef if $href =~ /\?/;
     return undef if $href =~ m{\A(?:https?:)?//}i;
@@ -3317,15 +3345,69 @@ sub _extract_cgit_repo_name {
     $candidate =~ s{\A/+}{};
     $candidate =~ s{/\z}{};
     return undef unless length $candidate;
-    return undef if $candidate =~ m{/};
     return undef if $candidate =~ /\A(?:about|favicon\.ico|robots\.txt|cgit\.(?:css|png))\z/i;
-    return undef unless $candidate =~ /\A[A-Za-z0-9][A-Za-z0-9._-]*\z/;
+    if ( !$opt->{allow_nested_paths} ) {
+        return undef if $candidate =~ m{/};
+        return undef unless $candidate =~ /\A[A-Za-z0-9][A-Za-z0-9._-]*\z/;
+        return $candidate;
+    }
+    return undef unless $candidate =~ /\A[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*\z/;
     return $candidate;
 }
 
 sub _project_git_url {
     my ( $base_url, $project_path ) = @_;
     return $base_url . "/" . $project_path . ".git";
+}
+
+sub _fallback_clone_url {
+    my ($url) = @_;
+    return undef unless defined $url && length $url;
+    return undef if $url =~ /\.git\z/;
+    return $url . ".git";
+}
+
+sub _has_discoverable_refs {
+    my ($available) = @_;
+    return 0 unless ref($available) eq "HASH";
+    return 1 if scalar( keys %{ $available->{branches} || {} } );
+    return 1 if scalar( keys %{ $available->{tags} || {} } );
+    return length( $available->{default_branch} || q{} ) ? 1 : 0;
+}
+
+sub _discover_remote_refs_from_urls {
+    my ( $candidate_urls, $policy, $chosen_source_url_ref ) = @_;
+    ref($candidate_urls) eq "ARRAY" or die "candidate source URLs must be a list\n";
+    my %seen;
+    my @candidates = grep { defined $_ && length $_ && !$seen{$_}++ } @{$candidate_urls};
+    @candidates or die "at least one candidate source URL is required\n";
+
+    my $fallback_success;
+    my $fallback_success_url = q{};
+    my $last_error = q{};
+    for my $candidate (@candidates) {
+        my $available = eval { _discover_remote_refs( $candidate, $policy ) };
+        if ($available) {
+            if ( _has_discoverable_refs($available) ) {
+                $$chosen_source_url_ref = $candidate if defined $chosen_source_url_ref;
+                return $available;
+            }
+            if ( !$fallback_success ) {
+                $fallback_success = $available;
+                $fallback_success_url = $candidate;
+            }
+            next;
+        }
+        $last_error ||= $@;
+    }
+
+    if ($fallback_success) {
+        $$chosen_source_url_ref = $fallback_success_url if defined $chosen_source_url_ref;
+        return $fallback_success;
+    }
+
+    die $last_error if length $last_error;
+    die "unable to discover source refs from the configured candidate URLs\n";
 }
 
 sub _maybe_auth_url {
