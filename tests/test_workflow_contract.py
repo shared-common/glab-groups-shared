@@ -101,14 +101,19 @@ class SharedWorkflowContractTests(unittest.TestCase):
 
     def test_plan_uses_inventory_cache(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("force-refresh-discovery:", text)
         self.assertIn("Restore source inventory cache", text)
+        self.assertIn("if: ${{ !inputs.force-refresh-discovery }}", text)
         self.assertIn("actions/cache@v5", text)
         self.assertIn("inventory-cache", text)
         self.assertIn("--discover-output discover.json", text)
-        self.assertIn("--inventory-input \"inventory-cache/discover.json\"", text)
         self.assertIn("--inventory-output \"inventory-cache/discover.json\"", text)
         self.assertIn('--inventory-max-age-seconds "${{ steps.config_meta.outputs.inventory-cache-max-age-seconds }}"', text)
         self.assertIn('--target-group-cache-input "metadata/cache/${{ inputs.config-path }}/target-groups.jsonl"', text)
+        self.assertIn('FORCE_REFRESH_DISCOVERY: ${{ inputs.force-refresh-discovery }}', text)
+        self.assertIn('if [ "${FORCE_REFRESH_DISCOVERY}" != "true" ]; then', text)
+        self.assertIn('inventory_args+=(--inventory-input "inventory-cache/discover.json")', text)
+        self.assertIn("rm -rf inventory-cache", text)
 
     def test_metadata_repo_is_read_and_written(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")

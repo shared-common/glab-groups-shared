@@ -665,6 +665,8 @@ HTML
         die "_discover_inventory should not be called when the cached inventory is still fresh";
     };
 
+    my $warning = q{};
+    local $SIG{__WARN__} = sub { $warning .= $_[0] };
     my $inventory = GlabGroups::_load_or_discover_inventory(
         {},
         {
@@ -673,6 +675,7 @@ HTML
         }
     );
     is( $inventory->{inventory}->[0]->{projects}->[0]->{path_with_namespace}, "root/project-a", "plan inventory cache reuse keeps the cached project inventory" );
+    like( $warning, qr/reusing cached inventory from .*discover\.json discovered_at=/, "cache reuse logs that plan skipped live discovery" );
 }
 
 {

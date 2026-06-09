@@ -446,13 +446,20 @@ sub _load_or_discover_inventory {
             _normalize_inventory($inventory);
         };
         if ($cached) {
-            return $cached if _inventory_cache_is_fresh( $cached, $opt->{max_age_seconds} );
+            if ( _inventory_cache_is_fresh( $cached, $opt->{max_age_seconds} ) ) {
+                my $discovered_at = $cached->{discovered_at} || "unknown";
+                warn "reusing cached inventory from $input_path discovered_at=$discovered_at\n";
+                return $cached;
+            }
+            my $discovered_at = $cached->{discovered_at} || "unknown";
+            warn "inventory cache stale at $input_path discovered_at=$discovered_at; performing live rediscovery\n";
         }
         else {
             warn "ignoring unreadable inventory cache $input_path: " . _trim_error($@) . "\n";
         }
     }
 
+    warn "performing live inventory discovery\n";
     my $inventory = _discover_inventory($config);
     return _normalize_inventory($inventory);
 }

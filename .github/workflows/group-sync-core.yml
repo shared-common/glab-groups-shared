@@ -26,6 +26,10 @@ name: group-sync-core
         required: false
         type: number
         default: 25
+      force-refresh-discovery:
+        required: false
+        type: boolean
+        default: false
       emit-parquet:
         required: false
         type: boolean
@@ -184,6 +188,7 @@ jobs:
           printf 'content-hash=%s\n' "${inventory_content_hash}" >> "${GITHUB_OUTPUT}"
 
       - name: Restore source inventory cache
+        if: ${{ !inputs.force-refresh-discovery }}
         uses: actions/cache@v5
         with:
           path: inventory-cache
@@ -289,17 +294,25 @@ jobs:
       - name: Build deterministic plan
         shell: bash
         env:
+          FORCE_REFRESH_DISCOVERY: ${{ inputs.force-refresh-discovery }}
           GL_TARGET_TOKEN_SECRET_NAME: ${{ inputs.target-token-secret }}
         run: |
           set -euo pipefail
+          inventory_args=(
+            --inventory-output "inventory-cache/discover.json"
+            --inventory-max-age-seconds "${{ steps.config_meta.outputs.inventory-cache-max-age-seconds }}"
+          )
+          if [ "${FORCE_REFRESH_DISCOVERY}" != "true" ]; then
+            inventory_args+=(--inventory-input "inventory-cache/discover.json")
+          else
+            rm -rf inventory-cache
+          fi
           perl shared/.github/scripts/glab_groups.pl \
             plan \
             --config-dir "gh-actions-cfg/${{ inputs.config-path }}" \
             --batch-size "${{ inputs.batch-size }}" \
             --discover-output discover.json \
-            --inventory-input "inventory-cache/discover.json" \
-            --inventory-output "inventory-cache/discover.json" \
-            --inventory-max-age-seconds "${{ steps.config_meta.outputs.inventory-cache-max-age-seconds }}" \
+            "${inventory_args[@]}" \
             --output plan.json \
             --summary plan.md \
             --target-group-cache-input "metadata/cache/${{ inputs.config-path }}/target-groups.jsonl"
