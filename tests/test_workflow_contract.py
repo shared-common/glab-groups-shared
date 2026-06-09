@@ -46,17 +46,19 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("glab-groups-openai", text)
         self.assertIn("glab-groups-nvidia", text)
         self.assertIn("GL_TARGET_TOKEN_SECRET_NAME: ${{ inputs.target-token-secret }}", text)
-        self.assertIn("GL_USER_FORK_MAIN", text)
-        self.assertIn("GH_ORG_SHARED_APP_ID", text)
-        self.assertIn("GH_ORG_SHARED_APP_INSTALL_ID", text)
-        self.assertIn("GH_ORG_SHARED_APP_PEM", text)
+        self.assertIn("GH_SSH_GROUPS_METADATA_KEY", text)
+        self.assertIn("GH_ORG_READ_APP_ID", text)
+        self.assertIn("GH_ORG_READ_APP_INSTALL_ID", text)
+        self.assertIn("GH_ORG_READ_APP_PEM", text)
         self.assertIn("needs-github-source-auth", text)
         self.assertNotIn("GL_GROUP_TOP_GLAB_OWNER", text)
+        self.assertNotIn("GL_BRIDGE_FORK_USER_GLAB", text)
         self.assertIn(
             'perl -I shared/lib -MGlabGroups=load_config_dir - "${CONFIG_DIR}" "${TARGET_TOKEN_SECRET}" "${GITHUB_OUTPUT}" <<\'PERL\'',
             text,
         )
         self.assertIn("$config->{projects}", text)
+        self.assertIn("inventory-cache-max-age-seconds", text)
         self.assertNotIn('config_meta_json="$(', text)
         self.assertNotIn('needs_github_source_auth="$(', text)
 
@@ -66,6 +68,7 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("merge-multiple: true", text)
         self.assertIn("results-artifacts/results-*.json", text)
         self.assertIn("results-artifacts/results-*.jsonl", text)
+        self.assertIn("results-artifacts/target-groups-*.jsonl", text)
         self.assertNotIn("Fail on mirror failures", text)
 
     def test_step_summary_is_bounded(self) -> None:
@@ -88,9 +91,18 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("Restore source inventory cache", text)
         self.assertIn("actions/cache@v5", text)
         self.assertIn("inventory-cache", text)
+        self.assertIn("--discover-output discover.json", text)
         self.assertIn("--inventory-input \"inventory-cache/discover.json\"", text)
         self.assertIn("--inventory-output \"inventory-cache/discover.json\"", text)
-        self.assertIn("--inventory-max-age-seconds 64800", text)
+        self.assertIn('--inventory-max-age-seconds "${{ steps.config_meta.outputs.inventory-cache-max-age-seconds }}"', text)
+        self.assertIn('--target-group-cache-input "metadata/cache/${{ inputs.config-path }}/target-groups.jsonl"', text)
+
+    def test_metadata_repo_is_read_and_written(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("repository: shared-common/glab-groups-metadata", text)
+        self.assertIn("path: metadata", text)
+        self.assertIn("python3 shared/.github/scripts/update_metadata_repo.py", text)
+        self.assertIn('git push origin HEAD:main', text)
 
 
 if __name__ == "__main__":

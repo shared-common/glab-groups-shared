@@ -207,6 +207,11 @@
           "type": "integer",
           "minimum": 1
         },
+        "inventory_cache_max_age_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 432000
+        },
         "gitlab_source_include_subgroups": {
           "type": "boolean",
           "default": false
@@ -268,6 +273,10 @@
             },
             "target_namespace_path": {
               "$ref": "#/$defs/namespacePath"
+            },
+            "target_namespace_id": {
+              "type": "integer",
+              "minimum": 1
             }
           }
         }
@@ -291,6 +300,10 @@
             },
             "source_project_url": {
               "$ref": "#/$defs/httpsUrl"
+            },
+            "target_group_id": {
+              "type": "integer",
+              "minimum": 1
             },
             "target_group_path": {
               "$ref": "#/$defs/namespacePath"

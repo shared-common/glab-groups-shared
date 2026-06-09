@@ -27,10 +27,12 @@ source repository URL.
 The shared workflow creates one deterministic plan, uploads it as a run
 artifact, and then builds a dynamic matrix capped at 256 mirror jobs. Small
 plans still use one job per batch. Larger plans use shard starts and strides so
-each job processes a deterministic subset of batches while GitHub Actions runs
-at most five jobs concurrently. The final report job downloads all batch
-artifacts and aggregates them into one report, CSV, JSON analytics file, and
-optional Parquet file.
+each job processes a deterministic subset of target-group-aware batches while
+GitHub Actions runs at most five jobs concurrently. Batch construction never
+splits one target subgroup across multiple mirror jobs. The final report job
+downloads all batch artifacts, aggregates them into one report, CSV, JSON
+analytics file, optional Parquet file, and appends JSONL run/cache records to
+the dedicated metadata repository.
 
 ## Planning model
 
@@ -39,19 +41,21 @@ The plan includes:
 - source project id and full path
 - target full path and any already-known target namespace id
 - source inventory fields required for mirroring and verification
+- target-group-aware batches built from contiguous namespace ranges so each
+  subgroup is created and mirrored in one job
 - deterministic action selection:
-  - `update_project`
-  - `mirror_only`
+  - `sync`
   - `skip`
   - `fail`
 
-Planning only inventories existing target namespace state under each configured
-target root. It does not create missing target groups; missing namespace paths
-are resolved later during target preparation or mirroring.
+Planning no longer crawls the entire target namespace tree to precompute project
+state. It seeds known target namespace IDs from checked-in config and preserved
+metadata, then defers missing subgroup and project creation to the mirror step.
 
 The plan job can also reuse a cached normalized source inventory between
 workflow runs. When the cached inventory is still fresh, the plan step skips
-source rediscovery and rebuilds only the target-side plan state.
+source rediscovery. The default cache freshness window is 5 days and is
+configurable per wrapper through `inventory_cache_max_age_seconds`.
 
 ## Mirroring model
 
@@ -68,6 +72,9 @@ The mirror stage:
   relying on one source-specific integration path
 - can use GitLab `include_subgroups=true` project enumeration for source group
   discovery when the config enables `gitlab_source_include_subgroups`
+- persists GitLab-backed source group IDs and target group IDs to append-only
+  JSONL metadata so later runs can reuse stable identifiers instead of relying
+  only on path lookups
 - authenticates GitHub-source discovery and Git-over-HTTPS mirroring with the
   shared GitHub App by generating a JWT, resolving the source-account
   installation, and minting short-lived installation access tokens

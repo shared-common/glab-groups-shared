@@ -310,7 +310,7 @@ YAML
     no warnings 'redefine';
 
     local *GlabGroups::_get_github_account_installation = sub {
-        die "_get_github_account_installation should not be called when GH_ORG_SHARED_APP_INSTALL_ID is configured";
+        die "_get_github_account_installation should not be called when GH_ORG_READ_APP_INSTALL_ID is configured";
     };
     local *GlabGroups::_generate_github_app_jwt = sub { return "jwt-token"; };
     local *GlabGroups::_github_request = sub {
@@ -656,13 +656,6 @@ HTML
 }
 
 {
-    no warnings 'redefine';
-
-    local *GlabGroups::_load_target_client = sub { return {}; };
-    local *GlabGroups::_build_target_namespace_state = sub {
-        return { groups => {}, projects => {} };
-    };
-
     my $plan = GlabGroups::_build_plan(
         {
             defaults => { additional_branches => [], additional_tags => [], force_lfs => JSON::PP::false },
@@ -701,13 +694,6 @@ HTML
 }
 
 {
-    no warnings 'redefine';
-
-    local *GlabGroups::_load_target_client = sub { return {}; };
-    local *GlabGroups::_build_target_namespace_state = sub {
-        return { groups => {}, projects => {} };
-    };
-
     my $plan = GlabGroups::_build_plan(
         {
             defaults => { additional_branches => [], additional_tags => [], force_lfs => JSON::PP::false },
@@ -748,13 +734,6 @@ HTML
 }
 
 {
-    no warnings 'redefine';
-
-    local *GlabGroups::_load_target_client = sub { return {}; };
-    local *GlabGroups::_build_target_namespace_state = sub {
-        return { groups => {}, projects => {} };
-    };
-
     my $plan = GlabGroups::_build_plan(
         {
             defaults => { additional_branches => [], additional_tags => [], force_lfs => JSON::PP::false },
@@ -829,18 +808,6 @@ HTML
 }
 
 {
-    no warnings 'redefine';
-
-    local *GlabGroups::_load_target_client = sub { return {}; };
-    local *GlabGroups::_build_target_namespace_state = sub {
-        return {
-            groups => {
-                "owner/mirror" => 42,
-            },
-            projects => {},
-        };
-    };
-
     my $plan = GlabGroups::_build_plan(
         {
             defaults => { additional_branches => [], additional_tags => [], force_lfs => JSON::PP::false },
@@ -852,6 +819,7 @@ HTML
                 {
                     group_path => "root",
                     namespace => {
+                        target_namespace_id => 42,
                         target_owner_path => "owner",
                         target_namespace_path => "mirror",
                     },
@@ -874,19 +842,12 @@ HTML
         },
         25,
     );
-    is( $plan->{plan}->[0]->{action}, "create_project", "missing target projects are planned for creation" );
+    is( $plan->{plan}->[0]->{action}, "sync", "target project state is resolved lazily during mirror execution" );
     ok( !defined $plan->{plan}->[0]->{skip_reason}, "missing target projects do not get a skip reason" );
-    is( $plan->{plan}->[0]->{target_namespace_id}, 42, "missing target projects keep the existing target namespace id when the namespace already exists" );
+    is( $plan->{plan}->[0]->{target_namespace_id}, 42, "checked-in target namespace ids seed planning for known target roots" );
 }
 
 {
-    no warnings 'redefine';
-
-    local *GlabGroups::_load_target_client = sub { return {}; };
-    local *GlabGroups::_build_target_namespace_state = sub {
-        return { groups => {}, projects => {} };
-    };
-
     my $plan = GlabGroups::_build_plan(
         {
             defaults => {
@@ -946,6 +907,82 @@ HTML
         },
     );
     ok( !exists $policy->{visibility}, "merge policy does not carry target visibility" );
+}
+
+{
+    my $plan = GlabGroups::_build_plan(
+        {
+            defaults => {
+                additional_branches => [],
+                additional_tags => [],
+                force_lfs => JSON::PP::false,
+            },
+            exclusions => {},
+            overrides => {},
+        },
+        {
+            inventory => [
+                {
+                    group_path => "root",
+                    namespace => {
+                        target_owner_path => "glab-forks",
+                        target_namespace_path => "mirror",
+                    },
+                    projects => [
+                        {
+                            archived => JSON::PP::false,
+                            default_branch => "main",
+                            description => "source",
+                            empty_repo => JSON::PP::false,
+                            http_url_to_repo => "https://example.invalid/root/sub1/project-a.git",
+                            id => 10,
+                            lfs_enabled => JSON::PP::false,
+                            path_with_namespace => "root/sub1/project-a",
+                            ssh_url_to_repo => 'git@example.invalid:root/sub1/project-a.git',
+                            visibility => "public",
+                        },
+                        {
+                            archived => JSON::PP::false,
+                            default_branch => "main",
+                            description => "source",
+                            empty_repo => JSON::PP::false,
+                            http_url_to_repo => "https://example.invalid/root/sub1/project-b.git",
+                            id => 11,
+                            lfs_enabled => JSON::PP::false,
+                            path_with_namespace => "root/sub1/project-b",
+                            ssh_url_to_repo => 'git@example.invalid:root/sub1/project-b.git',
+                            visibility => "public",
+                        },
+                        {
+                            archived => JSON::PP::false,
+                            default_branch => "main",
+                            description => "source",
+                            empty_repo => JSON::PP::false,
+                            http_url_to_repo => "https://example.invalid/root/sub2/project-c.git",
+                            id => 12,
+                            lfs_enabled => JSON::PP::false,
+                            path_with_namespace => "root/sub2/project-c",
+                            ssh_url_to_repo => 'git@example.invalid:root/sub2/project-c.git',
+                            visibility => "public",
+                        },
+                    ],
+                },
+            ],
+        },
+        2,
+    );
+    is( $plan->{total_groups}, 2, "planning counts unique target namespace groups" );
+    is( $plan->{total_batches}, 2, "group-aware batching splits only at target group boundaries" );
+    is_deeply(
+        $plan->{batches}->[0]->{group_paths},
+        ["glab-forks/mirror/sub1"],
+        "first batch keeps the first target subgroup together",
+    );
+    is_deeply(
+        $plan->{batches}->[1]->{group_paths},
+        ["glab-forks/mirror/sub2"],
+        "second batch carries the remaining subgroup",
+    );
 }
 
 {
@@ -1054,7 +1091,7 @@ HTML
     write_json_file(
         $plan_path,
         {
-            counts => { create_project => 1, fail => 0, mirror_only => 1, skip => 0, update_project => 0 },
+            counts => { sync => 2, fail => 0, skip => 0 },
         }
     );
     write_json_file(
@@ -1113,7 +1150,7 @@ HTML
         {
             plan => [
                 {
-                    action => "create_project",
+                    action => "sync",
                     target_full_path => "owner/group/project-a",
                 },
                 {
@@ -1138,7 +1175,7 @@ HTML
             "--output", $output_path,
         ),
         0,
-        "prepare-target accepts create_project entries",
+        "prepare-target accepts sync entries",
     );
     is_deeply(
         \@prepared_paths,
@@ -1475,12 +1512,6 @@ HTML
     no warnings 'redefine';
     my %cache = ( owner => 7 );
 
-    local *GlabGroups::_required_env_file = sub {
-        my ($name) = @_;
-        return "imcramer" if $name eq "GL_USER_FORK_MAIN";
-        die "unexpected required env file lookup: $name";
-    };
-
     local *GlabGroups::_get_group = sub {
         my ( $client, $group_path ) = @_;
         return {
@@ -1580,12 +1611,21 @@ HTML
     write_json_file(
         $plan_path,
         {
+            batches => [
+                {
+                    end_index => 0,
+                    group_paths => ["owner/group"],
+                    start_index => 0,
+                    target_count => 1,
+                },
+            ],
             plan => [
                 {
-                    action => "create_project",
+                    action => "sync",
                     target_full_path => "owner/group/project-a",
                 },
             ],
+            target_group_cache_seed => {},
         }
     );
 

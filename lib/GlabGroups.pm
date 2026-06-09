@@ -32,6 +32,7 @@ my %DEFAULTS = (
     batch_size => 25,
     force_lfs => JSON::PP::false,
     git_timeout_seconds => 1800,
+    inventory_cache_max_age_seconds => 432_000,
     max_blob_bytes => 100 * 1024 * 1024,
     mirror_pristine_tar => JSON::PP::true,
     retry_attempts => 3,
@@ -50,7 +51,6 @@ my %GITLAB_READ_DEFAULTS = (
 my $GROUP_PROJECT_CREATION_LEVEL = "maintainer";
 my $GROUP_SHARED_RUNNERS_SETTING = "disabled_and_unoverridable";
 my $GROUP_SUBGROUP_CREATION_LEVEL = "maintainer";
-my $MAINTAINER_ACCESS_LEVEL = 40;
 my $TARGET_SYNC_BRANCH = "gitlab/mcr/main";
 my $TARGET_DEFAULT_BRANCH = "mcr/main";
 
@@ -357,6 +357,7 @@ sub _cmd_discover {
         "output=s" => \$opt{output},
     ) or die _usage();
 
+    $opt{batch_size} > 0 or die "batch-size must be greater than zero\n";
     my $config = load_config_dir( $opt{config_dir} );
     my $inventory = _discover_inventory($config);
     _write_json( $opt{output}, $inventory );
@@ -381,22 +382,26 @@ sub _cmd_normalize {
 sub _cmd_plan {
     my (@argv) = @_;
     my %opt = (
+        discover_output => "discover.json",
         batch_size => 25,
-        inventory_max_age_seconds => 64_800,
+        inventory_max_age_seconds => $DEFAULTS{inventory_cache_max_age_seconds},
         inventory_input => q{},
         inventory_output => q{},
         output => "plan.json",
         summary => "plan.md",
+        target_group_cache_input => q{},
     );
     GetOptionsFromArray(
         \@argv,
         "config-dir=s" => \$opt{config_dir},
         "batch-size=i" => \$opt{batch_size},
+        "discover-output=s" => \$opt{discover_output},
         "inventory-input=s" => \$opt{inventory_input},
         "inventory-output=s" => \$opt{inventory_output},
         "inventory-max-age-seconds=i" => \$opt{inventory_max_age_seconds},
         "output=s" => \$opt{output},
         "summary=s" => \$opt{summary},
+        "target-group-cache-input=s" => \$opt{target_group_cache_input},
     ) or die _usage();
 
     my $config = load_config_dir( $opt{config_dir} );
@@ -408,7 +413,15 @@ sub _cmd_plan {
         }
     );
     _write_json( $opt{inventory_output}, $normalized ) if $opt{inventory_output};
-    my $plan = _build_plan( $config, $normalized, $opt{batch_size} );
+    _write_json( $opt{discover_output}, $normalized ) if $opt{discover_output};
+    my $plan = _build_plan(
+        $config,
+        $normalized,
+        $opt{batch_size},
+        {
+            target_group_cache_input => $opt{target_group_cache_input},
+        }
+    );
     _write_json( $opt{output}, $plan );
     _write_text( $opt{summary}, _render_plan_summary($plan) );
     return 0;
@@ -447,6 +460,95 @@ sub _inventory_cache_is_fresh {
     return ( time() - $discovered_epoch ) <= $max_age_seconds ? 1 : 0;
 }
 
+sub _load_target_group_cache_seed {
+    my ( $config, $path ) = @_;
+    my %seed;
+
+    for my $namespace ( @{ $config->{namespaces} || [] } ) {
+        next unless ref($namespace) eq "HASH" && defined $namespace->{target_namespace_id};
+        my $group_path = _join_path(
+            _resolve_target_root_group_path($namespace),
+            $namespace->{target_namespace_path},
+        );
+        $seed{$group_path} = 0 + $namespace->{target_namespace_id};
+    }
+    for my $project ( @{ $config->{projects} || [] } ) {
+        next unless ref($project) eq "HASH" && defined $project->{target_group_id};
+        my $group_path = _required_relative_namespace_path(
+            $project->{target_group_path},
+            "project target_group_path",
+        );
+        $seed{$group_path} = 0 + $project->{target_group_id};
+    }
+
+    return \%seed if !$path || !-f $path;
+    for my $row ( @{ _read_jsonl($path) } ) {
+        next unless ref($row) eq "HASH";
+        next unless defined $row->{target_group_path} && defined $row->{target_group_id};
+        my $group_path = eval {
+            _required_relative_namespace_path(
+                $row->{target_group_path},
+                "target group cache target_group_path",
+            );
+        };
+        next unless $group_path;
+        my $group_id = eval {
+            _positive_int(
+                $row->{target_group_id},
+                "target group cache target_group_id",
+            );
+        };
+        next unless $group_id;
+        $seed{$group_path} = 0 + $group_id;
+    }
+
+    return \%seed;
+}
+
+sub _build_group_batches {
+    my ( $plan, $batch_size ) = @_;
+    my @batches;
+    my %seen_groups;
+    my $current_batch;
+    my $current_group = undef;
+
+    for my $index ( 0 .. $#{$plan} ) {
+        my $entry = $plan->[$index];
+        my $group_path = $entry->{target_namespace_path} || q{};
+        my $is_new_group = !defined $current_group || $group_path ne $current_group;
+
+        if ( !$current_batch ) {
+            $current_batch = {
+                end_index => $index,
+                group_paths => [],
+                start_index => $index,
+                target_count => 0,
+            };
+        }
+        elsif ( $is_new_group && $current_batch->{target_count} >= $batch_size ) {
+            push @batches, $current_batch;
+            $current_batch = {
+                end_index => $index,
+                group_paths => [],
+                start_index => $index,
+                target_count => 0,
+            };
+        }
+
+        if ($is_new_group) {
+            push @{ $current_batch->{group_paths} }, $group_path;
+            $seen_groups{$group_path} = 1;
+        }
+
+        $current_batch->{end_index} = $index;
+        $current_batch->{target_count}++;
+        $current_group = $group_path;
+    }
+
+    push @batches, $current_batch if $current_batch;
+    return ( \@batches, scalar keys %seen_groups );
+}
+
 sub _cmd_prepare_target {
     my (@argv) = @_;
     my %opt = ( output => "prepared.json" );
@@ -477,6 +579,7 @@ sub _cmd_mirror {
     my %opt = (
         output => "results.json",
         jsonl => "results.jsonl",
+        target_groups_jsonl => "target-groups.jsonl",
         batch_size => 25,
         batch_start => 0,
         batch_stride => 1,
@@ -487,6 +590,7 @@ sub _cmd_mirror {
         "plan=s" => \$opt{plan},
         "output=s" => \$opt{output},
         "jsonl=s" => \$opt{jsonl},
+        "target-groups-jsonl=s" => \$opt{target_groups_jsonl},
         "batch-size=i" => \$opt{batch_size},
         "batch-start=i" => \$opt{batch_start},
         "batch-stride=i" => \$opt{batch_stride},
@@ -501,9 +605,18 @@ sub _cmd_mirror {
     my $plan = _read_json( $opt{plan} );
     my $target_client = _load_target_client();
     my $source_auth = _load_source_auth();
+    my %group_cache_seed;
+    if ( ref( $plan->{target_group_cache_seed} ) eq "HASH" ) {
+        for my $path ( sort keys %{ $plan->{target_group_cache_seed} } ) {
+            my $group_id = $plan->{target_group_cache_seed}->{$path};
+            next unless defined $group_id;
+            $group_cache_seed{$path} = 0 + $group_id;
+        }
+    }
+    $target_client->{group_path_cache} = \%group_cache_seed;
     my @entries = @{ $plan->{plan} || [] };
-    my $total = scalar @entries;
-    my $total_batches = _ceil_div( $total, $opt{batch_size} );
+    my @batches = @{ $plan->{batches} || [] };
+    my $total_batches = scalar @batches;
 
     my @results;
     my $processed_batches = 0;
@@ -511,10 +624,13 @@ sub _cmd_mirror {
 
     for ( my $batch_index = $opt{batch_start}; $batch_index < $total_batches; $batch_index += $opt{batch_stride} ) {
         last if $opt{batch_limit} > 0 && $processed_batches >= $opt{batch_limit};
-        my $start = $batch_index * $opt{batch_size};
-        my $end = $start + $opt{batch_size} - 1;
-        $end = $#entries if $end > $#entries;
+        my $batch = $batches[$batch_index];
+        next unless ref($batch) eq "HASH";
+        my $start = $batch->{start_index};
+        my $end = $batch->{end_index};
+        next unless defined $start && defined $end;
         last if $start > $#entries;
+        $end = $#entries if $end > $#entries;
 
         for my $index ( $start .. $end ) {
             my $entry = $entries[$index];
@@ -535,6 +651,10 @@ sub _cmd_mirror {
         $processed_batches++;
     }
     close $jsonl_fh;
+    _write_jsonl_rows(
+        $opt{target_groups_jsonl},
+        _serialize_target_group_cache_rows( $target_client->{group_path_cache} || {} ),
+    );
 
     my $aggregate = _aggregate_results( \@results );
     _write_json(
@@ -654,10 +774,13 @@ sub _discover_namespace_inventory {
 
     if ( $source->{kind} eq "gitlab_group" ) {
         my $source_client = _make_gitlab_client( $source->{base_url}, undef, undef );
-        my $projects = _list_group_projects( $source_client, $source->{root_path}, $policy );
+        my $source_group = _get_group( $source_client, $source->{root_path}, _gitlab_read_request_opt($policy) );
+        return [] if !$source_group;
+        my $projects = _list_group_projects( $source_client, $source->{root_path}, $policy, $source_group );
         return [
             {
                 namespace => $namespace,
+                group_id => $source_group->{id},
                 group_path => $source->{root_path},
                 base_url => $source->{base_url},
                 projects => $projects,
@@ -681,6 +804,7 @@ sub _discover_namespace_inventory {
                     %{$namespace},
                     target_namespace_path => _join_path( $namespace->{target_namespace_path}, $group_path ),
                 },
+                group_id => $group->{id},
                 group_path => $group_path,
                 base_url => $source->{base_url},
                 projects => $projects,
@@ -783,46 +907,37 @@ sub _normalize_inventory {
 }
 
 sub _build_plan {
-    my ( $config, $inventory, $batch_size ) = @_;
-    my $target_client = _load_target_client();
-    my %target_namespace_state_cache;
+    my ( $config, $inventory, $batch_size, $opt ) = @_;
+    $opt ||= {};
+    my $target_group_cache_seed = _load_target_group_cache_seed(
+        $config,
+        $opt->{target_group_cache_input},
+    );
     my @plan;
     my %counts = (
-        create_project => 0,
-        update_project => 0,
-        mirror_only => 0,
-        skip => 0,
         fail => 0,
+        skip => 0,
+        sync => 0,
     );
 
     for my $bucket ( @{ $inventory->{inventory} || [] } ) {
         if ( ref( $bucket->{project_entry} ) eq "HASH" ) {
             my $project_entry = $bucket->{project_entry};
             my $target_namespace_path = $project_entry->{target_group_path};
-            my $target_state_policy = _merge_policy( $config->{defaults}, $project_entry, {} );
-            my $target_state =
-              $target_namespace_state_cache{$target_namespace_path}
-              ||= _build_target_namespace_state( $target_client, $target_namespace_path, $target_state_policy );
-            my $target_projects_by_path = $target_state->{projects};
-            my $target_groups_by_path = $target_state->{groups};
 
             for my $source_project ( @{ $bucket->{projects} || [] } ) {
                 my $source_full_path = _required_string( $source_project->{path_with_namespace}, "path_with_namespace" );
                 my $target_full_path = _join_path( $target_namespace_path, $project_entry->{name} );
                 my $override = $config->{overrides}->{$target_full_path} || {};
                 my $policy = _merge_policy( $config->{defaults}, $project_entry, $override );
-                my $target_project = $target_projects_by_path->{$target_full_path};
-                my $target_namespace_id = $target_groups_by_path->{$target_namespace_path};
                 my $skip_reason = $config->{exclusions}->{$target_full_path};
                 if ( !$skip_reason && $source_project->{archived} ) {
                     $skip_reason = "Archived source repository is excluded from mirroring.";
                 }
-                my $action = classify_plan_action(
-                    $source_project,
-                    $target_project,
-                    $policy,
-                    $skip_reason,
-                );
+                my $action =
+                    $skip_reason ? "skip"
+                  : ref($source_project) eq "HASH" ? "sync"
+                  : "fail";
                 $counts{$action}++;
                 push @plan,
                   {
@@ -835,31 +950,31 @@ sub _build_plan {
                     source_description_known => $source_project->{description_known},
                     source_empty_repo => !!$source_project->{empty_repo},
                     source_full_path => $source_full_path,
+                    source_group_id => $bucket->{group_id},
                     source_group_path => $bucket->{group_path},
                     source_auth_mode => $bucket->{source_auth_mode} || "",
                     source_http_url => $source_project->{http_url_to_repo},
                     source_lfs_enabled => !!$source_project->{lfs_enabled},
                     source_lfs_enabled_known => $source_project->{lfs_enabled_known},
                     source_last_activity_at => $source_project->{last_activity_at},
+                    source_namespace_full_path =>
+                      ref( $source_project->{namespace} ) eq "HASH"
+                      ? $source_project->{namespace}->{full_path}
+                      : undef,
+                    source_namespace_id =>
+                      ref( $source_project->{namespace} ) eq "HASH"
+                      ? $source_project->{namespace}->{id}
+                      : undef,
                     source_project_id => $source_project->{id},
                     source_ssh_url => $source_project->{ssh_url_to_repo},
                     source_visibility => $source_project->{visibility},
                     target_full_path => $target_full_path,
                     target_relative_project_path => $target_full_path,
-                    target_namespace_id => $target_namespace_id,
+                    target_namespace_id =>
+                      defined $project_entry->{target_group_id}
+                      ? 0 + $project_entry->{target_group_id}
+                      : $target_group_cache_seed->{$target_namespace_path},
                     target_namespace_path => $target_namespace_path,
-                    target_description => $target_project ? _normalize_description( $target_project->{description} ) : undef,
-                    target_group_runners_enabled =>
-                      $target_project && exists $target_project->{group_runners_enabled}
-                      ? !!$target_project->{group_runners_enabled}
-                      : undef,
-                    target_shared_runners_enabled =>
-                      $target_project && exists $target_project->{shared_runners_enabled}
-                      ? !!$target_project->{shared_runners_enabled}
-                      : undef,
-                    target_lfs_enabled => $target_project ? !!$target_project->{lfs_enabled} : undef,
-                    target_project_id => $target_project ? $target_project->{id} : undef,
-                    target_visibility => $target_project ? $target_project->{visibility} : undef,
                   };
             }
             next;
@@ -868,13 +983,6 @@ sub _build_plan {
         my $namespace = $bucket->{namespace};
         my $source_group_path = $bucket->{group_path};
         my $target_root_path = _resolve_target_root_group_path($namespace);
-        my $target_namespace_root_path = _join_path( $target_root_path, $namespace->{target_namespace_path} );
-        my $target_state_policy = _merge_policy( $config->{defaults}, $namespace, {} );
-        my $target_state =
-          $target_namespace_state_cache{$target_namespace_root_path}
-          ||= _build_target_namespace_state( $target_client, $target_namespace_root_path, $target_state_policy );
-        my $target_projects_by_path = $target_state->{projects};
-        my $target_groups_by_path = $target_state->{groups};
 
         for my $source_project ( @{ $bucket->{projects} || [] } ) {
             my $source_full_path = _required_string( $source_project->{path_with_namespace}, "path_with_namespace" );
@@ -885,65 +993,69 @@ sub _build_plan {
             my $target_namespace_path = dirname($target_full_path);
             my $override = $config->{overrides}->{$target_relative_project_path} || {};
             my $policy = _merge_policy( $config->{defaults}, $namespace, $override );
-            my $target_project = $target_projects_by_path->{$target_full_path};
-            my $target_namespace_id = $target_groups_by_path->{$target_namespace_path};
             my $skip_reason = $config->{exclusions}->{$target_relative_project_path};
             if ( !$skip_reason && $source_project->{archived} ) {
                 $skip_reason = "Archived source repository is excluded from mirroring.";
             }
-            my $action = classify_plan_action(
-                $source_project,
-                $target_project,
-                $policy,
-                $skip_reason,
-            );
+            my $action =
+                $skip_reason ? "skip"
+              : ref($source_project) eq "HASH" ? "sync"
+              : "fail";
             $counts{$action}++;
-                push @plan,
-                  {
-                    action => $action,
-                    policy => $policy,
-                    skip_reason => $skip_reason,
-                    source_archived => !!$source_project->{archived},
-                    source_default_branch => $source_project->{default_branch},
-                    source_description => _normalize_description( $source_project->{description} ),
-                    source_description_known => $source_project->{description_known},
-                    source_empty_repo => !!$source_project->{empty_repo},
-                    source_full_path => $source_full_path,
-                    source_group_path => $source_group_path,
-                    source_http_url => $source_project->{http_url_to_repo},
-                    source_lfs_enabled => !!$source_project->{lfs_enabled},
-                    source_lfs_enabled_known => $source_project->{lfs_enabled_known},
-                    source_last_activity_at => $source_project->{last_activity_at},
-                    source_project_id => $source_project->{id},
-                    source_ssh_url => $source_project->{ssh_url_to_repo},
+            push @plan,
+              {
+                action => $action,
+                policy => $policy,
+                skip_reason => $skip_reason,
+                source_archived => !!$source_project->{archived},
+                source_default_branch => $source_project->{default_branch},
+                source_description => _normalize_description( $source_project->{description} ),
+                source_description_known => $source_project->{description_known},
+                source_empty_repo => !!$source_project->{empty_repo},
+                source_full_path => $source_full_path,
+                source_group_id => $bucket->{group_id},
+                source_group_path => $source_group_path,
+                source_http_url => $source_project->{http_url_to_repo},
+                source_lfs_enabled => !!$source_project->{lfs_enabled},
+                source_lfs_enabled_known => $source_project->{lfs_enabled_known},
+                source_last_activity_at => $source_project->{last_activity_at},
+                source_namespace_full_path =>
+                  ref( $source_project->{namespace} ) eq "HASH"
+                  ? $source_project->{namespace}->{full_path}
+                  : undef,
+                source_namespace_id =>
+                  ref( $source_project->{namespace} ) eq "HASH"
+                  ? $source_project->{namespace}->{id}
+                  : undef,
+                source_project_id => $source_project->{id},
+                source_ssh_url => $source_project->{ssh_url_to_repo},
                 source_visibility => $source_project->{visibility},
                 target_full_path => $target_full_path,
                 target_relative_project_path => $target_relative_project_path,
-                target_namespace_id => $target_namespace_id,
+                target_namespace_id =>
+                  defined $namespace->{target_namespace_id}
+                  && $target_namespace_path eq _join_path( $target_root_path, $namespace->{target_namespace_path} )
+                  ? 0 + $namespace->{target_namespace_id}
+                  : $target_group_cache_seed->{$target_namespace_path},
                 target_namespace_path => $target_namespace_path,
-                target_description => $target_project ? _normalize_description( $target_project->{description} ) : undef,
-                target_group_runners_enabled =>
-                  $target_project && exists $target_project->{group_runners_enabled}
-                  ? !!$target_project->{group_runners_enabled}
-                  : undef,
-                target_shared_runners_enabled =>
-                  $target_project && exists $target_project->{shared_runners_enabled}
-                  ? !!$target_project->{shared_runners_enabled}
-                  : undef,
-                target_lfs_enabled => $target_project ? !!$target_project->{lfs_enabled} : undef,
-                target_project_id => $target_project ? $target_project->{id} : undef,
-                target_visibility => $target_project ? $target_project->{visibility} : undef,
               };
         }
     }
 
-    @plan = sort { $a->{target_full_path} cmp $b->{target_full_path} } @plan;
+    @plan = sort {
+        ( $a->{target_namespace_path} || q{} ) cmp ( $b->{target_namespace_path} || q{} )
+          || $a->{target_full_path} cmp $b->{target_full_path}
+    } @plan;
+    my ( $batches, $total_groups ) = _build_group_batches( \@plan, $batch_size );
     return {
+        batches => $batches,
         batch_size => $batch_size,
         counts => \%counts,
         generated_at => _timestamp(),
         plan => \@plan,
-        total_batches => _ceil_div( scalar @plan, $batch_size ),
+        target_group_cache_seed => $target_group_cache_seed,
+        total_batches => scalar @{$batches},
+        total_groups => $total_groups,
         total_targets => scalar @plan,
     };
 }
@@ -969,12 +1081,17 @@ sub _mirror_entry {
     }
 
     my $prepared = _ensure_target_project( $target_client, $entry );
+    my $prepared_action =
+        $prepared->{created} ? "create_project"
+      : $prepared->{updated} ? "update_project"
+      : "mirror_only";
     if ( $entry->{source_empty_repo} ) {
         _finalize_target_project( $target_client, $prepared->{project_id}, $entry->{source_default_branch} || "", $entry );
         my $verified = _verify_entry( $target_client, $entry );
         return {
             target_full_path => $entry->{target_full_path},
             planned_action => $entry->{action},
+            prepared_action => $prepared_action,
             status => $prepared->{created} ? "created_empty" : "updated_empty",
             prepared => $prepared,
             verify => $verified,
@@ -1077,6 +1194,7 @@ sub _mirror_entry {
     return {
         target_full_path => $entry->{target_full_path},
         planned_action => $entry->{action},
+        prepared_action => $prepared_action,
         prepared => $prepared,
         selected_refs => $selected,
         size => $size_after,
@@ -1142,11 +1260,10 @@ sub _render_plan_summary {
         "## Group mirror plan\n\n",
         "- generated at: $plan->{generated_at}\n",
         "- total targets: $plan->{total_targets}\n",
+        "- total target groups: $plan->{total_groups}\n",
         "- batch size: $plan->{batch_size}\n",
         "- total batches: $plan->{total_batches}\n",
-        "- create project: $plan->{counts}->{create_project}\n",
-        "- update project: $plan->{counts}->{update_project}\n",
-        "- mirror only: $plan->{counts}->{mirror_only}\n",
+        "- sync: $plan->{counts}->{sync}\n",
         "- skip: $plan->{counts}->{skip}\n",
         "- fail: $plan->{counts}->{fail}\n",
     );
@@ -1196,6 +1313,11 @@ sub _normalize_defaults_payload {
         batch_size => _defaulted_positive_int( $payload->{batch_size}, $DEFAULTS{batch_size}, "$label.defaults.batch_size" ),
         force_lfs => _bool_or_default( $payload->{force_lfs}, 0 ),
         git_timeout_seconds => _defaulted_positive_int( $payload->{git_timeout_seconds}, $DEFAULTS{git_timeout_seconds}, "$label.defaults.git_timeout_seconds" ),
+        inventory_cache_max_age_seconds => _defaulted_positive_int(
+            $payload->{inventory_cache_max_age_seconds},
+            $DEFAULTS{inventory_cache_max_age_seconds},
+            "$label.defaults.inventory_cache_max_age_seconds",
+        ),
         max_blob_bytes => _defaulted_bounded_positive_int( $payload->{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, "$label.defaults.max_blob_bytes" ),
         mirror_pristine_tar => _bool_or_default( $payload->{mirror_pristine_tar}, 1 ),
         gitlab_source_include_subgroups => _bool_or_default( $payload->{gitlab_source_include_subgroups}, 0 ),
@@ -1229,6 +1351,7 @@ sub _normalize_namespace {
         max_blob_bytes => _optional_bounded_positive_int( $payload->{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, "$label.max_blob_bytes" ),
         source_group_url => _required_https_url( $payload->{source_group_url}, "$label.source_group_url" ),
         target_branches_protect => _normalize_ref_specs( $payload->{target_branches_protect}, "$label.target_branches_protect" ),
+        target_namespace_id => _optional_positive_int( $payload->{target_namespace_id}, "$label.target_namespace_id" ),
         target_owner_path => _required_relative_namespace_path( $payload->{target_owner_path}, "$label.target_owner_path" ),
         target_namespace_path => _required_relative_namespace_path( $payload->{target_namespace_path}, "$label.target_namespace_path" ),
     };
@@ -1255,6 +1378,7 @@ sub _normalize_project {
         max_blob_bytes => _optional_bounded_positive_int( $payload->{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, "$label.max_blob_bytes" ),
         source_project_url => _required_https_url( $payload->{source_project_url}, "$label.source_project_url" ),
         target_branches_protect => _normalize_ref_specs( $payload->{target_branches_protect}, "$label.target_branches_protect" ),
+        target_group_id => _optional_positive_int( $payload->{target_group_id}, "$label.target_group_id" ),
         target_group_path => _required_relative_namespace_path( $payload->{target_group_path}, "$label.target_group_path" ),
     };
 }
@@ -1334,7 +1458,7 @@ sub _load_target_client {
     my $token_secret_name = _required_secret_name( $ENV{GL_TARGET_TOKEN_SECRET_NAME}, "GL_TARGET_TOKEN_SECRET_NAME" );
     return _make_gitlab_client(
         _required_https_url( _required_env_file("GL_BASE_URL"), "GL_BASE_URL" ),
-        _required_env_file("GL_BRIDGE_FORK_USER_GLAB"),
+        "oauth2",
         _required_env_file($token_secret_name),
     );
 }
@@ -1350,20 +1474,20 @@ sub _resolve_target_root_group_path {
 sub _load_source_auth {
     my $username = _optional_env_file("GL_GROUPS_SOURCE_USERNAME");
     my $token = _optional_env_file("GL_GROUPS_SOURCE_TOKEN");
-    my $github_app_id = _optional_env_file("GH_ORG_SHARED_APP_ID");
-    my $github_app_install_id = _optional_env_file("GH_ORG_SHARED_APP_INSTALL_ID");
-    my $github_app_pem = _optional_env_file("GH_ORG_SHARED_APP_PEM");
+    my $github_app_id = _optional_env_file("GH_ORG_READ_APP_ID");
+    my $github_app_install_id = _optional_env_file("GH_ORG_READ_APP_INSTALL_ID");
+    my $github_app_pem = _optional_env_file("GH_ORG_READ_APP_PEM");
     if ( defined $github_app_id xor defined $github_app_pem ) {
-        die "GH_ORG_SHARED_APP_ID_FILE and GH_ORG_SHARED_APP_PEM_FILE must be set together\n";
+        die "GH_ORG_READ_APP_ID_FILE and GH_ORG_READ_APP_PEM_FILE must be set together\n";
     }
     my $github_app;
     if ( defined $github_app_id && defined $github_app_pem ) {
         $github_app = {
-            app_id => _required_numeric_string( $github_app_id, "GH_ORG_SHARED_APP_ID" ),
+            app_id => _required_numeric_string( $github_app_id, "GH_ORG_READ_APP_ID" ),
             install_id => defined $github_app_install_id
-              ? _required_numeric_string( $github_app_install_id, "GH_ORG_SHARED_APP_INSTALL_ID" )
+              ? _required_numeric_string( $github_app_install_id, "GH_ORG_READ_APP_INSTALL_ID" )
               : undef,
-            pem => _normalize_private_key_secret( $github_app_pem, "GH_ORG_SHARED_APP_PEM" ),
+            pem => _normalize_private_key_secret( $github_app_pem, "GH_ORG_READ_APP_PEM" ),
         };
     }
     return {
@@ -1511,139 +1635,6 @@ sub _managed_group_settings_payload {
     );
 }
 
-sub _get_current_user {
-    my ($client) = @_;
-    return $client->{current_user} if ref( $client->{current_user} ) eq "HASH";
-    my $user = _gitlab_request( $client, "GET", "/user" );
-    ref($user) eq "HASH" or die "current user response must be an object\n";
-    $client->{current_user} = $user;
-    return $user;
-}
-
-sub _find_gitlab_user_by_username {
-    my ( $client, $username ) = @_;
-    $username = _required_string( $username, "GL_USER_FORK_MAIN" );
-    my $cache = $client->{users_by_username} ||= {};
-    return $cache->{$username} if ref( $cache->{$username} ) eq "HASH";
-
-    my $users = _gitlab_request( $client, "GET", "/users?username=" . uri_escape_utf8($username) );
-    ref($users) eq "ARRAY" or die "user search response must be a list\n";
-    for my $user ( @{$users} ) {
-        next unless ref($user) eq "HASH";
-        next unless defined $user->{username} && $user->{username} eq $username;
-        $cache->{$username} = $user;
-        return $user;
-    }
-    die "gitlab user not found: $username\n";
-}
-
-sub _ensure_named_user_group_membership_access {
-    my ( $client, $group_id, $username, $desired_access_level ) = @_;
-    my $user = _find_gitlab_user_by_username( $client, $username );
-    my $user_id = $user->{id};
-    defined $user_id or die "gitlab user id missing for $username\n";
-
-    my $member = _gitlab_request(
-        $client,
-        "GET",
-        "/groups/$group_id/members/$user_id",
-        undef,
-        { allow_missing => 1 }
-    );
-    if ( !$member ) {
-        _gitlab_request(
-            $client,
-            "POST",
-            "/groups/$group_id/members",
-            {
-                user_id => $user_id,
-                access_level => $desired_access_level,
-            }
-        );
-        return 1;
-    }
-
-    my $access_level = $member->{access_level};
-    return 1 if defined $access_level && $access_level == $desired_access_level;
-
-    _gitlab_request(
-        $client,
-        "PUT",
-        "/groups/$group_id/members/$user_id",
-        {
-            access_level => $desired_access_level,
-        }
-    );
-    return 1;
-}
-
-sub _ensure_main_user_group_membership_owner {
-    my ( $client, $group_id ) = @_;
-    my $main_username = _required_env_file("GL_USER_FORK_MAIN");
-    return _ensure_named_user_group_membership_access( $client, $group_id, $main_username, 50 );
-}
-
-sub _ensure_service_user_group_membership_owner {
-    my ( $client, $group_id ) = @_;
-    my $user = _get_current_user($client);
-    my $user_id = $user->{id};
-    defined $user_id or die "current user id missing from /user response\n";
-
-    my $member = _gitlab_request(
-        $client,
-        "GET",
-        "/groups/$group_id/members/$user_id",
-        undef,
-        { allow_missing => 1 }
-    );
-    if ( !$member ) {
-        _gitlab_request(
-            $client,
-            "POST",
-            "/groups/$group_id/members",
-            {
-                user_id => $user_id,
-                access_level => 50,
-            }
-        );
-        return 1;
-    }
-
-    my $access_level = $member->{access_level};
-    return 1 if defined $access_level && $access_level == 50;
-
-    _gitlab_request(
-        $client,
-        "PUT",
-        "/groups/$group_id/members/$user_id",
-        {
-            access_level => 50,
-        }
-    );
-    return 1;
-}
-
-sub _reconcile_managed_group {
-    my ( $client, $group ) = @_;
-    return $group unless ref($group) eq "HASH" && defined $group->{id};
-
-    my %desired = _managed_group_settings_payload();
-    my %payload;
-    for my $key ( sort keys %desired ) {
-        my $current = defined $group->{$key} ? $group->{$key} : q{};
-        next if $current eq $desired{$key};
-        $payload{$key} = $desired{$key};
-    }
-    if (%payload) {
-        $group = _gitlab_request( $client, "PUT", "/groups/$group->{id}", \%payload );
-        ref($group) eq "HASH" or die "group update response must be an object\n";
-    }
-
-    _ensure_main_user_group_membership_owner( $client, $group->{id} );
-    _ensure_service_user_group_membership_owner( $client, $group->{id} );
-    return $group;
-}
-
 sub _ensure_group_path {
     my ( $client, $group_path, $cache ) = @_;
     return $cache->{$group_path} if exists $cache->{$group_path};
@@ -1679,10 +1670,6 @@ sub _ensure_group_path {
                 }
                 die $create_error unless $group;
             }
-        }
-        if ($created_group) {
-            _ensure_main_user_group_membership_owner( $client, $group->{id} );
-            _ensure_service_user_group_membership_owner( $client, $group->{id} );
         }
         $parent_id = $group->{id};
         $cache->{$current} = $parent_id;
@@ -1840,10 +1827,10 @@ sub _ensure_target_project {
     $payload{group_runners_enabled} = JSON::PP::false;
     $payload{shared_runners_enabled} = JSON::PP::false;
 
-    my $project;
+    my $project = $existing;
     my $created = JSON::PP::false;
     my $updated = JSON::PP::false;
-    if ( !$existing ) {
+    if ( !$project ) {
         my $create_ok = eval {
             $project = _gitlab_request(
                 $client,
@@ -1872,8 +1859,7 @@ sub _ensure_target_project {
             }
         }
     }
-    else {
-        $project = $existing;
+    if ( $project && !$created ) {
         my $needs_update = 0;
         if ( exists $payload{description} ) {
             $needs_update = 1
@@ -2177,7 +2163,7 @@ sub _resolve_source_auth_for_entry {
 sub _github_installation_source_auth {
     my ( $source_auth, $base_url, $account, $policy ) = @_;
     my $github_app = $source_auth->{github_app}
-      or die "GitHub source $account requires GH_ORG_SHARED_APP_ID and GH_ORG_SHARED_APP_PEM secrets\n";
+      or die "GitHub source $account requires GH_ORG_READ_APP_ID and GH_ORG_READ_APP_PEM secrets\n";
     my $installation_key = defined $github_app->{install_id} ? $github_app->{install_id} : $account;
     my $cache_key = lc( $base_url . "|" . $installation_key );
     my $cached = $source_auth->{github_installation_tokens}->{$cache_key};
@@ -2323,12 +2309,12 @@ sub _list_cgit_root_projects {
 }
 
 sub _list_group_projects {
-    my ( $client, $group_path, $policy ) = @_;
+    my ( $client, $group_path, $policy, $known_group ) = @_;
     if ( $policy && $policy->{gitlab_source_include_subgroups} ) {
-        return _list_group_projects_include_subgroups( $client, $group_path, $policy );
+        return _list_group_projects_include_subgroups( $client, $group_path, $policy, $known_group );
     }
 
-    my $group = _get_group( $client, $group_path, _gitlab_read_request_opt($policy) );
+    my $group = $known_group || _get_group( $client, $group_path, _gitlab_read_request_opt($policy) );
     return [] unless $group;
 
     my @projects;
@@ -2361,8 +2347,8 @@ sub _list_group_projects {
 }
 
 sub _list_group_projects_include_subgroups {
-    my ( $client, $group_path, $policy ) = @_;
-    my $group = _get_group( $client, $group_path, _gitlab_read_request_opt($policy) );
+    my ( $client, $group_path, $policy, $known_group ) = @_;
+    my $group = $known_group || _get_group( $client, $group_path, _gitlab_read_request_opt($policy) );
     return [] unless $group;
 
     my @projects;
@@ -3004,6 +2990,19 @@ sub _read_json {
     return $JSON->decode($text);
 }
 
+sub _read_jsonl {
+    my ($path) = @_;
+    open( my $fh, "<:encoding(UTF-8)", $path ) or die "unable to read $path\n";
+    my @rows;
+    while ( my $line = <$fh> ) {
+        $line =~ s/\s+\z//;
+        next unless length $line;
+        push @rows, $JSON->decode($line);
+    }
+    close $fh;
+    return \@rows;
+}
+
 sub _read_config_payload {
     my ($path) = @_;
     return _read_json($path) if $path =~ /\.json\z/;
@@ -3022,6 +3021,33 @@ sub _read_config_payload {
 sub _write_json {
     my ( $path, $payload ) = @_;
     _write_text( $path, JSON::PP->new->canonical(1)->utf8(1)->pretty(1)->encode($payload) );
+}
+
+sub _write_jsonl_rows {
+    my ( $path, $rows ) = @_;
+    my $dir = dirname($path);
+    make_path($dir) if $dir && !-d $dir;
+    open( my $fh, ">:encoding(UTF-8)", $path ) or die "unable to write $path\n";
+    for my $row ( @{$rows} ) {
+        print {$fh} $JSON->encode($row), "\n";
+    }
+    close $fh;
+}
+
+sub _serialize_target_group_cache_rows {
+    my ($cache) = @_;
+    my @rows;
+    for my $group_path ( sort keys %{$cache} ) {
+        my $group_id = $cache->{$group_path};
+        next unless defined $group_id;
+        push @rows,
+          {
+            recorded_at => _timestamp(),
+            target_group_id => 0 + $group_id,
+            target_group_path => $group_path,
+          };
+    }
+    return \@rows;
 }
 
 sub _write_text {

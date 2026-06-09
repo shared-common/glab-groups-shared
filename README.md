@@ -20,7 +20,8 @@ Wrapper repositories call `.github/workflows/group-sync-core.yml` and pass:
 - BWS access secrets for target GitLab credentials
 
 The shared workflow uploads plan, result, report, CSV, JSON, and optional
-Parquet artifacts on every run.
+Parquet artifacts on every run, and also appends JSONL cache and run summaries
+to the dedicated `glab-groups-metadata` repository.
 
 Config directories can use `.json`, `.yml`, or `.yaml` files.
 
@@ -38,7 +39,7 @@ Config `source_group_url` values can point at:
   into the current public top-level groups beneath the configured target prefix
 - a GitHub organization URL, such as `https://github.com/labwc`, which mirrors
   the current organization repositories using the shared GitHub App credentials
-  from `GH_ORG_SHARED_APP_ID` and `GH_ORG_SHARED_APP_PEM`
+  from `GH_ORG_READ_APP_ID` and `GH_ORG_READ_APP_PEM`
 - a cgit root URL, such as `https://git.netfilter.org`, which mirrors the
   current root-level repositories discovered from the cgit index page
 
@@ -62,8 +63,6 @@ real destination as:
 
 and authenticates with:
 
-- `GL_BRIDGE_FORK_USER_GLAB`
-- `GL_USER_FORK_MAIN`
 - `GL_PAT_GROUP_KALI_SVC` for `glab-groups-kali`
 - `GL_PAT_GROUP_DEBIAN_SVC` for `glab-groups-debian`
 - `GL_PAT_GROUP_FREEDESKTOP_SVC` for `glab-groups-freedesktop`
@@ -93,25 +92,23 @@ Managed groups are reconciled to:
 - `project_creation_level=maintainer`
 - `subgroup_creation_level=maintainer`
 
-The direct group owner is taken from `GL_USER_FORK_MAIN`. For managed subgroups,
-the PAT user is not kept as a direct subgroup member after reconciliation, so
-it operates through inherited Maintainer access from the parent group instead of
-through direct subgroup ownership.
-
 Managed projects are reconciled to:
 
 - `group_runners_enabled=false`
 - `shared_runners_enabled=false`
 
-The planning phase inventories existing target namespace trees but does not
-pre-create missing target groups. Missing target namespace paths are resolved
-only when a mirror or explicit target-preparation step actually needs them.
+The planning phase does not pre-create missing target groups or recursively
+inventory the full target namespace tree. It builds subgroup-aware batches so a
+missing subgroup is created only when that subgroup's mirror work runs, then
+the repositories beneath that subgroup are mirrored in the same job.
 
 ## Ref selection
 
 Each config directory exposes these defaults:
 
 - `mirror_pristine_tar`: always mirror detected `pristine-tar` branch or tag
+- `inventory_cache_max_age_seconds`: cached source inventory freshness window,
+  defaulting to 5 days
 - `gitlab_source_include_subgroups`: optional GitLab source discovery mode that
   uses `include_subgroups=true` instead of subgroup-by-subgroup traversal
 - `read_retry_attempts`: retry count for plan/discovery GitLab API reads
@@ -141,9 +138,8 @@ Those `mcr/*` branches are one-shot target bootstrap branches. They are not
 force-synced from source on later runs.
 
 Plan runs also reuse a cached normalized source inventory artifact between
-workflow runs when the cache is still fresh. The shared workflow currently treats
-an inventory cache younger than 18 hours as reusable and rewrites the cache
-after rediscovery.
+workflow runs when the cache is still fresh. The shared workflow now defaults to
+reusing inventories for up to 5 days and rewrites the cache after rediscovery.
 
 ## Validation
 
