@@ -46,6 +46,7 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("glab-groups-openai", text)
         self.assertIn("glab-groups-nvidia", text)
         self.assertIn("GL_TARGET_TOKEN_SECRET_NAME: ${{ inputs.target-token-secret }}", text)
+        self.assertIn("GL_USER_FORK_MAIN", text)
         self.assertIn("GH_ORG_SHARED_APP_ID", text)
         self.assertIn("GH_ORG_SHARED_APP_INSTALL_ID", text)
         self.assertIn("GH_ORG_SHARED_APP_PEM", text)

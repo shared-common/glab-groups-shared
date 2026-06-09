@@ -47,6 +47,10 @@ my %GITLAB_READ_DEFAULTS = (
     timeout_seconds => 150,
 );
 
+my $GROUP_PROJECT_CREATION_LEVEL = "maintainer";
+my $GROUP_SHARED_RUNNERS_SETTING = "disabled_and_unoverridable";
+my $GROUP_SUBGROUP_CREATION_LEVEL = "maintainer";
+my $MAINTAINER_ACCESS_LEVEL = 40;
 my $TARGET_SYNC_BRANCH = "gitlab/mcr/main";
 my $TARGET_DEFAULT_BRANCH = "mcr/main";
 
@@ -245,6 +249,9 @@ sub classify_plan_action {
 
     if ( exists $target_project->{group_runners_enabled} ) {
         return "update_project" if !!$target_project->{group_runners_enabled};
+    }
+    if ( exists $target_project->{shared_runners_enabled} ) {
+        return "update_project" if !!$target_project->{shared_runners_enabled};
     }
 
     return "mirror_only";
@@ -846,6 +853,10 @@ sub _build_plan {
                       $target_project && exists $target_project->{group_runners_enabled}
                       ? !!$target_project->{group_runners_enabled}
                       : undef,
+                    target_shared_runners_enabled =>
+                      $target_project && exists $target_project->{shared_runners_enabled}
+                      ? !!$target_project->{shared_runners_enabled}
+                      : undef,
                     target_lfs_enabled => $target_project ? !!$target_project->{lfs_enabled} : undef,
                     target_project_id => $target_project ? $target_project->{id} : undef,
                     target_visibility => $target_project ? $target_project->{visibility} : undef,
@@ -914,6 +925,10 @@ sub _build_plan {
                 target_group_runners_enabled =>
                   $target_project && exists $target_project->{group_runners_enabled}
                   ? !!$target_project->{group_runners_enabled}
+                  : undef,
+                target_shared_runners_enabled =>
+                  $target_project && exists $target_project->{shared_runners_enabled}
+                  ? !!$target_project->{shared_runners_enabled}
                   : undef,
                 target_lfs_enabled => $target_project ? !!$target_project->{lfs_enabled} : undef,
                 target_project_id => $target_project ? $target_project->{id} : undef,
@@ -1488,6 +1503,132 @@ sub _make_gitlab_client {
     };
 }
 
+sub _managed_group_settings_payload {
+    return (
+        project_creation_level => $GROUP_PROJECT_CREATION_LEVEL,
+        shared_runners_setting => $GROUP_SHARED_RUNNERS_SETTING,
+        subgroup_creation_level => $GROUP_SUBGROUP_CREATION_LEVEL,
+    );
+}
+
+sub _get_current_user {
+    my ($client) = @_;
+    return $client->{current_user} if ref( $client->{current_user} ) eq "HASH";
+    my $user = _gitlab_request( $client, "GET", "/user" );
+    ref($user) eq "HASH" or die "current user response must be an object\n";
+    $client->{current_user} = $user;
+    return $user;
+}
+
+sub _find_gitlab_user_by_username {
+    my ( $client, $username ) = @_;
+    $username = _required_string( $username, "GL_USER_FORK_MAIN" );
+    my $cache = $client->{users_by_username} ||= {};
+    return $cache->{$username} if ref( $cache->{$username} ) eq "HASH";
+
+    my $users = _gitlab_request( $client, "GET", "/users?username=" . uri_escape_utf8($username) );
+    ref($users) eq "ARRAY" or die "user search response must be a list\n";
+    for my $user ( @{$users} ) {
+        next unless ref($user) eq "HASH";
+        next unless defined $user->{username} && $user->{username} eq $username;
+        $cache->{$username} = $user;
+        return $user;
+    }
+    die "gitlab user not found: $username\n";
+}
+
+sub _ensure_named_user_group_membership_access {
+    my ( $client, $group_id, $username, $desired_access_level ) = @_;
+    my $user = _find_gitlab_user_by_username( $client, $username );
+    my $user_id = $user->{id};
+    defined $user_id or die "gitlab user id missing for $username\n";
+
+    my $member = _gitlab_request(
+        $client,
+        "GET",
+        "/groups/$group_id/members/$user_id",
+        undef,
+        { allow_missing => 1 }
+    );
+    if ( !$member ) {
+        _gitlab_request(
+            $client,
+            "POST",
+            "/groups/$group_id/members",
+            {
+                user_id => $user_id,
+                access_level => $desired_access_level,
+            }
+        );
+        return 1;
+    }
+
+    my $access_level = $member->{access_level};
+    return 1 if defined $access_level && $access_level == $desired_access_level;
+
+    _gitlab_request(
+        $client,
+        "PUT",
+        "/groups/$group_id/members/$user_id",
+        {
+            access_level => $desired_access_level,
+        }
+    );
+    return 1;
+}
+
+sub _ensure_main_user_group_membership_owner {
+    my ( $client, $group_id ) = @_;
+    my $main_username = _required_env_file("GL_USER_FORK_MAIN");
+    return _ensure_named_user_group_membership_access( $client, $group_id, $main_username, 50 );
+}
+
+sub _remove_service_user_direct_group_membership {
+    my ( $client, $group_id ) = @_;
+    my $user = _get_current_user($client);
+    my $user_id = $user->{id};
+    defined $user_id or die "current user id missing from /user response\n";
+
+    my $member = _gitlab_request(
+        $client,
+        "GET",
+        "/groups/$group_id/members/$user_id",
+        undef,
+        { allow_missing => 1 }
+    );
+    return 1 unless $member;
+
+    _gitlab_request(
+        $client,
+        "DELETE",
+        "/groups/$group_id/members/$user_id",
+        undef
+    );
+    return 1;
+}
+
+sub _reconcile_managed_group {
+    my ( $client, $group, $parent_id ) = @_;
+    return $group unless ref($group) eq "HASH" && defined $group->{id};
+
+    my %desired = _managed_group_settings_payload();
+    my %payload;
+    for my $key ( sort keys %desired ) {
+        my $current = defined $group->{$key} ? $group->{$key} : q{};
+        next if $current eq $desired{$key};
+        $payload{$key} = $desired{$key};
+    }
+    if (%payload) {
+        $group = _gitlab_request( $client, "PUT", "/groups/$group->{id}", \%payload );
+        ref($group) eq "HASH" or die "group update response must be an object\n";
+    }
+
+    _ensure_main_user_group_membership_owner( $client, $group->{id} );
+    _remove_service_user_direct_group_membership( $client, $group->{id} )
+      if defined $parent_id;
+    return $group;
+}
+
 sub _ensure_group_path {
     my ( $client, $group_path, $cache ) = @_;
     return $cache->{$group_path} if exists $cache->{$group_path};
@@ -1501,16 +1642,19 @@ sub _ensure_group_path {
             next;
         }
         my $group = _get_group( $client, $current );
+        my $created_group = 0;
         if ( !$group ) {
             my %payload = (
                 name => $part,
                 path => $part,
+                _managed_group_settings_payload(),
             );
             $payload{parent_id} = $parent_id if defined $parent_id;
             my $create_ok = eval {
                 $group = _gitlab_request( $client, "POST", "/groups", \%payload );
                 1;
             };
+            $created_group = 1 if $create_ok;
             if ( !$create_ok ) {
                 my $create_error = $@ || "unknown group creation error\n";
                 if ( _is_gitlab_path_conflict_error($create_error) ) {
@@ -1520,6 +1664,14 @@ sub _ensure_group_path {
                 }
                 die $create_error unless $group;
             }
+        }
+        if ($created_group) {
+            _ensure_main_user_group_membership_owner( $client, $group->{id} );
+            _remove_service_user_direct_group_membership( $client, $group->{id} )
+              if defined $parent_id;
+        }
+        else {
+            $group = _reconcile_managed_group( $client, $group, $parent_id );
         }
         $parent_id = $group->{id};
         $cache->{$current} = $parent_id;
@@ -1652,6 +1804,10 @@ sub _ensure_target_project {
               : undef,
             id => $entry->{target_project_id},
             lfs_enabled => $entry->{target_lfs_enabled} ? JSON::PP::true : JSON::PP::false,
+            shared_runners_enabled =>
+              defined $entry->{target_shared_runners_enabled}
+              ? ( $entry->{target_shared_runners_enabled} ? JSON::PP::true : JSON::PP::false )
+              : undef,
         }
       : undef;
     my $name = basename( $entry->{target_full_path} );
@@ -1671,6 +1827,7 @@ sub _ensure_target_project {
           : JSON::PP::false;
     }
     $payload{group_runners_enabled} = JSON::PP::false;
+    $payload{shared_runners_enabled} = JSON::PP::false;
 
     my $project;
     my $created = JSON::PP::false;
@@ -1718,6 +1875,10 @@ sub _ensure_target_project {
         if ( exists $project->{group_runners_enabled} ) {
             $needs_update = 1
               if !!$project->{group_runners_enabled} != !!$payload{group_runners_enabled};
+        }
+        if ( exists $project->{shared_runners_enabled} ) {
+            $needs_update = 1
+              if !!$project->{shared_runners_enabled} != !!$payload{shared_runners_enabled};
         }
         if ($needs_update) {
             $project = _gitlab_request( $client, "PUT", "/projects/" . $project->{id}, \%payload );

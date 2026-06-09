@@ -63,6 +63,7 @@ real destination as:
 and authenticates with:
 
 - `GL_BRIDGE_FORK_USER_GLAB`
+- `GL_USER_FORK_MAIN`
 - `GL_PAT_GROUP_KALI_SVC` for `glab-groups-kali`
 - `GL_PAT_GROUP_DEBIAN_SVC` for `glab-groups-debian`
 - `GL_PAT_GROUP_FREEDESKTOP_SVC` for `glab-groups-freedesktop`
@@ -85,6 +86,22 @@ source repository URL.
 Target project deletion stays outside this workflow. The shared runtime creates
 missing target projects, updates existing target project metadata, and skips
 archived sources.
+
+Managed groups are reconciled to:
+
+- `shared_runners_setting=disabled_and_unoverridable`
+- `project_creation_level=maintainer`
+- `subgroup_creation_level=maintainer`
+
+The direct group owner is taken from `GL_USER_FORK_MAIN`. For managed subgroups,
+the PAT user is not kept as a direct subgroup member after reconciliation, so
+it operates through inherited Maintainer access from the parent group instead of
+through direct subgroup ownership.
+
+Managed projects are reconciled to:
+
+- `group_runners_enabled=false`
+- `shared_runners_enabled=false`
 
 The planning phase inventories existing target namespace trees but does not
 pre-create missing target groups. Missing target namespace paths are resolved

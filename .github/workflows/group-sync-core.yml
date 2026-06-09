@@ -221,6 +221,7 @@ jobs:
           my @secret_names = (
               "GL_BASE_URL",
               "GL_BRIDGE_FORK_USER_GLAB",
+              "GL_USER_FORK_MAIN",
               $target_token_secret,
           );
           if ($needs_github_source_auth) {

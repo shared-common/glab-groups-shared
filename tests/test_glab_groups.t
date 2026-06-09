@@ -804,6 +804,7 @@ HTML
             description => "target",
             archived => JSON::PP::false,
             group_runners_enabled => JSON::PP::true,
+            shared_runners_enabled => JSON::PP::true,
             lfs_enabled => JSON::PP::false,
         },
         {
@@ -1150,6 +1151,9 @@ HTML
     no warnings 'redefine';
     my %cache = ( owner => 7 );
 
+    local *GlabGroups::_ensure_main_user_group_membership_owner = sub { return 1; };
+    local *GlabGroups::_remove_service_user_direct_group_membership = sub { return 1; };
+
     local *GlabGroups::_get_group = sub {
         my ( $client, $group_path ) = @_;
         return undef if $group_path eq "owner/MixedCase-team";
@@ -1170,6 +1174,20 @@ HTML
                 },
             ];
         }
+        return {
+            id => 42,
+            full_path => "owner/MixedCase-team",
+            path => "MixedCase-team",
+            project_creation_level => $payload->{project_creation_level},
+            shared_runners_setting => $payload->{shared_runners_setting},
+            subgroup_creation_level => $payload->{subgroup_creation_level},
+        } if $method eq "PUT" && $path eq "/groups/42";
+        return { id => 55, username => "svc-glab" }
+          if $method eq "GET" && $path eq "/user";
+        return { access_level => 50, id => 55 }
+          if $method eq "GET" && $path eq "/groups/42/members/55";
+        return { access_level => 40, id => 55 }
+          if $method eq "PUT" && $path eq "/groups/42/members/55";
         die "unexpected gitlab request: $method $path";
     };
 
@@ -1181,6 +1199,9 @@ HTML
 {
     no warnings 'redefine';
     my %cache = ( owner => 7 );
+
+    local *GlabGroups::_ensure_main_user_group_membership_owner = sub { return 1; };
+    local *GlabGroups::_remove_service_user_direct_group_membership = sub { return 1; };
 
     local *GlabGroups::_get_group = sub {
         my ( $client, $group_path ) = @_;
@@ -1202,6 +1223,20 @@ HTML
                 },
             ];
         }
+        return {
+            id => 84,
+            full_path => "owner/freedesktop",
+            path => "freedesktop",
+            project_creation_level => $payload->{project_creation_level},
+            shared_runners_setting => $payload->{shared_runners_setting},
+            subgroup_creation_level => $payload->{subgroup_creation_level},
+        } if $method eq "PUT" && $path eq "/groups/84";
+        return { id => 55, username => "svc-glab" }
+          if $method eq "GET" && $path eq "/user";
+        return { access_level => 50, id => 55 }
+          if $method eq "GET" && $path eq "/groups/84/members/55";
+        return { access_level => 40, id => 55 }
+          if $method eq "PUT" && $path eq "/groups/84/members/55";
         die "unexpected gitlab request: $method $path";
     };
 
@@ -1216,6 +1251,9 @@ HTML
         owner => 7,
         "owner/freedesktop" => 8,
     );
+
+    local *GlabGroups::_ensure_main_user_group_membership_owner = sub { return 1; };
+    local *GlabGroups::_remove_service_user_direct_group_membership = sub { return 1; };
 
     local *GlabGroups::_get_group = sub {
         my ( $client, $group_path ) = @_;
@@ -1240,6 +1278,20 @@ HTML
                 },
             ];
         }
+        return {
+            id => 99,
+            full_path => "owner/freedesktop/wlroots",
+            path => "wlroots",
+            project_creation_level => $payload->{project_creation_level},
+            shared_runners_setting => $payload->{shared_runners_setting},
+            subgroup_creation_level => $payload->{subgroup_creation_level},
+        } if $method eq "PUT" && $path eq "/groups/99";
+        return { id => 55, username => "svc-glab" }
+          if $method eq "GET" && $path eq "/user";
+        return { access_level => 50, id => 55 }
+          if $method eq "GET" && $path eq "/groups/99/members/55";
+        return { access_level => 40, id => 55 }
+          if $method eq "PUT" && $path eq "/groups/99/members/55";
         die "unexpected gitlab request: $method $path";
     };
 
@@ -1251,6 +1303,9 @@ HTML
 {
     no warnings 'redefine';
     my %cache = ( owner => 7 );
+
+    local *GlabGroups::_ensure_main_user_group_membership_owner = sub { return 1; };
+    local *GlabGroups::_remove_service_user_direct_group_membership = sub { return 1; };
 
     local *GlabGroups::_get_group = sub {
         my ( $client, $group_path ) = @_;
@@ -1390,6 +1445,9 @@ HTML
     my %cache;
     my @payloads;
 
+    local *GlabGroups::_ensure_main_user_group_membership_owner = sub { return 1; };
+    local *GlabGroups::_remove_service_user_direct_group_membership = sub { return 1; };
+
     local *GlabGroups::_get_group = sub {
         my ( $client, $group_path ) = @_;
         return undef if $group_path eq "owner";
@@ -1407,7 +1465,72 @@ HTML
 
     my $group_id = GlabGroups::_ensure_group_path( {}, "owner", \%cache );
     is( $group_id, 7, "creates missing group" );
+    is( $payloads[0]->{project_creation_level}, "maintainer", "group creation sets maintainer project creation level" );
+    is( $payloads[0]->{shared_runners_setting}, "disabled_and_unoverridable", "group creation disables instance runners for descendants" );
+    is( $payloads[0]->{subgroup_creation_level}, "maintainer", "group creation allows maintainers to create subgroups" );
     ok( !exists $payloads[0]->{visibility}, "group creation payload does not set visibility" );
+}
+
+{
+    no warnings 'redefine';
+    my %cache = ( owner => 7 );
+    my @requests;
+
+    local *GlabGroups::_required_env_file = sub {
+        my ($name) = @_;
+        return "imcramer" if $name eq "GL_USER_FORK_MAIN";
+        die "unexpected required env file lookup: $name";
+    };
+
+    local *GlabGroups::_get_group = sub {
+        my ( $client, $group_path ) = @_;
+        return {
+            id => 11,
+            full_path => "owner/team",
+            path => "team",
+            project_creation_level => "developer",
+            shared_runners_setting => "enabled",
+            subgroup_creation_level => "owner",
+        } if $group_path eq "owner/team";
+        die "unexpected group lookup: $group_path";
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        push @requests, { method => $method, path => $path, payload => $payload };
+        return {
+            id => 11,
+            full_path => "owner/team",
+            path => "team",
+            project_creation_level => $payload->{project_creation_level},
+            shared_runners_setting => $payload->{shared_runners_setting},
+            subgroup_creation_level => $payload->{subgroup_creation_level},
+        } if $method eq "PUT" && $path eq "/groups/11";
+        return [ { id => 88, username => "imcramer" } ]
+          if $method eq "GET" && $path eq "/users?username=imcramer";
+        return undef
+          if $method eq "GET" && $path eq "/groups/11/members/88";
+        return { access_level => 50, id => 88 }
+          if $method eq "POST" && $path eq "/groups/11/members";
+        return { id => 55, username => "svc-glab" }
+          if $method eq "GET" && $path eq "/user";
+        return { access_level => 50, id => 55 }
+          if $method eq "GET" && $path eq "/groups/11/members/55";
+        return undef
+          if $method eq "DELETE" && $path eq "/groups/11/members/55";
+        die "unexpected gitlab request: $method $path";
+    };
+
+    my $group_id = GlabGroups::_ensure_group_path( {}, "owner/team", \%cache );
+    is( $group_id, 11, "reuses existing subgroup" );
+    is( $requests[0]->{path}, "/groups/11", "existing subgroup settings are updated through the groups API" );
+    is( $requests[0]->{payload}->{shared_runners_setting}, "disabled_and_unoverridable", "existing subgroup disables instance runners" );
+    is( $requests[0]->{payload}->{project_creation_level}, "maintainer", "existing subgroup uses maintainer project creation level" );
+    is( $requests[0]->{payload}->{subgroup_creation_level}, "maintainer", "existing subgroup uses maintainer subgroup creation level" );
+    is( $requests[1]->{path}, "/users?username=imcramer", "main owner username is resolved through the users API" );
+    is( $requests[3]->{path}, "/groups/11/members", "main user is added as a direct group member when missing" );
+    is( $requests[3]->{payload}->{access_level}, 50, "main user is set as direct owner on managed subgroups" );
+    is( $requests[-1]->{path}, "/groups/11/members/55", "service user direct subgroup membership is removed after owner reconciliation" );
 }
 
 {
@@ -1440,6 +1563,7 @@ HTML
     is( $requests[0]->{method}, "POST", "issues project creation API calls when target is missing" );
     is( $requests[0]->{path}, "/projects", "creates project through the GitLab projects API" );
     ok( !$requests[0]->{payload}->{group_runners_enabled}, "project creation disables group runners" );
+    ok( !$requests[0]->{payload}->{shared_runners_enabled}, "project creation disables instance runners" );
     ok( !exists $requests[0]->{payload}->{visibility}, "project creation payload does not set visibility" );
 }
 
@@ -1582,6 +1706,7 @@ HTML
             target_full_path => "owner/group/project",
             target_description => "old",
             target_group_runners_enabled => JSON::PP::true,
+            target_shared_runners_enabled => JSON::PP::true,
             target_lfs_enabled => JSON::PP::false,
             target_namespace_path => "owner/group",
             target_namespace_id => 42,
@@ -1591,6 +1716,7 @@ HTML
     ok( !$result->{created}, "does not create when project already exists" );
     ok( $result->{updated}, "updates existing target project metadata when needed" );
     ok( !$requests[0]->{payload}->{group_runners_enabled}, "project update disables group runners" );
+    ok( !$requests[0]->{payload}->{shared_runners_enabled}, "project update disables instance runners" );
     ok( !exists $requests[0]->{payload}->{visibility}, "project update payload does not set visibility" );
 
     GlabGroups::_finalize_target_project(
@@ -1662,6 +1788,7 @@ HTML
             target_description => "keep me",
             target_full_path => "glab-forks/labwc/darkman",
             target_group_runners_enabled => JSON::PP::false,
+            target_shared_runners_enabled => JSON::PP::false,
             target_lfs_enabled => JSON::PP::true,
             target_namespace_path => "glab-forks/labwc",
             target_namespace_id => 42,
@@ -1689,6 +1816,7 @@ HTML
             description => "source",
             group_runners_enabled => JSON::PP::false,
             lfs_enabled => JSON::PP::false,
+            shared_runners_enabled => JSON::PP::false,
         };
     };
 
@@ -1702,6 +1830,7 @@ HTML
             target_description => "source",
             target_full_path => "glab-forks/labwc/group-runners-drift",
             target_group_runners_enabled => JSON::PP::true,
+            target_shared_runners_enabled => JSON::PP::true,
             target_lfs_enabled => JSON::PP::false,
             target_namespace_path => "glab-forks/labwc",
             target_namespace_id => 42,
@@ -1712,6 +1841,7 @@ HTML
     ok( $result->{updated}, "existing projects update when group runners remain enabled" );
     is( scalar @requests, 1, "group runners drift triggers exactly one project update call" );
     ok( !$requests[0]->{payload}->{group_runners_enabled}, "group runners drift is corrected by disabling group runners" );
+    ok( !$requests[0]->{payload}->{shared_runners_enabled}, "instance runners drift is corrected by disabling instance runners" );
 }
 
 {
