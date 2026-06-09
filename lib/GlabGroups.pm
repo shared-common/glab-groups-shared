@@ -1583,7 +1583,7 @@ sub _ensure_main_user_group_membership_owner {
     return _ensure_named_user_group_membership_access( $client, $group_id, $main_username, 50 );
 }
 
-sub _remove_service_user_direct_group_membership {
+sub _ensure_service_user_group_membership_owner {
     my ( $client, $group_id ) = @_;
     my $user = _get_current_user($client);
     my $user_id = $user->{id};
@@ -1596,13 +1596,29 @@ sub _remove_service_user_direct_group_membership {
         undef,
         { allow_missing => 1 }
     );
-    return 1 unless $member;
+    if ( !$member ) {
+        _gitlab_request(
+            $client,
+            "POST",
+            "/groups/$group_id/members",
+            {
+                user_id => $user_id,
+                access_level => 50,
+            }
+        );
+        return 1;
+    }
+
+    my $access_level = $member->{access_level};
+    return 1 if defined $access_level && $access_level == 50;
 
     _gitlab_request(
         $client,
-        "DELETE",
+        "PUT",
         "/groups/$group_id/members/$user_id",
-        undef
+        {
+            access_level => 50,
+        }
     );
     return 1;
 }
@@ -1624,8 +1640,7 @@ sub _reconcile_managed_group {
     }
 
     _ensure_main_user_group_membership_owner( $client, $group->{id} );
-    _remove_service_user_direct_group_membership( $client, $group->{id} )
-      if defined $parent_id;
+    _ensure_service_user_group_membership_owner( $client, $group->{id} );
     return $group;
 }
 
@@ -1667,8 +1682,7 @@ sub _ensure_group_path {
         }
         if ($created_group) {
             _ensure_main_user_group_membership_owner( $client, $group->{id} );
-            _remove_service_user_direct_group_membership( $client, $group->{id} )
-              if defined $parent_id;
+            _ensure_service_user_group_membership_owner( $client, $group->{id} );
         }
         else {
             $group = _reconcile_managed_group( $client, $group, $parent_id );
