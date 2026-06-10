@@ -1604,6 +1604,59 @@ sub _find_group_by_parent_and_path {
     return undef;
 }
 
+sub _find_project_by_namespace_and_path {
+    my ( $client, $group_id, $project_path, $path_segment ) = @_;
+    defined $group_id or return undef;
+    my $expected_path = lc( _required_string( $path_segment, "project path segment" ) );
+    my $expected_full_path = lc( _required_string( $project_path, "target_full_path" ) );
+    my $search = uri_escape_utf8($path_segment);
+    my @path_builders = (
+        sub {
+            my ($page) = @_;
+            return sprintf(
+                "/groups/%d/projects?include_subgroups=false&with_shared=false&per_page=100&page=%d&search=%s&simple=true",
+                $group_id,
+                $page,
+                $search,
+            );
+        },
+        sub {
+            my ($page) = @_;
+            return sprintf(
+                "/groups/%d/projects?include_subgroups=false&with_shared=false&per_page=100&page=%d&simple=true",
+                $group_id,
+                $page,
+            );
+        },
+    );
+
+    for my $path_builder (@path_builders) {
+        my $page = 1;
+        while (1) {
+            my $path = $path_builder->($page);
+            my $projects = _gitlab_request( $client, "GET", $path, undef );
+            ref($projects) eq "ARRAY" or die "project search response must be a list\n";
+            last unless @{$projects};
+
+            for my $project ( @{$projects} ) {
+                next unless ref($project) eq "HASH";
+                my $candidate_full_path = lc( $project->{path_with_namespace} || q{} );
+                return $project if $candidate_full_path eq $expected_full_path;
+            }
+            for my $project ( @{$projects} ) {
+                next unless ref($project) eq "HASH";
+                my $candidate_path = lc( $project->{path} || q{} );
+                return $project if $candidate_path eq $expected_path;
+            }
+
+            last if @{$projects} < 100;
+            $page++;
+        }
+    }
+
+    return undef;
+}
+
 sub _is_gitlab_path_conflict_error {
     my ($error) = @_;
     return 0 unless defined $error && !ref($error);
@@ -1682,6 +1735,7 @@ sub _ensure_target_project {
     if ( !$existing && defined $entry->{target_full_path} ) {
         $existing = _get_project( $client, $entry->{target_full_path} );
     }
+    my $name = basename( $entry->{target_full_path} );
     my $target_group_id;
     if ( !$existing && defined $entry->{target_namespace_path} ) {
         $target_group_id = _ensure_group_path(
@@ -1689,8 +1743,15 @@ sub _ensure_target_project {
             $entry->{target_namespace_path},
             $group_cache,
         );
+        if ( !$existing && defined $entry->{target_full_path} ) {
+            $existing = _find_project_by_namespace_and_path(
+                $client,
+                $target_group_id,
+                $entry->{target_full_path},
+                $name,
+            );
+        }
     }
-    my $name = basename( $entry->{target_full_path} );
     my %payload;
     if ( !exists( $entry->{source_description_known} ) || $entry->{source_description_known} ) {
         $payload{description} = $entry->{source_description};
@@ -1737,6 +1798,14 @@ sub _ensure_target_project {
             my $create_error = $@ || "unknown project creation error\n";
             $project = _get_project( $client, $entry->{target_full_path} )
               if defined $entry->{target_full_path};
+            if ( !$project && defined $target_group_id && defined $entry->{target_full_path} ) {
+                $project = _find_project_by_namespace_and_path(
+                    $client,
+                    $target_group_id,
+                    $entry->{target_full_path},
+                    $name,
+                );
+            }
             if ($project) {
                 $created = JSON::PP::false;
             }
@@ -1762,10 +1831,27 @@ sub _ensure_target_project {
                     $create_error = $@ || "unknown project creation error\n";
                     $project = _get_project( $client, $entry->{target_full_path} )
                       if defined $entry->{target_full_path};
+                    if ( !$project && defined $target_group_id && defined $entry->{target_full_path} ) {
+                        $project = _find_project_by_namespace_and_path(
+                            $client,
+                            $target_group_id,
+                            $entry->{target_full_path},
+                            $name,
+                        );
+                    }
                 }
             }
             if ( !$created && !$project && _is_gitlab_path_conflict_error($create_error) ) {
-                $project = _get_project( $client, $entry->{target_full_path} );
+                $project = _get_project( $client, $entry->{target_full_path} )
+                  if defined $entry->{target_full_path};
+                if ( !$project && defined $target_group_id && defined $entry->{target_full_path} ) {
+                    $project = _find_project_by_namespace_and_path(
+                        $client,
+                        $target_group_id,
+                        $entry->{target_full_path},
+                        $name,
+                    );
+                }
                 die "gitlab project path conflict for $entry->{target_full_path}: $create_error" unless $project;
             }
             elsif ( !$created && !$project ) {

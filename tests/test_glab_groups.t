@@ -1696,6 +1696,12 @@ HTML
     local *GlabGroups::_gitlab_request = sub {
         my ( $client, $method, $path, $payload, $opt ) = @_;
         push @requests, { method => $method, path => $path, payload => $payload };
+        return []
+          if $method eq "GET"
+          && (
+            $path eq "/groups/42/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&search=project&simple=true"
+            || $path eq "/groups/42/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&simple=true"
+          );
         return { id => 99, archived => JSON::PP::false };
     };
 
@@ -1712,11 +1718,12 @@ HTML
     );
     ok( $result->{created}, "creates missing target project" );
     is_deeply( \@resolved_namespaces, [ "owner/group" ], "project creation resolves the target namespace path on demand" );
-    is( $requests[0]->{method}, "POST", "issues project creation API calls when target is missing" );
-    is( $requests[0]->{path}, "/projects", "creates project through the GitLab projects API" );
-    ok( !$requests[0]->{payload}->{group_runners_enabled}, "project creation disables group runners" );
-    ok( !$requests[0]->{payload}->{shared_runners_enabled}, "project creation disables instance runners" );
-    ok( !exists $requests[0]->{payload}->{visibility}, "project creation payload does not set visibility" );
+    my ($create_request) = grep { $_->{method} eq "POST" && $_->{path} eq "/projects" } @requests;
+    ok( $create_request, "issues project creation API calls when target is missing" );
+    is( $create_request->{path}, "/projects", "creates project through the GitLab projects API" );
+    ok( !$create_request->{payload}->{group_runners_enabled}, "project creation disables group runners" );
+    ok( !$create_request->{payload}->{shared_runners_enabled}, "project creation disables instance runners" );
+    ok( !exists $create_request->{payload}->{visibility}, "project creation payload does not set visibility" );
 }
 
 {
@@ -1760,6 +1767,129 @@ HTML
 {
     no warnings 'redefine';
     my @requests;
+    my @resolved_namespaces;
+    my $project_search_calls = 0;
+
+    local *GlabGroups::_get_project = sub {
+        return undef;
+    };
+
+    local *GlabGroups::_ensure_group_path = sub {
+        my ( $client, $group_path, $cache ) = @_;
+        push @resolved_namespaces, $group_path;
+        return 77;
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        push @requests, { method => $method, path => $path, payload => $payload };
+        return [
+            {
+                id => 654,
+                archived => JSON::PP::false,
+                description => "existing",
+                group_runners_enabled => JSON::PP::false,
+                lfs_enabled => JSON::PP::false,
+                path => "project",
+                path_with_namespace => "owner/group/project",
+                shared_runners_enabled => JSON::PP::false,
+            },
+        ] if $method eq "GET"
+          && (
+            $path eq "/groups/77/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&search=project&simple=true"
+            || $path eq "/groups/77/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&simple=true"
+          );
+        die "unexpected gitlab request: $method $path";
+    };
+
+    my $result = GlabGroups::_ensure_target_project(
+        {},
+        {
+            policy => { force_lfs => JSON::PP::false },
+            source_archived => JSON::PP::false,
+            source_description => "existing",
+            source_lfs_enabled => JSON::PP::false,
+            target_full_path => "owner/group/project",
+            target_namespace_path => "owner/group",
+        }
+    );
+    ok( !$result->{created}, "reuses an existing target project found by namespace-scoped project search" );
+    is_deeply( \@resolved_namespaces, [ "owner/group" ], "existing project fallback still resolves the exact target namespace path once" );
+    is(
+        scalar( grep { $_->{method} eq "POST" && $_->{path} eq "/projects" } @requests ),
+        0,
+        "namespace-scoped existing project fallback avoids unnecessary project creation attempts",
+    );
+}
+
+{
+    no warnings 'redefine';
+    my @requests;
+    my @resolved_namespaces;
+    my $project_search_calls = 0;
+
+    local *GlabGroups::_get_project = sub {
+        return undef;
+    };
+
+    local *GlabGroups::_ensure_group_path = sub {
+        my ( $client, $group_path, $cache ) = @_;
+        push @resolved_namespaces, $group_path;
+        return 77;
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        push @requests, { method => $method, path => $path, payload => $payload };
+        die "gitlab request failed [400] POST /projects: {\"message\":{\"base\":[\"path has already been taken\"]}}\n"
+          if $method eq "POST" && $path eq "/projects";
+        if ( $method eq "GET"
+            && (
+                $path eq "/groups/77/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&search=project&simple=true"
+                || $path eq "/groups/77/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&simple=true"
+            ) )
+        {
+            $project_search_calls++;
+            return [] if $project_search_calls <= 2;
+            return [
+                {
+                    id => 655,
+                    archived => JSON::PP::false,
+                    description => "existing",
+                    group_runners_enabled => JSON::PP::false,
+                    lfs_enabled => JSON::PP::false,
+                    path => "project",
+                    path_with_namespace => "owner/group/project",
+                    shared_runners_enabled => JSON::PP::false,
+                },
+            ];
+        }
+        die "unexpected gitlab request: $method $path";
+    };
+
+    my $result = GlabGroups::_ensure_target_project(
+        {},
+        {
+            policy => { force_lfs => JSON::PP::false },
+            source_archived => JSON::PP::false,
+            source_description => "existing",
+            source_lfs_enabled => JSON::PP::false,
+            target_full_path => "owner/group/project",
+            target_namespace_path => "owner/group",
+        }
+    );
+    ok( !$result->{created}, "reuses an existing target project after a create path conflict" );
+    is_deeply( \@resolved_namespaces, [ "owner/group" ], "path conflict recovery keeps the target namespace resolution stable" );
+    is(
+        scalar( grep { $_->{method} eq "POST" && $_->{path} eq "/projects" } @requests ),
+        1,
+        "path conflict recovery attempts project creation only once before reusing the existing target",
+    );
+}
+
+{
+    no warnings 'redefine';
+    my @requests;
     my @ensured_groups;
 
     local *GlabGroups::_get_project = sub {
@@ -1779,6 +1909,12 @@ HTML
     local *GlabGroups::_gitlab_request = sub {
         my ( $client, $method, $path, $payload, $opt ) = @_;
         push @requests, { method => $method, path => $path, payload => $payload };
+        return []
+          if $method eq "GET"
+          && (
+            $path eq "/groups/77/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&search=project&simple=true"
+            || $path eq "/groups/77/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&simple=true"
+          );
         return { id => 123, archived => JSON::PP::false };
     };
 
@@ -1795,7 +1931,8 @@ HTML
     );
     ok( $result->{created}, "creates missing target project after resolving the target namespace on demand" );
     is_deeply( \@ensured_groups, [ "owner/group" ], "resolves the target namespace only when project preparation needs it" );
-    is( $requests[0]->{payload}->{namespace_id}, 77, "project creation uses the resolved namespace id" );
+    my ($create_request) = grep { $_->{method} eq "POST" && $_->{path} eq "/projects" } @requests;
+    is( $create_request->{payload}->{namespace_id}, 77, "project creation uses the resolved namespace id" );
 }
 
 {
@@ -1816,6 +1953,12 @@ HTML
     local *GlabGroups::_gitlab_request = sub {
         my ( $client, $method, $path, $payload, $opt ) = @_;
         push @requests, { method => $method, path => $path, payload => $payload };
+        return []
+          if $method eq "GET"
+          && (
+            $path eq "/groups/88/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&search=crowdsec&simple=true"
+            || $path eq "/groups/88/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&simple=true"
+          );
         return { id => 123, archived => JSON::PP::false };
     };
 
@@ -1858,6 +2001,12 @@ HTML
     local *GlabGroups::_gitlab_request = sub {
         my ( $client, $method, $path, $payload, $opt ) = @_;
         push @requests, { method => $method, path => $path, payload => $payload };
+        return []
+          if $method eq "GET"
+          && (
+            $path eq "/groups/42/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&search=user-recovery-tools&simple=true"
+            || $path eq "/groups/42/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&simple=true"
+          );
         die "gitlab request failed [400] POST /projects: {\"message\":{\"namespace\":[\"is not valid\"]}}\n"
           if $method eq "POST"
           && $path eq "/projects"
@@ -1924,6 +2073,12 @@ HTML
     local *GlabGroups::_gitlab_request = sub {
         my ( $client, $method, $path, $payload, $opt ) = @_;
         push @requests, { method => $method, path => $path, payload => $payload };
+        return []
+          if $method eq "GET"
+          && (
+            $path eq "/groups/42/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&search=user-recovery-tools&simple=true"
+            || $path eq "/groups/42/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&simple=true"
+          );
         die "gitlab request failed [400] POST /projects: {\"message\":{\"namespace_id\":[\"does not exist\"]}}\n"
           if $method eq "POST"
           && $path eq "/projects"
