@@ -20,8 +20,9 @@ Wrapper repositories call `.github/workflows/group-sync-core.yml` and pass:
 - BWS access secrets for target GitLab credentials
 
 The shared workflow uploads plan, result, report, CSV, JSON, and optional
-Parquet artifacts on every run, and also appends JSONL cache and run summaries
-to the dedicated `glab-groups-metadata` repository.
+Parquet artifacts on every run. Source inventory reuse is handled only through
+the GitHub Actions cache; target GitLab group resolution stays path-based and
+in-memory for the lifetime of each mirror job.
 
 Config directories can use `.json`, `.yml`, or `.yaml` files.
 
@@ -85,7 +86,7 @@ and authenticates with:
 
 Target group and project visibility is not created, updated, or finalized by
 this workflow. Configure visibility directly on the target GitLab owner/group
-outside the mirror run to avoid denied metadata writes and rate-limit pressure.
+outside the mirror run to avoid denied admin writes and unnecessary API churn.
 
 Explicit single-project configs instead provide a full `target_group_path`
 such as `glab-forks/labwc`; the runtime creates or updates the target project
@@ -110,7 +111,9 @@ Managed projects are reconciled to:
 The planning phase does not pre-create missing target groups or recursively
 inventory the full target namespace tree. It builds subgroup-aware batches so a
 missing subgroup is created only when that subgroup's mirror work runs, then
-the repositories beneath that subgroup are mirrored in the same job.
+the repositories beneath that subgroup are mirrored in the same job. Target
+group IDs are resolved live from the configured path and cached only inside the
+current mirror job.
 
 ## Ref selection
 
@@ -147,14 +150,14 @@ protect `gitlab/mcr/main`.
 Those `mcr/*` branches are one-shot target bootstrap branches. They are not
 force-synced from source on later runs.
 
-Plan runs also reuse a cached normalized source inventory artifact between
-workflow runs when the cache is still fresh. The shared workflow now defaults to
-reusing inventories for up to 5 days and rewrites the cache after rediscovery.
+Plan runs reuse a cached normalized source inventory artifact between workflow
+runs when the cache is still fresh. The shared workflow defaults to reusing
+inventories for up to 5 days and rewrites the cache after rediscovery.
 
 ## Validation
 
 ```sh
 perl -c .github/scripts/glab_groups.pl
 prove -Ilib tests/test_glab_groups.t
-python3 -m unittest discover -s tests -p 'test_post_run_analytics.py'
+python3 -m unittest discover -s tests -p 'test_*.py'
 ```

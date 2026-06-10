@@ -37,7 +37,7 @@ class SharedWorkflowContractTests(unittest.TestCase):
 
     def test_uses_config_specific_target_pat_secret(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("mirror-secret-list: ${{ steps.config_meta.outputs.mirror-secrets }}", text)
+        self.assertIn("mirror-secret-list: ${{ steps.config_meta.outputs.secret-list }}", text)
         self.assertIn("target-token-secret:", text)
         self.assertIn("GL_PAT_GROUP_ANDROID_SVC", text)
         self.assertIn("GL_PAT_GROUP_CHROMIUM_SVC", text)
@@ -59,11 +59,9 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("glab-groups-openai", text)
         self.assertIn("glab-groups-nvidia", text)
         self.assertIn("GL_TARGET_TOKEN_SECRET_NAME: ${{ inputs.target-token-secret }}", text)
-        self.assertIn("plan-secrets=", text)
-        self.assertIn("mirror-secrets=", text)
-        self.assertIn("secrets: ${{ steps.config_meta.outputs.plan-secrets }}", text)
+        self.assertIn("secret-list=", text)
+        self.assertIn("secrets: ${{ steps.config_meta.outputs.secret-list }}", text)
         self.assertIn("secrets: ${{ needs.plan.outputs.mirror-secret-list }}", text)
-        self.assertIn("GH_SSH_GROUPS_METADATA_KEY", text)
         self.assertIn("GH_ORG_READ_APP_ID", text)
         self.assertIn("GH_ORG_READ_APP_INSTALL_ID", text)
         self.assertIn("GH_ORG_READ_APP_PEM", text)
@@ -81,11 +79,7 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn('[[ ! "${ref_value}" =~ ^[0-9a-f]{40}$ ]]', text)
         self.assertNotIn('config_meta_json="$(', text)
         self.assertNotIn("NEEDS_GITHUB_SOURCE_AUTH", text)
-        self.assertEqual(
-            text.count("python3 shared/.github/scripts/write_github_output_multiline.py"),
-            2,
-        )
-        self.assertNotIn("cat .secrets/GH_SSH_GROUPS_METADATA_KEY", text)
+        self.assertNotIn("python3 shared/.github/scripts/write_github_output_multiline.py", text)
 
     def test_report_aggregates_batch_artifacts(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
@@ -93,7 +87,7 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("merge-multiple: true", text)
         self.assertIn("results-artifacts/results-*.json", text)
         self.assertIn("results-artifacts/results-*.jsonl", text)
-        self.assertIn("results-artifacts/target-groups-*.jsonl", text)
+        self.assertNotIn("results-artifacts/target-groups-*.jsonl", text)
         self.assertNotIn("Fail on mirror failures", text)
 
     def test_step_summary_is_bounded(self) -> None:
@@ -120,7 +114,6 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("--discover-output discover.json", text)
         self.assertIn("--inventory-output \"inventory-cache/discover.json\"", text)
         self.assertIn('--inventory-max-age-seconds "${{ steps.config_meta.outputs.inventory-cache-max-age-seconds }}"', text)
-        self.assertIn('--target-group-cache-input "metadata/cache/${{ inputs.config-path }}/target-groups.jsonl"', text)
         self.assertIn('FORCE_REFRESH_DISCOVERY: ${{ inputs.force-refresh-discovery }}', text)
         self.assertIn('if [ "${FORCE_REFRESH_DISCOVERY}" != "true" ]; then', text)
         self.assertIn('inventory_args+=(--inventory-input "inventory-cache/discover.json")', text)
@@ -132,15 +125,11 @@ class SharedWorkflowContractTests(unittest.TestCase):
         )
         self.assertNotIn("format('glab-groups-inventory-{0}-', inputs.config-path)", text)
 
-    def test_metadata_repo_is_read_and_written(self) -> None:
+    def test_metadata_repo_is_not_used(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("repository: shared-common/glab-groups-metadata", text)
-        self.assertIn("path: metadata", text)
-        self.assertIn("python3 shared/.github/scripts/update_metadata_repo.py", text)
-        self.assertIn('metadata_paths=(', text)
-        self.assertIn('mkdir -p "${metadata_path}"', text)
-        self.assertIn('git add -A -- "${metadata_paths[@]}"', text)
-        self.assertIn('git push origin HEAD:main', text)
+        self.assertNotIn("shared-common/glab-groups-metadata", text)
+        self.assertNotIn("update_metadata_repo.py", text)
+        self.assertNotIn("target-groups-${{ matrix.shard_index }}.jsonl", text)
 
 
 if __name__ == "__main__":

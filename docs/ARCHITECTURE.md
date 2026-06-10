@@ -32,15 +32,15 @@ each job processes a deterministic subset of target-group-aware batches while
 GitHub Actions runs at most five jobs concurrently. Batch construction never
 splits one target subgroup across multiple mirror jobs. The final report job
 downloads all batch artifacts, aggregates them into one report, CSV, JSON
-analytics file, optional Parquet file, and appends JSONL run/cache records to
-the dedicated metadata repository.
+analytics file, and optional Parquet file, then publishes those artifacts back
+to the workflow run.
 
 ## Planning model
 
 The plan includes:
 
 - source project id and full path
-- target full path and any already-known target namespace id
+- target full path and target namespace path
 - source inventory fields required for mirroring and verification
 - target-group-aware batches built from contiguous namespace ranges so each
   subgroup is created and mirrored in one job
@@ -50,8 +50,8 @@ The plan includes:
   - `fail`
 
 Planning no longer crawls the entire target namespace tree to precompute project
-state. It seeds known target namespace IDs from checked-in config and preserved
-metadata, then defers missing subgroup and project creation to the mirror step.
+state. It keeps the target path only and defers live target group resolution
+and missing subgroup creation to the mirror step.
 
 The plan job can also reuse a cached normalized source inventory between
 workflow runs. When the cached inventory is still fresh, the plan step skips
@@ -73,9 +73,8 @@ The mirror stage:
   instead of relying on one source-specific integration path
 - can use GitLab `include_subgroups=true` project enumeration for source group
   discovery when the config enables `gitlab_source_include_subgroups`
-- persists GitLab-backed source group IDs and target group IDs to append-only
-  JSONL metadata so later runs can reuse stable identifiers instead of relying
-  only on path lookups
+- resolves target groups by full path and caches the resulting GitLab IDs only
+  in memory for the lifetime of each mirror job
 - authenticates GitHub-source discovery and Git-over-HTTPS mirroring with the
   shared GitHub App by generating a JWT, resolving the source-account
   installation, and minting short-lived installation access tokens

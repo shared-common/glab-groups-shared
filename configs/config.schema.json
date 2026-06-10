@@ -273,10 +273,6 @@
             },
             "target_namespace_path": {
               "$ref": "#/$defs/namespacePath"
-            },
-            "target_namespace_id": {
-              "type": "integer",
-              "minimum": 1
             }
           }
         }
@@ -300,10 +296,6 @@
             },
             "source_project_url": {
               "$ref": "#/$defs/httpsUrl"
-            },
-            "target_group_id": {
-              "type": "integer",
-              "minimum": 1
             },
             "target_group_path": {
               "$ref": "#/$defs/namespacePath"

@@ -397,7 +397,6 @@ sub _cmd_plan {
         inventory_output => q{},
         output => "plan.json",
         summary => "plan.md",
-        target_group_cache_input => q{},
     );
     GetOptionsFromArray(
         \@argv,
@@ -409,7 +408,6 @@ sub _cmd_plan {
         "inventory-max-age-seconds=i" => \$opt{inventory_max_age_seconds},
         "output=s" => \$opt{output},
         "summary=s" => \$opt{summary},
-        "target-group-cache-input=s" => \$opt{target_group_cache_input},
     ) or die _usage();
 
     my $config = load_config_dir( $opt{config_dir} );
@@ -426,9 +424,7 @@ sub _cmd_plan {
         $config,
         $normalized,
         $opt{batch_size},
-        {
-            target_group_cache_input => $opt{target_group_cache_input},
-        }
+        {},
     );
     $plan->{total_targets} > 0
       or die "discovery produced zero targets; refusing to continue with a no-op mirror plan\n";
@@ -494,51 +490,6 @@ sub _inventory_project_count {
         }
     }
     return $count;
-}
-
-sub _load_target_group_cache_seed {
-    my ( $config, $path ) = @_;
-    my %seed;
-
-    for my $namespace ( @{ $config->{namespaces} || [] } ) {
-        next unless ref($namespace) eq "HASH" && defined $namespace->{target_namespace_id};
-        my $group_path = _join_path(
-            _resolve_target_root_group_path($namespace),
-            $namespace->{target_namespace_path},
-        );
-        $seed{$group_path} = 0 + $namespace->{target_namespace_id};
-    }
-    for my $project ( @{ $config->{projects} || [] } ) {
-        next unless ref($project) eq "HASH" && defined $project->{target_group_id};
-        my $group_path = _required_relative_namespace_path(
-            $project->{target_group_path},
-            "project target_group_path",
-        );
-        $seed{$group_path} = 0 + $project->{target_group_id};
-    }
-
-    return \%seed if !$path || !-f $path;
-    for my $row ( @{ _read_jsonl($path) } ) {
-        next unless ref($row) eq "HASH";
-        next unless defined $row->{target_group_path} && defined $row->{target_group_id};
-        my $group_path = eval {
-            _required_relative_namespace_path(
-                $row->{target_group_path},
-                "target group cache target_group_path",
-            );
-        };
-        next unless $group_path;
-        my $group_id = eval {
-            _positive_int(
-                $row->{target_group_id},
-                "target group cache target_group_id",
-            );
-        };
-        next unless $group_id;
-        $seed{$group_path} = 0 + $group_id;
-    }
-
-    return \%seed;
 }
 
 sub _build_group_batches {
@@ -615,7 +566,6 @@ sub _cmd_mirror {
     my %opt = (
         output => "results.json",
         jsonl => "results.jsonl",
-        target_groups_jsonl => "target-groups.jsonl",
         batch_size => 25,
         batch_start => 0,
         batch_stride => 1,
@@ -626,7 +576,6 @@ sub _cmd_mirror {
         "plan=s" => \$opt{plan},
         "output=s" => \$opt{output},
         "jsonl=s" => \$opt{jsonl},
-        "target-groups-jsonl=s" => \$opt{target_groups_jsonl},
         "batch-size=i" => \$opt{batch_size},
         "batch-start=i" => \$opt{batch_start},
         "batch-stride=i" => \$opt{batch_stride},
@@ -641,15 +590,6 @@ sub _cmd_mirror {
     my $plan = _read_json( $opt{plan} );
     my $target_client = _load_target_client();
     my $source_auth = _load_source_auth();
-    my %group_cache_seed;
-    if ( ref( $plan->{target_group_cache_seed} ) eq "HASH" ) {
-        for my $path ( sort keys %{ $plan->{target_group_cache_seed} } ) {
-            my $group_id = $plan->{target_group_cache_seed}->{$path};
-            next unless defined $group_id;
-            $group_cache_seed{$path} = 0 + $group_id;
-        }
-    }
-    $target_client->{group_path_cache} = \%group_cache_seed;
     my @entries = @{ $plan->{plan} || [] };
     my @batches = @{ $plan->{batches} || [] };
     my $total_batches = scalar @batches;
@@ -687,10 +627,6 @@ sub _cmd_mirror {
         $processed_batches++;
     }
     close $jsonl_fh;
-    _write_jsonl_rows(
-        $opt{target_groups_jsonl},
-        _serialize_target_group_cache_rows( $target_client->{group_path_cache} || {} ),
-    );
 
     my $aggregate = _aggregate_results( \@results );
     _write_json(
@@ -971,10 +907,6 @@ sub _normalize_inventory {
 sub _build_plan {
     my ( $config, $inventory, $batch_size, $opt ) = @_;
     $opt ||= {};
-    my $target_group_cache_seed = _load_target_group_cache_seed(
-        $config,
-        $opt->{target_group_cache_input},
-    );
     my @plan;
     my %counts = (
         fail => 0,
@@ -1039,13 +971,7 @@ sub _build_plan {
                     source_ssh_url => $source_project->{ssh_url_to_repo},
                     source_visibility => $source_project->{visibility},
                     target_full_path => $target_full_path,
-                    target_namespace_locked =>
-                      defined $project_entry->{target_group_id} ? JSON::PP::true : JSON::PP::false,
                     target_relative_project_path => $target_full_path,
-                    target_namespace_id =>
-                      defined $project_entry->{target_group_id}
-                      ? 0 + $project_entry->{target_group_id}
-                      : $target_group_cache_seed->{$target_namespace_path},
                     target_namespace_path => $target_namespace_path,
                   };
             }
@@ -1111,17 +1037,7 @@ sub _build_plan {
                 source_ssh_url => $source_project->{ssh_url_to_repo},
                 source_visibility => $source_project->{visibility},
                 target_full_path => $target_full_path,
-                target_namespace_locked =>
-                  defined $namespace->{target_namespace_id}
-                  && $target_namespace_path eq _join_path( $target_root_path, $namespace->{target_namespace_path} )
-                  ? JSON::PP::true
-                  : JSON::PP::false,
                 target_relative_project_path => $target_relative_project_path,
-                target_namespace_id =>
-                  defined $namespace->{target_namespace_id}
-                  && $target_namespace_path eq _join_path( $target_root_path, $namespace->{target_namespace_path} )
-                  ? 0 + $namespace->{target_namespace_id}
-                  : $target_group_cache_seed->{$target_namespace_path},
                 target_namespace_path => $target_namespace_path,
               };
         }
@@ -1138,7 +1054,6 @@ sub _build_plan {
         counts => \%counts,
         generated_at => _timestamp(),
         plan => \@plan,
-        target_group_cache_seed => $target_group_cache_seed,
         total_batches => scalar @{$batches},
         total_groups => $total_groups,
         total_targets => scalar @plan,
@@ -1457,7 +1372,6 @@ sub _normalize_namespace {
         max_blob_bytes => _optional_bounded_positive_int( $payload->{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, "$label.max_blob_bytes" ),
         source_group_url => _required_https_url( $payload->{source_group_url}, "$label.source_group_url" ),
         target_branches_protect => _normalize_ref_specs( $payload->{target_branches_protect}, "$label.target_branches_protect" ),
-        target_namespace_id => _optional_positive_int( $payload->{target_namespace_id}, "$label.target_namespace_id" ),
         target_owner_path => _required_relative_namespace_path( $payload->{target_owner_path}, "$label.target_owner_path" ),
         target_namespace_path => _required_relative_namespace_path( $payload->{target_namespace_path}, "$label.target_namespace_path" ),
     };
@@ -1484,7 +1398,6 @@ sub _normalize_project {
         max_blob_bytes => _optional_bounded_positive_int( $payload->{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, "$label.max_blob_bytes" ),
         source_project_url => _required_https_url( $payload->{source_project_url}, "$label.source_project_url" ),
         target_branches_protect => _normalize_ref_specs( $payload->{target_branches_protect}, "$label.target_branches_protect" ),
-        target_group_id => _optional_positive_int( $payload->{target_group_id}, "$label.target_group_id" ),
         target_group_path => _required_relative_namespace_path( $payload->{target_group_path}, "$label.target_group_path" ),
     };
 }
@@ -1803,59 +1716,6 @@ sub _clear_group_path_cache_tree {
     }
 }
 
-sub _resolve_existing_group_path {
-    my ( $client, $group_path, $cache ) = @_;
-    return undef unless defined $group_path && length $group_path;
-    return $cache->{$group_path} if ref($cache) eq "HASH" && exists $cache->{$group_path};
-
-    my @parts = split m{/}, $group_path;
-    my $current = q{};
-    my $parent_id;
-    my $group;
-    for my $part (@parts) {
-        $current = length $current ? "$current/$part" : $part;
-        if ( ref($cache) eq "HASH" && exists $cache->{$current} ) {
-            $parent_id = $cache->{$current};
-            next;
-        }
-
-        $group = _get_group( $client, $current );
-        if ( !$group ) {
-            $group = _find_group_by_parent_and_path( $client, $parent_id, $current, $part );
-        }
-        return undef unless $group;
-        $parent_id = $group->{id};
-        $cache->{$current} = $parent_id if ref($cache) eq "HASH";
-    }
-
-    return $parent_id;
-}
-
-sub _resolve_target_namespace_id {
-    my ( $client, $entry, $group_cache ) = @_;
-    return undef unless defined $entry->{target_namespace_path};
-
-    my $group_path = $entry->{target_namespace_path};
-    return $group_cache->{$group_path} if exists $group_cache->{$group_path};
-
-    my $group = _get_group( $client, $group_path );
-    if ($group) {
-        my $group_id = 0 + $group->{id};
-        $group_cache->{$group_path} = $group_id;
-        return $group_id;
-    }
-
-    if ( defined $entry->{target_namespace_id} ) {
-        my $group_id = 0 + $entry->{target_namespace_id};
-        $group_cache->{$group_path} = $group_id;
-        return $group_id;
-    }
-
-    my $group_id = _ensure_group_path( $client, $group_path, $group_cache );
-    $group_cache->{$group_path} = $group_id;
-    return $group_id;
-}
-
 sub _ensure_target_project {
     my ( $client, $entry ) = @_;
     my $group_cache = $client->{group_path_cache} ||= {};
@@ -1878,10 +1738,11 @@ sub _ensure_target_project {
     if ( !$existing && defined $entry->{target_full_path} ) {
         $existing = _get_project( $client, $entry->{target_full_path} );
     }
+    my $target_group_id;
     if ( !$existing && defined $entry->{target_namespace_path} ) {
-        $entry->{target_namespace_id} = _resolve_target_namespace_id(
+        $target_group_id = _ensure_group_path(
             $client,
-            $entry,
+            $entry->{target_namespace_path},
             $group_cache,
         );
     }
@@ -1916,7 +1777,7 @@ sub _ensure_target_project {
                 {
                     %payload,
                     name => $name,
-                    namespace_id => $entry->{target_namespace_id},
+                    namespace_id => $target_group_id,
                     path => $name,
                 }
             );
@@ -1941,26 +1802,11 @@ sub _ensure_target_project {
               )
             {
                 _clear_group_path_cache_tree( $group_cache, $entry->{target_namespace_path} );
-                my $resolved_group_id = _resolve_existing_group_path(
+                $target_group_id = _ensure_group_path(
                     $client,
                     $entry->{target_namespace_path},
                     $group_cache,
                 );
-                if ($resolved_group_id) {
-                    $entry->{target_namespace_id} = 0 + $resolved_group_id;
-                    $group_cache->{ $entry->{target_namespace_path} } = $entry->{target_namespace_id};
-                }
-                else {
-                    if ( $entry->{target_namespace_locked} ) {
-                        die "configured target namespace path could not be resolved after invalid namespace response: $entry->{target_namespace_path}\n";
-                    }
-                    delete $entry->{target_namespace_id};
-                    $entry->{target_namespace_id} = _ensure_group_path(
-                        $client,
-                        $entry->{target_namespace_path},
-                        $group_cache,
-                    );
-                }
                 my $retry_ok = eval {
                     $project = $create_project->();
                     1;
@@ -3156,33 +3002,6 @@ sub _read_config_payload {
 sub _write_json {
     my ( $path, $payload ) = @_;
     _write_text( $path, JSON::PP->new->canonical(1)->utf8(1)->pretty(1)->encode($payload) );
-}
-
-sub _write_jsonl_rows {
-    my ( $path, $rows ) = @_;
-    my $dir = dirname($path);
-    make_path($dir) if $dir && !-d $dir;
-    open( my $fh, ">:encoding(UTF-8)", $path ) or die "unable to write $path\n";
-    for my $row ( @{$rows} ) {
-        print {$fh} $JSON->encode($row), "\n";
-    }
-    close $fh;
-}
-
-sub _serialize_target_group_cache_rows {
-    my ($cache) = @_;
-    my @rows;
-    for my $group_path ( sort keys %{$cache} ) {
-        my $group_id = $cache->{$group_path};
-        next unless defined $group_id;
-        push @rows,
-          {
-            recorded_at => _timestamp(),
-            target_group_id => 0 + $group_id,
-            target_group_path => $group_path,
-          };
-    }
-    return \@rows;
 }
 
 sub _write_text {

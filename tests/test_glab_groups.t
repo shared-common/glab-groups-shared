@@ -1005,7 +1005,6 @@ HTML
                 {
                     group_path => "root",
                     namespace => {
-                        target_namespace_id => 42,
                         target_owner_path => "owner",
                         target_namespace_path => "mirror",
                     },
@@ -1030,7 +1029,7 @@ HTML
     );
     is( $plan->{plan}->[0]->{action}, "sync", "target project state is resolved lazily during mirror execution" );
     ok( !defined $plan->{plan}->[0]->{skip_reason}, "missing target projects do not get a skip reason" );
-    is( $plan->{plan}->[0]->{target_namespace_id}, 42, "checked-in target namespace ids seed planning for known target roots" );
+    ok( !defined $plan->{plan}->[0]->{target_namespace_id}, "plan resolves target groups by path later instead of emitting namespace ids" );
 }
 
 {
@@ -1562,6 +1561,7 @@ HTML
 {
     no warnings 'redefine';
     my @requests;
+    my @resolved_namespaces;
 
     local *GlabGroups::_get_group = sub {
         my ( $client, $group_path ) = @_;
@@ -1611,6 +1611,7 @@ HTML
 {
     no warnings 'redefine';
     my @requests;
+    my @resolved_namespaces;
 
     local *GlabGroups::_gitlab_request = sub {
         my ( $client, $method, $path, $payload, $opt ) = @_;
@@ -1723,10 +1724,17 @@ HTML
 {
     no warnings 'redefine';
     my @requests;
+    my @resolved_namespaces;
 
     local *GlabGroups::_get_project = sub {
         my ( $client, $project_path ) = @_;
         return undef;
+    };
+
+    local *GlabGroups::_ensure_group_path = sub {
+        my ( $client, $group_path, $cache ) = @_;
+        push @resolved_namespaces, $group_path;
+        return 42;
     };
 
     local *GlabGroups::_gitlab_request = sub {
@@ -1743,10 +1751,11 @@ HTML
             source_description => "source",
             source_lfs_enabled => JSON::PP::false,
             target_full_path => "owner/group/project",
-            target_namespace_id => 42,
+            target_namespace_path => "owner/group",
         }
     );
     ok( $result->{created}, "creates missing target project" );
+    is_deeply( \@resolved_namespaces, [ "owner/group" ], "project creation resolves the target namespace path on demand" );
     is( $requests[0]->{method}, "POST", "issues project creation API calls when target is missing" );
     is( $requests[0]->{path}, "/projects", "creates project through the GitLab projects API" );
     ok( !$requests[0]->{payload}->{group_runners_enabled}, "project creation disables group runners" );
@@ -1785,7 +1794,6 @@ HTML
             source_description => "existing",
             source_lfs_enabled => JSON::PP::false,
             target_full_path => "owner/group/project",
-            target_namespace_id => 42,
             target_namespace_path => "owner/group",
         }
     );
@@ -1837,17 +1845,16 @@ HTML
 {
     no warnings 'redefine';
     my @requests;
-    my @group_lookups;
+    my @resolved_namespaces;
 
     local *GlabGroups::_get_project = sub {
         return undef;
     };
 
-    local *GlabGroups::_get_group = sub {
-        my ( $client, $group_path ) = @_;
-        push @group_lookups, $group_path;
-        return { id => 88, full_path => $group_path, path => "group" } if $group_path eq "glab-forks/crowdsecurity";
-        return undef;
+    local *GlabGroups::_ensure_group_path = sub {
+        my ( $client, $group_path, $cache ) = @_;
+        push @resolved_namespaces, $group_path;
+        return 88;
     };
 
     local *GlabGroups::_gitlab_request = sub {
@@ -1865,11 +1872,10 @@ HTML
             source_lfs_enabled => JSON::PP::false,
             target_full_path => "glab-forks/crowdsecurity/crowdsec",
             target_namespace_path => "glab-forks/crowdsecurity",
-            target_namespace_id => 42,
         }
     );
     ok( $result->{created}, "creates missing target project after resolving the live target group id" );
-    is_deeply( \@group_lookups, [ "glab-forks/crowdsecurity" ], "checks the exact locked namespace path before creating the target project" );
+    is_deeply( \@resolved_namespaces, [ "glab-forks/crowdsecurity" ], "checks the exact target namespace path before creating the target project" );
     is_deeply(
         [ map { $_->{payload}->{namespace_id} } grep { $_->{method} eq "POST" && $_->{path} eq "/projects" } @requests ],
         [88],
@@ -1880,20 +1886,17 @@ HTML
 {
     no warnings 'redefine';
     my @requests;
-    my @group_lookups;
-    my $lookup_count = 0;
+    my @resolved_namespaces;
+    my @resolved_ids = ( 42, 77 );
 
     local *GlabGroups::_get_project = sub {
         return undef;
     };
 
-    local *GlabGroups::_get_group = sub {
-        my ( $client, $group_path ) = @_;
-        push @group_lookups, $group_path;
-        $lookup_count++;
-        return undef if $group_path eq "glab-forks";
-        return { id => 77, full_path => $group_path, path => "google" } if $group_path eq "glab-forks/google" && $lookup_count >= 2;
-        return undef;
+    local *GlabGroups::_ensure_group_path = sub {
+        my ( $client, $group_path, $cache ) = @_;
+        push @resolved_namespaces, $group_path;
+        return shift @resolved_ids;
     };
 
     local *GlabGroups::_gitlab_request = sub {
@@ -1931,7 +1934,6 @@ HTML
             source_lfs_enabled => JSON::PP::false,
             target_full_path => "glab-forks/google/user-recovery-tools",
             target_namespace_path => "glab-forks/google",
-            target_namespace_id => 42,
         }
     );
     ok( $result->{created}, "retries project creation after refreshing an invalid target namespace id" );
@@ -1941,29 +1943,26 @@ HTML
         "invalid namespace retries use the refreshed target group id",
     );
     is_deeply(
-        \@group_lookups,
-        [ "glab-forks/google", "glab-forks", "glab-forks/google" ],
-        "invalid namespace refresh first checks the exact target namespace path, then falls back to parent and subgroup lookup when needed",
+        \@resolved_namespaces,
+        [ "glab-forks/google", "glab-forks/google" ],
+        "invalid namespace refresh re-resolves the exact target namespace path before retrying",
     );
 }
 
 {
     no warnings 'redefine';
     my @requests;
-    my @group_lookups;
-    my $lookup_count = 0;
+    my @resolved_namespaces;
+    my @resolved_ids = ( 42, 77 );
 
     local *GlabGroups::_get_project = sub {
         return undef;
     };
 
-    local *GlabGroups::_get_group = sub {
-        my ( $client, $group_path ) = @_;
-        push @group_lookups, $group_path;
-        $lookup_count++;
-        return undef if $group_path eq "glab-forks";
-        return { id => 77, full_path => $group_path, path => "google" } if $group_path eq "glab-forks/google" && $lookup_count >= 2;
-        return undef;
+    local *GlabGroups::_ensure_group_path = sub {
+        my ( $client, $group_path, $cache ) = @_;
+        push @resolved_namespaces, $group_path;
+        return shift @resolved_ids;
     };
 
     local *GlabGroups::_gitlab_request = sub {
@@ -2001,7 +2000,6 @@ HTML
             source_lfs_enabled => JSON::PP::false,
             target_full_path => "glab-forks/google/user-recovery-tools",
             target_namespace_path => "glab-forks/google",
-            target_namespace_id => 42,
         }
     );
     ok( $result->{created}, "retries project creation after refreshing a namespace_id does not exist error" );
@@ -2010,65 +2008,10 @@ HTML
         [ 42, 77 ],
         "stale configured namespace ids are refreshed even when GitLab reports namespace_id does not exist",
     );
-}
-
-{
-    no warnings 'redefine';
-    my @requests;
-    my @ensured_groups;
-
-    local *GlabGroups::_get_project = sub {
-        return undef;
-    };
-
-    local *GlabGroups::_get_group = sub {
-        my ( $client, $group_path ) = @_;
-        return undef;
-    };
-
-    local *GlabGroups::_ensure_group_path = sub {
-        my ( $client, $group_path, $cache ) = @_;
-        push @ensured_groups, $group_path;
-        return 99;
-    };
-
-    local *GlabGroups::_gitlab_request = sub {
-        my ( $client, $method, $path, $payload, $opt ) = @_;
-        push @requests, { method => $method, path => $path, payload => $payload };
-        die "gitlab request failed [400] POST /projects: {\"message\":{\"namespace\":[\"is not valid\"]}}\n"
-          if $method eq "POST" && $path eq "/projects";
-        return [] if $method eq "GET" && $path eq "/groups?top_level_only=true&per_page=100&page=1&search=glab-forks";
-        return [] if $method eq "GET" && $path eq "/groups?top_level_only=true&per_page=100&page=1&all_available=true";
-        die "unexpected request: $method $path";
-    };
-
-    my $error = eval {
-        GlabGroups::_ensure_target_project(
-            {},
-            {
-                policy => { force_lfs => JSON::PP::false },
-                source_archived => JSON::PP::false,
-                source_description => "source",
-                source_lfs_enabled => JSON::PP::false,
-                target_full_path => "glab-forks/labwc/darkman",
-                target_namespace_id => 42,
-                target_namespace_locked => JSON::PP::true,
-                target_namespace_path => "glab-forks/labwc",
-            }
-        );
-        1;
-    };
-    my $error_text = $@;
-    ok( !$error, "locked configured target namespaces fail closed when GitLab rejects the namespace id" );
-    like(
-        $error_text,
-        qr/configured target namespace path could not be resolved after invalid namespace response: glab-forks\/labwc/,
-        "locked target namespace errors explain that the configured group path was not resolved",
-    );
-    is_deeply( \@ensured_groups, [], "locked configured target namespaces never fall through to group creation" );
-    ok(
-        !grep( { $_->{method} eq "POST" && $_->{path} eq "/groups" } @requests ),
-        "locked configured target namespaces never attempt group creation",
+    is_deeply(
+        \@resolved_namespaces,
+        [ "glab-forks/google", "glab-forks/google" ],
+        "namespace_id does not exist retries re-resolve the same target path before retrying",
     );
 }
 
@@ -2096,7 +2039,6 @@ HTML
                     target_full_path => "owner/group/project-a",
                 },
             ],
-            target_group_cache_seed => {},
         }
     );
 
@@ -2190,7 +2132,6 @@ HTML
             target_shared_runners_enabled => JSON::PP::true,
             target_lfs_enabled => JSON::PP::false,
             target_namespace_path => "owner/group",
-            target_namespace_id => 42,
             target_project_id => 99,
         }
     );
@@ -2272,7 +2213,6 @@ HTML
             target_shared_runners_enabled => JSON::PP::false,
             target_lfs_enabled => JSON::PP::true,
             target_namespace_path => "glab-forks/labwc",
-            target_namespace_id => 42,
             target_project_id => 77,
         }
     );
@@ -2314,7 +2254,6 @@ HTML
             target_shared_runners_enabled => JSON::PP::true,
             target_lfs_enabled => JSON::PP::false,
             target_namespace_path => "glab-forks/labwc",
-            target_namespace_id => 42,
             target_project_id => 88,
         }
     );

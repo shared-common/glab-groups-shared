@@ -58,7 +58,7 @@ jobs:
       contents: read
     outputs:
       batch-matrix: ${{ steps.batch_matrix.outputs.matrix }}
-      mirror-secret-list: ${{ steps.config_meta.outputs.mirror-secrets }}
+      mirror-secret-list: ${{ steps.config_meta.outputs.secret-list }}
     steps:
       - name: Validate workflow inputs
         shell: bash
@@ -249,20 +249,18 @@ jobs:
               }
           }
 
-          my @mirror_secret_names = (
+          my @secret_names = (
               "GL_BASE_URL",
               $target_token_secret,
           );
           if ($needs_github_source_auth) {
-              push @mirror_secret_names, "GH_ORG_READ_APP_ID", "GH_ORG_READ_APP_INSTALL_ID", "GH_ORG_READ_APP_PEM";
+              push @secret_names, "GH_ORG_READ_APP_ID", "GH_ORG_READ_APP_INSTALL_ID", "GH_ORG_READ_APP_PEM";
           }
-          my @plan_secret_names = ( "GH_SSH_GROUPS_METADATA_KEY", @mirror_secret_names );
 
           open( my $fh, ">>:encoding(UTF-8)", $github_output )
             or die "unable to append to \$GITHUB_OUTPUT: $github_output\n";
           print {$fh} "inventory-cache-max-age-seconds=", $config->{defaults}->{inventory_cache_max_age_seconds}, "\n";
-          print {$fh} "plan-secrets=", join( ",", @plan_secret_names ), "\n";
-          print {$fh} "mirror-secrets=", join( ",", @mirror_secret_names ), "\n";
+          print {$fh} "secret-list=", join( ",", @secret_names ), "\n";
           close $fh;
           PERL
 
@@ -274,36 +272,16 @@ jobs:
           project-id: ${{ secrets.BWS_PROJECT_ID }}
           bws-version: ${{ inputs.bws-version }}
           bws-sha256: ${{ inputs.bws-sha256 }}
-          secrets: ${{ steps.config_meta.outputs.plan-secrets }}
+          secrets: ${{ steps.config_meta.outputs.secret-list }}
           output-dir: .secrets
 
       - name: Mask fetched secrets
         shell: bash
         env:
-          SECRET_NAMES: ${{ steps.config_meta.outputs.plan-secrets }}
+          SECRET_NAMES: ${{ steps.config_meta.outputs.secret-list }}
         run: |
           set -euo pipefail
           python3 shared/.github/scripts/mask_secret_files.py
-
-      - name: Load metadata repository SSH key
-        id: metadata_key
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 shared/.github/scripts/write_github_output_multiline.py \
-            --output-file "${GITHUB_OUTPUT}" \
-            --name 'ssh-key' \
-            --value-file .secrets/GH_SSH_GROUPS_METADATA_KEY
-
-      - name: Checkout metadata repository
-        # actions/checkout v6.0.2
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-        with:
-          repository: shared-common/glab-groups-metadata
-          ref: main
-          path: metadata
-          persist-credentials: false
-          ssh-key: ${{ steps.metadata_key.outputs.ssh-key }}
 
       - name: Build deterministic plan
         shell: bash
@@ -328,8 +306,7 @@ jobs:
             --discover-output discover.json \
             "${inventory_args[@]}" \
             --output plan.json \
-            --summary plan.md \
-            --target-group-cache-input "metadata/cache/${{ inputs.config-path }}/target-groups.jsonl"
+            --summary plan.md
 
       - name: Build mirror batch matrix
         id: batch_matrix
@@ -439,8 +416,7 @@ jobs:
             --batch-stride "${{ matrix.batch_stride }}" \
             --batch-limit "${{ matrix.batch_limit }}" \
             --output "results-${{ matrix.shard_index }}.json" \
-            --jsonl "results-${{ matrix.shard_index }}.jsonl" \
-            --target-groups-jsonl "target-groups-${{ matrix.shard_index }}.jsonl"
+            --jsonl "results-${{ matrix.shard_index }}.jsonl"
 
       - name: Upload batch result artifacts
         # actions/upload-artifact v7.0.1
@@ -451,7 +427,6 @@ jobs:
           path: |
             results-${{ matrix.shard_index }}.json
             results-${{ matrix.shard_index }}.jsonl
-            target-groups-${{ matrix.shard_index }}.jsonl
 
       - name: Cleanup secrets
         if: always()
@@ -534,112 +509,6 @@ jobs:
             --csv results.csv \
             --json analytics.json \
             "${parquet_args[@]}"
-
-      - name: Resolve metadata secret list
-        id: metadata_config
-        shell: bash
-        run: |
-          set -euo pipefail
-          printf 'secrets=%s\n' 'GH_SSH_GROUPS_METADATA_KEY' >> "${GITHUB_OUTPUT}"
-
-      - name: Fetch metadata repository secrets from BWS
-        uses: >-
-          shared-common/gh-actions-shared/.github/actions/bws-fetch@v0.0.41
-        with:
-          access-token: ${{ secrets.BWS_ACCESS_TOKEN }}
-          project-id: ${{ secrets.BWS_PROJECT_ID }}
-          bws-version: ${{ inputs.bws-version }}
-          bws-sha256: ${{ inputs.bws-sha256 }}
-          secrets: ${{ steps.metadata_config.outputs.secrets }}
-          output-dir: .secrets
-
-      - name: Mask metadata repository secrets
-        shell: bash
-        env:
-          SECRET_NAMES: ${{ steps.metadata_config.outputs.secrets }}
-        run: |
-          set -euo pipefail
-          python3 shared/.github/scripts/mask_secret_files.py
-
-      - name: Load metadata repository SSH key
-        id: metadata_key
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 shared/.github/scripts/write_github_output_multiline.py \
-            --output-file "${GITHUB_OUTPUT}" \
-            --name 'ssh-key' \
-            --value-file .secrets/GH_SSH_GROUPS_METADATA_KEY
-
-      - name: Checkout metadata repository
-        # actions/checkout v6.0.2
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-        with:
-          repository: shared-common/glab-groups-metadata
-          ref: main
-          path: metadata
-          persist-credentials: false
-          ssh-key: ${{ steps.metadata_key.outputs.ssh-key }}
-
-      - name: Update metadata repository
-        shell: bash
-        run: |
-          set -euo pipefail
-          target_group_args=()
-          shopt -s nullglob
-          for file in results-artifacts/target-groups-*.jsonl; do
-            target_group_args+=(--target-groups-jsonl "${file}")
-          done
-          python3 shared/.github/scripts/update_metadata_repo.py \
-            --metadata-dir metadata \
-            --config-path "${{ inputs.config-path }}" \
-            --plan plan.json \
-            --discovery discover.json \
-            --report report.json \
-            --analytics analytics.json \
-            --event-name "${{ github.event_name }}" \
-            --repository "${{ github.repository }}" \
-            --run-attempt "${{ github.run_attempt }}" \
-            --run-id "${{ github.run_id }}" \
-            --sha "${{ github.sha }}" \
-            --workflow-ref "${{ github.workflow_ref }}" \
-            "${target_group_args[@]}"
-
-      - name: Commit metadata repository updates
-        shell: bash
-        working-directory: metadata
-        env:
-          CONFIG_PATH: ${{ inputs.config-path }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          metadata_paths=(
-            "cache/${CONFIG_PATH}"
-            "runs/${CONFIG_PATH}"
-          )
-          for metadata_path in "${metadata_paths[@]}"; do
-            mkdir -p "${metadata_path}"
-          done
-          if [ -z "$(git status --short --untracked-files=all -- "${metadata_paths[@]}")" ]; then
-            exit 0
-          fi
-          git add -A -- "${metadata_paths[@]}"
-          if git diff --cached --quiet --exit-code -- "${metadata_paths[@]}"; then
-            exit 0
-          fi
-          git commit -m "Update ${CONFIG_PATH} metadata for run ${RUN_ID}-${RUN_ATTEMPT}"
-          for attempt in 1 2 3 4 5; do
-            if git pull --rebase origin main && git push origin HEAD:main; then
-              exit 0
-            fi
-            git rebase --abort || true
-            sleep $((attempt * 5))
-          done
-          printf '%s\n' 'unable to push metadata repository updates after bounded retries' >&2
-          exit 1
 
       - name: Publish markdown summaries
         shell: bash
