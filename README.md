@@ -120,8 +120,6 @@ current mirror job.
 Each config directory exposes these defaults:
 
 - `mirror_pristine_tar`: always mirror detected `pristine-tar` branch or tag
-- `inventory_cache_max_age_seconds`: cached source inventory freshness window,
-  defaulting to 5 days
 - `gitlab_source_include_subgroups`: optional GitLab source discovery mode that
   uses `include_subgroups=true` instead of subgroup-by-subgroup traversal
 - `read_retry_attempts`: retry count for plan/discovery GitLab API reads
@@ -150,9 +148,8 @@ protect `gitlab/mcr/main`.
 Those `mcr/*` branches are one-shot target bootstrap branches. They are not
 force-synced from source on later runs.
 
-Plan runs reuse a cached normalized source inventory artifact between workflow
-runs when the cache is still fresh. The shared workflow defaults to reusing
-inventories for up to 5 days and rewrites the cache after rediscovery.
+Plan runs always perform live source discovery. The workflow no longer restores
+or reuses a persisted source inventory cache between runs.
 
 ## Validation
 

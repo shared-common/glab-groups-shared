@@ -40,7 +40,6 @@ my %DEFAULTS = (
     batch_size => 25,
     force_lfs => JSON::PP::false,
     git_timeout_seconds => 1800,
-    inventory_cache_max_age_seconds => 432_000,
     max_blob_bytes => 100 * 1024 * 1024,
     mirror_pristine_tar => JSON::PP::true,
     retry_attempts => 3,
@@ -392,9 +391,6 @@ sub _cmd_plan {
     my %opt = (
         discover_output => "discover.json",
         batch_size => 25,
-        inventory_max_age_seconds => $DEFAULTS{inventory_cache_max_age_seconds},
-        inventory_input => q{},
-        inventory_output => q{},
         output => "plan.json",
         summary => "plan.md",
     );
@@ -403,22 +399,13 @@ sub _cmd_plan {
         "config-dir=s" => \$opt{config_dir},
         "batch-size=i" => \$opt{batch_size},
         "discover-output=s" => \$opt{discover_output},
-        "inventory-input=s" => \$opt{inventory_input},
-        "inventory-output=s" => \$opt{inventory_output},
-        "inventory-max-age-seconds=i" => \$opt{inventory_max_age_seconds},
         "output=s" => \$opt{output},
         "summary=s" => \$opt{summary},
     ) or die _usage();
 
     my $config = load_config_dir( $opt{config_dir} );
-    my $normalized = _load_or_discover_inventory(
-        $config,
-        {
-            input_path => $opt{inventory_input},
-            max_age_seconds => $opt{inventory_max_age_seconds},
-        }
-    );
-    _write_json( $opt{inventory_output}, $normalized ) if $opt{inventory_output};
+    warn "performing live inventory discovery\n";
+    my $normalized = _normalize_inventory( _discover_inventory($config) );
     _write_json( $opt{discover_output}, $normalized ) if $opt{discover_output};
     my $plan = _build_plan(
         $config,
@@ -431,65 +418,6 @@ sub _cmd_plan {
     _write_json( $opt{output}, $plan );
     _write_text( $opt{summary}, _render_plan_summary($plan) );
     return 0;
-}
-
-sub _load_or_discover_inventory {
-    my ( $config, $opt ) = @_;
-    $opt ||= {};
-
-    my $input_path = $opt->{input_path} || q{};
-    if ( $input_path && -f $input_path ) {
-        my $cached = eval {
-            my $inventory = _read_json($input_path);
-            _normalize_inventory($inventory);
-        };
-        if ($cached) {
-            if ( _inventory_cache_is_fresh( $cached, $opt->{max_age_seconds} ) ) {
-                if ( _inventory_project_count($cached) > 0 ) {
-                    my $discovered_at = $cached->{discovered_at} || "unknown";
-                    warn "reusing cached inventory from $input_path discovered_at=$discovered_at\n";
-                    return $cached;
-                }
-                my $discovered_at = $cached->{discovered_at} || "unknown";
-                warn "inventory cache at $input_path discovered_at=$discovered_at contained zero discovered projects; performing live rediscovery\n";
-            }
-            else {
-                my $discovered_at = $cached->{discovered_at} || "unknown";
-                warn "inventory cache stale at $input_path discovered_at=$discovered_at; performing live rediscovery\n";
-            }
-        }
-        else {
-            warn "ignoring unreadable inventory cache $input_path: " . _trim_error($@) . "\n";
-        }
-    }
-
-    warn "performing live inventory discovery\n";
-    my $inventory = _discover_inventory($config);
-    return _normalize_inventory($inventory);
-}
-
-sub _inventory_cache_is_fresh {
-    my ( $inventory, $max_age_seconds ) = @_;
-    return 0 unless ref($inventory) eq "HASH";
-    my $discovered_at = $inventory->{discovered_at};
-    return 0 unless defined $discovered_at && !ref($discovered_at) && length $discovered_at;
-    my $discovered_epoch = eval { _parse_iso8601_utc_epoch($discovered_at) };
-    return 0 unless defined $discovered_epoch;
-    return 1 if !defined $max_age_seconds || $max_age_seconds < 1;
-    return ( time() - $discovered_epoch ) <= $max_age_seconds ? 1 : 0;
-}
-
-sub _inventory_project_count {
-    my ($inventory) = @_;
-    return 0 unless ref($inventory) eq "HASH";
-    my $count = 0;
-    for my $bucket ( @{ $inventory->{inventory} || [] } ) {
-        next unless ref($bucket) eq "HASH";
-        for my $project ( @{ $bucket->{projects} || [] } ) {
-            $count++ if ref($project) eq "HASH";
-        }
-    }
-    return $count;
 }
 
 sub _build_group_batches {
@@ -1334,11 +1262,6 @@ sub _normalize_defaults_payload {
         batch_size => _defaulted_positive_int( $payload->{batch_size}, $DEFAULTS{batch_size}, "$label.defaults.batch_size" ),
         force_lfs => _bool_or_default( $payload->{force_lfs}, 0 ),
         git_timeout_seconds => _defaulted_positive_int( $payload->{git_timeout_seconds}, $DEFAULTS{git_timeout_seconds}, "$label.defaults.git_timeout_seconds" ),
-        inventory_cache_max_age_seconds => _defaulted_positive_int(
-            $payload->{inventory_cache_max_age_seconds},
-            $DEFAULTS{inventory_cache_max_age_seconds},
-            "$label.defaults.inventory_cache_max_age_seconds",
-        ),
         max_blob_bytes => _defaulted_bounded_positive_int( $payload->{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, "$label.defaults.max_blob_bytes" ),
         mirror_pristine_tar => _bool_or_default( $payload->{mirror_pristine_tar}, 1 ),
         gitlab_source_include_subgroups => _bool_or_default( $payload->{gitlab_source_include_subgroups}, 0 ),
@@ -1579,6 +1502,13 @@ sub _ensure_group_path {
             $created_group = 1 if $create_ok;
             if ( !$create_ok ) {
                 my $create_error = $@ || "unknown group creation error\n";
+                if ( _is_gitlab_forbidden_error($create_error) ) {
+                    die sprintf(
+                        "unable to create required target group %s: target token lacks permission to create this namespace or subgroup; pre-create it or grant group creation rights: %s",
+                        $current,
+                        $create_error,
+                    );
+                }
                 if ( _is_gitlab_path_conflict_error($create_error) ) {
                     $group = _get_group( $client, $current )
                       || _find_group_by_parent_and_path( $client, $parent_id, $current, $part );
@@ -1702,6 +1632,14 @@ sub _is_gitlab_invalid_namespace_error {
     return 1 if $error =~ /namespace[^[]*\[[^\]]*not found[^\]]*\]/i;
     return 1 if $error =~ /namespace_id[^[]*\[[^\]]*does not exist[^\]]*\]/i;
     return 1 if $error =~ /namespace[^[]*\[[^\]]*can't be blank[^\]]*\]/i;
+    return 0;
+}
+
+sub _is_gitlab_forbidden_error {
+    my ($error) = @_;
+    return 0 unless defined $error && !ref($error);
+    return 1 if $error =~ /gitlab request failed \[403\]/i;
+    return 1 if $error =~ /\b403 Forbidden\b/i;
     return 0;
 }
 

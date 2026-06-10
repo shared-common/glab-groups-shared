@@ -642,87 +642,6 @@ HTML
 {
     no warnings 'redefine';
     my $dir = tempdir( CLEANUP => 1 );
-    my $cache_path = File::Spec->catfile( $dir, "discover.json" );
-
-    write_json_file(
-        $cache_path,
-        {
-            discovered_at => GlabGroups::_timestamp(),
-            inventory => [
-                {
-                    group_path => "root",
-                    projects => [
-                        {
-                            path_with_namespace => "root/project-a",
-                        },
-                    ],
-                },
-            ],
-        }
-    );
-
-    local *GlabGroups::_discover_inventory = sub {
-        die "_discover_inventory should not be called when the cached inventory is still fresh";
-    };
-
-    my $warning = q{};
-    local $SIG{__WARN__} = sub { $warning .= $_[0] };
-    my $inventory = GlabGroups::_load_or_discover_inventory(
-        {},
-        {
-            input_path => $cache_path,
-            max_age_seconds => 64_800,
-        }
-    );
-    is( $inventory->{inventory}->[0]->{projects}->[0]->{path_with_namespace}, "root/project-a", "plan inventory cache reuse keeps the cached project inventory" );
-    like( $warning, qr/reusing cached inventory from .*discover\.json discovered_at=/, "cache reuse logs that plan skipped live discovery" );
-}
-
-{
-    no warnings 'redefine';
-    my $dir = tempdir( CLEANUP => 1 );
-    my $cache_path = File::Spec->catfile( $dir, "discover.json" );
-
-    write_json_file(
-        $cache_path,
-        {
-            discovered_at => GlabGroups::_timestamp(),
-            inventory => [],
-        }
-    );
-
-    local *GlabGroups::_discover_inventory = sub {
-        return {
-            discovered_at => GlabGroups::_timestamp(),
-            inventory => [
-                {
-                    group_path => "root",
-                    projects => [
-                        {
-                            path_with_namespace => "root/project-b",
-                        },
-                    ],
-                },
-            ],
-        };
-    };
-
-    my $warning = q{};
-    local $SIG{__WARN__} = sub { $warning .= $_[0] };
-    my $inventory = GlabGroups::_load_or_discover_inventory(
-        {},
-        {
-            input_path => $cache_path,
-            max_age_seconds => 64_800,
-        }
-    );
-    is( $inventory->{inventory}->[0]->{projects}->[0]->{path_with_namespace}, "root/project-b", "empty cached inventory forces live rediscovery" );
-    like( $warning, qr/contained zero discovered projects; performing live rediscovery/, "empty cached inventory is rejected even while fresh" );
-}
-
-{
-    no warnings 'redefine';
-    my $dir = tempdir( CLEANUP => 1 );
     my $plan_path = File::Spec->catfile( $dir, "plan.json" );
     my $discover_path = File::Spec->catfile( $dir, "discover.json" );
     my $summary_path = File::Spec->catfile( $dir, "plan.md" );
@@ -751,7 +670,7 @@ HTML
         }
     );
 
-    local *GlabGroups::_load_or_discover_inventory = sub {
+    local *GlabGroups::_discover_inventory = sub {
         return {
             discovered_at => GlabGroups::_timestamp(),
             inventory => [],
@@ -1556,6 +1475,36 @@ HTML
     ok( !$error, "conflict without resolvable group still fails" );
     like( $@, qr/gitlab group path conflict for owner\/Missing-team:/, "reports the unresolved group path in the conflict error" );
     like( $@, qr/path has already been taken/i, "preserves the original GitLab path conflict detail" );
+}
+
+{
+    no warnings 'redefine';
+    my %cache = ( "glab-forks" => 7 );
+
+    local *GlabGroups::_ensure_main_user_group_membership_owner = sub { return 1; };
+    local *GlabGroups::_ensure_service_user_group_membership_owner = sub { return 1; };
+
+    local *GlabGroups::_get_group = sub {
+        my ( $client, $group_path ) = @_;
+        return undef if $group_path eq "glab-forks/crowdsecurity";
+        die "unexpected group lookup: $group_path";
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        if ( $method eq "POST" && $path eq "/groups" ) {
+            die "gitlab request failed [403] POST /groups: {\"message\":\"403 Forbidden\"}\n";
+        }
+        die "unexpected gitlab request: $method $path";
+    };
+
+    my $ok = eval {
+        GlabGroups::_ensure_group_path( {}, "glab-forks/crowdsecurity", \%cache );
+        1;
+    };
+    ok( !$ok, "forbidden group creation still fails closed" );
+    like( $@, qr/unable to create required target group glab-forks\/crowdsecurity:/, "forbidden group creation reports the exact target namespace path" );
+    like( $@, qr/pre-create it or grant group creation rights/i, "forbidden group creation explains how to fix the permission boundary" );
 }
 
 {

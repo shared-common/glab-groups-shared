@@ -51,12 +51,10 @@ The plan includes:
 
 Planning no longer crawls the entire target namespace tree to precompute project
 state. It keeps the target path only and defers live target group resolution
-and missing subgroup creation to the mirror step.
+and missing subgroup creation to the target-preparation gate before mirror fanout.
 
-The plan job can also reuse a cached normalized source inventory between
-workflow runs. When the cached inventory is still fresh, the plan step skips
-source rediscovery. The default cache freshness window is 5 days and is
-configurable per wrapper through `inventory_cache_max_age_seconds`.
+The plan job always performs live source discovery. The workflow does not
+restore or reuse a persisted source inventory cache between runs.
 
 ## Mirroring model
 

@@ -207,11 +207,6 @@
           "type": "integer",
           "minimum": 1
         },
-        "inventory_cache_max_age_seconds": {
-          "type": "integer",
-          "minimum": 1,
-          "default": 432000
-        },
         "gitlab_source_include_subgroups": {
           "type": "boolean",
           "default": false

@@ -17,10 +17,7 @@ class SharedWorkflowContractTests(unittest.TestCase):
             "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
             text,
         )
-        self.assertIn(
-            "actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae",
-            text,
-        )
+        self.assertNotIn("actions/cache@", text)
 
     def test_caps_mirror_matrix_with_batch_strides(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
@@ -72,7 +69,6 @@ class SharedWorkflowContractTests(unittest.TestCase):
             text,
         )
         self.assertIn("$config->{projects}", text)
-        self.assertIn("inventory-cache-max-age-seconds", text)
         self.assertIn('if [ "${SHARED_REPO}" != "shared-common/glab-groups-shared" ]; then', text)
         self.assertIn('if [ "${CONFIG_REPO}" != "shared-common/gh-actions-cfg" ]; then', text)
         self.assertIn("mcr/main|mcr/staging|mcr/release|v[0-9]*", text)
@@ -105,25 +101,22 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("plan.md", text.split("Upload plan artifact", 1)[1].split("Cleanup secrets", 1)[0])
         self.assertNotIn("report.md", text.split("Upload run artifacts", 1)[1])
 
-    def test_plan_uses_inventory_cache(self) -> None:
+    def test_plan_forces_live_discovery(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("force-refresh-discovery:", text)
-        self.assertIn("Restore source inventory cache", text)
-        self.assertIn("if: ${{ !inputs.force-refresh-discovery }}", text)
-        self.assertIn("inventory-cache", text)
         self.assertIn("--discover-output discover.json", text)
-        self.assertIn("--inventory-output \"inventory-cache/discover.json\"", text)
-        self.assertIn('--inventory-max-age-seconds "${{ steps.config_meta.outputs.inventory-cache-max-age-seconds }}"', text)
-        self.assertIn('FORCE_REFRESH_DISCOVERY: ${{ inputs.force-refresh-discovery }}', text)
-        self.assertIn('if [ "${FORCE_REFRESH_DISCOVERY}" != "true" ]; then', text)
-        self.assertIn('inventory_args+=(--inventory-input "inventory-cache/discover.json")', text)
-        self.assertIn("rm -rf inventory-cache", text)
-        self.assertIn("steps.inventory_cache_key.outputs.content-hash", text)
-        self.assertIn(
-            "glab-groups-inventory-{0}-{1}-",
-            text,
-        )
-        self.assertNotIn("format('glab-groups-inventory-{0}-', inputs.config-path)", text)
+        self.assertNotIn("force-refresh-discovery:", text)
+        self.assertNotIn("Restore source inventory cache", text)
+        self.assertNotIn("inventory-cache", text)
+        self.assertNotIn("--inventory-output", text)
+        self.assertNotIn("--inventory-max-age-seconds", text)
+        self.assertNotIn("--inventory-input", text)
+
+    def test_prepare_job_runs_before_mirror(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("prepare:\n    needs: plan", text)
+        self.assertIn("Prepare target namespaces and projects", text)
+        self.assertIn("prepare-target", text)
+        self.assertIn("needs: [plan, prepare]", text)
 
     def test_metadata_repo_is_not_used(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
