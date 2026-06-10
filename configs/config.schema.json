@@ -13,7 +13,6 @@
         "glab-groups/defaults",
         "glab-groups/namespaces",
         "glab-groups/projects",
-        "glab-groups/project-overrides",
         "glab-groups/project-exclusions"
       ]
     },
@@ -83,28 +82,6 @@
             "minItems": 1,
             "items": {
               "$ref": "#/$defs/project"
-            }
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "kind": {
-            "const": "glab-groups/project-overrides"
-          }
-        }
-      },
-      "then": {
-        "required": [
-          "projects"
-        ],
-        "properties": {
-          "projects": {
-            "type": "array",
-            "items": {
-              "$ref": "#/$defs/projectOverride"
             }
           }
         }
@@ -294,24 +271,6 @@
             },
             "target_group_path": {
               "$ref": "#/$defs/namespacePath"
-            }
-          }
-        }
-      ]
-    },
-    "projectOverride": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/policy"
-        },
-        {
-          "type": "object",
-          "required": [
-            "target_project_path"
-          ],
-          "properties": {
-            "target_project_path": {
-              "$ref": "#/$defs/projectPath"
             }
           }
         }

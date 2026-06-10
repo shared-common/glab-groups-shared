@@ -16,24 +16,27 @@ and the configured relative namespace path.
 Explicit project configs are the exception: they provide a full
 `target_group_path`, and the runtime creates the destination as
 `<target_group_path>/<name>` without deriving any target path segments from the
-source repository URL.
+source repository URL. In namespace-based wrappers, `projects.yml` is also
+authoritative for matching target paths: when an explicit project entry resolves
+to the same target project path that namespace discovery would have produced,
+the runtime skips the namespace-discovered copy and uses the explicit project
+entry instead.
 
 ## Execution order
 
 1. `plan`
-2. `mirror` in batch jobs capped at five concurrent jobs
+2. `mirror` in batch jobs capped at ten concurrent jobs
 3. `report`
 4. `post_run_analytics.py`
 
 The shared workflow creates one deterministic plan, uploads it as a run
-artifact, and then builds a dynamic matrix capped at 256 mirror jobs. Small
-plans still use one job per batch. Larger plans use shard starts and strides so
-each job processes a deterministic subset of target-group-aware batches while
-GitHub Actions runs at most five jobs concurrently. Batch construction never
-splits one target subgroup across multiple mirror jobs. The final report job
-downloads all batch artifacts, aggregates them into one report, CSV, JSON
-analytics file, and optional Parquet file, then publishes those artifacts back
-to the workflow run.
+artifact, and then builds a dynamic matrix capped at 250 mirror jobs. Small
+plans still use one job per batch. Larger plans raise the effective batch size
+until the plan fits within that cap, while GitHub Actions runs at most ten jobs
+concurrently. Batch construction never splits one target subgroup across
+multiple mirror jobs. The final report job downloads all batch artifacts,
+aggregates them into one report, CSV, JSON analytics file, and optional Parquet
+file, then publishes those artifacts back to the workflow run.
 
 ## Planning model
 
@@ -76,8 +79,9 @@ The mirror stage:
 - authenticates GitHub-source discovery and Git-over-HTTPS mirroring with the
   shared GitHub App by generating a JWT, resolving the source-account
   installation, and minting short-lived installation access tokens
-- keeps explicit public project URLs on plain HTTPS git without source-auth
-  injection during discovery or mirror execution
+- keeps non-GitHub explicit public project URLs on plain HTTPS git without
+  source-auth injection, while explicit GitHub project URLs reuse the shared
+  GitHub App auth flow during discovery and mirror execution
 - retries repo-shaped root-discovered clone URLs with an appended `.git` suffix
   before failing when the human-facing URL does not expose refs over Git
 - uses longer bounded retries for GitLab read requests during discovery to ride
@@ -87,6 +91,10 @@ The mirror stage:
 - fetches only the selected branches and tags
 - always includes the source default branch in source-side selection
 - mirrors the source default branch into target `gitlab/mcr/main`
+- force-syncs configured additional branches to same-name target branches
+- force-syncs configured additional tags to same-name target tags
+- also force-syncs the source default branch by name when that branch is
+  explicitly listed in `additional_branches`
 - auto-detects `pristine-tar`
 - applies configured additional branches and tags
 - bootstraps target-only `mcr/main`, `mcr/feature/init`, `mcr/staging`, and

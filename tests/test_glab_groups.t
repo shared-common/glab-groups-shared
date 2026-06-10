@@ -126,7 +126,7 @@ defaults:
 YAML
     );
     write_text_file(
-        File::Spec->catfile( $dir, "namespaces.yml" ),
+        File::Spec->catfile( $dir, "projects.yml" ),
         <<'YAML'
 kind: glab-groups/projects
 version: 1
@@ -152,6 +152,82 @@ YAML
 }
 
 {
+    my $dir = tempdir( CLEANUP => 1 );
+    write_text_file(
+        File::Spec->catfile( $dir, "defaults.yml" ),
+        <<'YAML'
+kind: glab-groups/defaults
+version: 1
+defaults:
+  additional_branches: []
+  additional_tags: []
+YAML
+    );
+    write_text_file(
+        File::Spec->catfile( $dir, "projects.yml" ),
+        <<'YAML'
+- name: poweralertd
+  source_project_url: https://git.sr.ht/~kennylevinsen/poweralertd
+  target_group_path: glab-forks/labwc
+  additional_branches:
+    - debian/sid
+    - debian/experimental
+  additional_tags: []
+  target_branches_protect:
+    - gitlab/mcr/main
+    - mcr/main
+YAML
+    );
+
+    my $config = load_config_dir($dir);
+    is( scalar @{ $config->{projects} }, 1, "loads explicit projects from a bare projects.yml list" );
+    is( $config->{projects}->[0]->{name}, "poweralertd", "keeps the explicit project name from bare projects.yml" );
+    is( $config->{projects}->[0]->{additional_branches}->[1]->{name}, "debian/experimental", "loads branch overrides from bare projects.yml" );
+    is(
+        $config->{projects}->[0]->{target_branches_protect}->[1]->{name},
+        "mcr/main",
+        "loads protected branch overrides from bare projects.yml",
+    );
+}
+
+{
+    my $dir = tempdir( CLEANUP => 1 );
+    write_json_file(
+        File::Spec->catfile( $dir, "defaults.json" ),
+        {
+            kind => "glab-groups/defaults",
+            version => 1,
+            defaults => {},
+        }
+    );
+    write_json_file(
+        File::Spec->catfile( $dir, "namespaces.json" ),
+        {
+            kind => "glab-groups/namespaces",
+            version => 1,
+            namespaces => [
+                {
+                    name => "labwc",
+                    source_group_url => "https://github.com/labwc",
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "labwc",
+                },
+            ],
+        }
+    );
+    write_text_file(
+        File::Spec->catfile( $dir, "projects.yml" ),
+        <<'YAML'
+[]
+YAML
+    );
+
+    my $config = load_config_dir($dir);
+    is( scalar @{ $config->{projects} }, 0, "accepts an empty optional projects.yml list" );
+    is( scalar @{ $config->{namespaces} }, 1, "keeps namespace discovery when projects.yml is empty" );
+}
+
+{
     my $policy = GlabGroups::_merge_policy(
         {
             additional_branches => [],
@@ -170,6 +246,243 @@ YAML
         [ map { $_->{name} } @{ $policy->{target_branches_protect} } ],
         [ "gitlab/mcr/main", "mcr/feature/init", "mcr/feature/init" ],
         "merge policy carries configured protected target branches into the runtime policy",
+    );
+}
+
+{
+    my $config = {
+        defaults => {
+            additional_branches => [],
+            additional_tags => [],
+        },
+        namespaces => [],
+        exclusions => {},
+    };
+    my $inventory = {
+        inventory => [
+            {
+                group_id => 1,
+                group_path => "root",
+                namespace => {
+                    name => "root",
+                    source_group_url => "https://gitlab.example.invalid/root",
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "mirror",
+                },
+                projects => [
+                    map {
+                        {
+                            archived => JSON::PP::false,
+                            default_branch => "main",
+                            description => "source",
+                            empty_repo => JSON::PP::false,
+                            http_url_to_repo => "https://example.invalid/root/sub$_->{group}/project-$_->{id}.git",
+                            id => $_->{id},
+                            lfs_enabled => JSON::PP::false,
+                            path_with_namespace => "root/sub$_->{group}/project-$_->{id}",
+                            ssh_url_to_repo => "git\@example.invalid:root/sub$_->{group}/project-$_->{id}.git",
+                            visibility => "public",
+                        }
+                    } (
+                        { group => "1", id => 1 },
+                        { group => "2", id => 2 },
+                        { group => "3", id => 3 },
+                        { group => "4", id => 4 },
+                        { group => "5", id => 5 },
+                        { group => "6", id => 6 },
+                    ),
+                ],
+            },
+        ],
+    };
+
+    my $plan = GlabGroups::_build_plan(
+        $config,
+        $inventory,
+        1,
+        {
+            max_batches => 2,
+        },
+    );
+    is( $plan->{batch_size}, 3, "plan raises batch size when needed to stay within max_batches" );
+    is( $plan->{total_batches}, 2, "plan keeps the total batch count within max_batches" );
+    is( $plan->{max_batches}, 2, "plan records the configured max_batches limit" );
+}
+
+{
+    no warnings 'redefine';
+    my @seen_source_urls;
+    my @seen_github_auth_requests;
+
+    local *GlabGroups::_load_source_auth = sub {
+        return {
+            github_app => { app_id => "123", pem => "unused" },
+            github_installation_tokens => {},
+        };
+    };
+    local *GlabGroups::_github_installation_source_auth = sub {
+        my ( $source_auth, $base_url, $account, $policy ) = @_;
+        push @seen_github_auth_requests, [ $base_url, $account ];
+        return { token => "ghs_install_token", username => "x-access-token" };
+    };
+    local *GlabGroups::_discover_remote_refs = sub {
+        my ( $source_url, $policy ) = @_;
+        push @seen_source_urls, $source_url;
+        return {
+            branches => { main => 1 },
+            default_branch => "main",
+            tags => {},
+        };
+    };
+
+    my $inventory = GlabGroups::_discover_inventory(
+        {
+            defaults => { additional_branches => [], additional_tags => [] },
+            namespaces => [],
+            projects => [
+                {
+                    name => "gpt-oss",
+                    source_project_url => "https://github.com/openai/gpt-oss",
+                    target_group_path => "glab-forks/openai",
+                },
+            ],
+        }
+    );
+
+    is_deeply(
+        \@seen_github_auth_requests,
+        [
+            [ "https://github.com", "openai" ],
+        ],
+        "explicit GitHub project discovery resolves GitHub App auth for the source owner",
+    );
+    is(
+        $inventory->{inventory}->[0]->{source_auth_mode},
+        "github_app",
+        "explicit GitHub project discovery marks the bucket for GitHub App source auth",
+    );
+    like(
+        $seen_source_urls[0],
+        qr{\Ahttps://x-access-token:ghs_install_token\@github\.com/openai/gpt-oss\.git\z},
+        "explicit GitHub project discovery probes the remote with the installation token",
+    );
+    is(
+        $inventory->{inventory}->[0]->{projects}->[0]->{http_url_to_repo},
+        "https://github.com/openai/gpt-oss.git",
+        "explicit GitHub project discovery strips credentials from the stored clone URL",
+    );
+}
+
+{
+    no warnings 'redefine';
+
+    local *GlabGroups::_load_source_auth = sub {
+        return {
+            github_app => { app_id => "123", pem => "unused" },
+            github_installation_tokens => {},
+        };
+    };
+    local *GlabGroups::_github_installation_source_auth = sub {
+        return { token => "ghs_install_token", username => "x-access-token" };
+    };
+    local *GlabGroups::_list_github_org_projects = sub {
+        return [
+            {
+                archived => JSON::PP::false,
+                clone_url => "https://github.com/openai/gpt-oss.git",
+                default_branch => "main",
+                description => "authoritative",
+                full_name => "openai/gpt-oss",
+                id => 101,
+                path_with_namespace => "openai/gpt-oss",
+                private => JSON::PP::false,
+                pushed_at => "2026-06-10T00:00:00Z",
+                size => 1,
+                ssh_url => 'git@github.com:openai/gpt-oss.git',
+                visibility => "public",
+            },
+            {
+                archived => JSON::PP::false,
+                clone_url => "https://github.com/openai/openai-agents-python.git",
+                default_branch => "main",
+                description => "namespace only",
+                full_name => "openai/openai-agents-python",
+                id => 102,
+                path_with_namespace => "openai/openai-agents-python",
+                private => JSON::PP::false,
+                pushed_at => "2026-06-10T00:00:00Z",
+                size => 1,
+                ssh_url => 'git@github.com:openai/openai-agents-python.git',
+                visibility => "public",
+            },
+        ];
+    };
+    local *GlabGroups::_discover_remote_refs = sub {
+        return {
+            branches => { main => 1, release => 1 },
+            default_branch => "main",
+            tags => {},
+        };
+    };
+
+    my $config = {
+        defaults => {
+            additional_branches => [],
+            additional_tags => [],
+            force_lfs => JSON::PP::false,
+        },
+        namespaces => [
+            {
+                name => "openai-root",
+                source_group_url => "https://github.com/openai",
+                target_owner_path => "glab-forks",
+                target_namespace_path => "openai",
+                target_branches_protect => [ { name => "gitlab/mcr/main" } ],
+            },
+        ],
+        projects => [
+            {
+                name => "gpt-oss",
+                source_project_url => "https://github.com/openai/gpt-oss",
+                target_group_path => "glab-forks/openai",
+                force_lfs => JSON::PP::true,
+                git_timeout_seconds => 900,
+            },
+        ],
+        exclusions => {},
+    };
+
+    my $inventory = GlabGroups::_discover_inventory($config);
+    is( scalar @{ $inventory->{inventory} }, 2, "keeps one namespace bucket plus one authoritative explicit project bucket" );
+    is_deeply(
+        [ map { $_->{path_with_namespace} } @{ $inventory->{inventory}->[0]->{projects} } ],
+        ["openai/openai-agents-python"],
+        "namespace discovery skips projects governed by authoritative projects.yml entries",
+    );
+    ok(
+        ref( $inventory->{inventory}->[1]->{namespace} ) eq "HASH",
+        "authoritative explicit project discovery keeps the matched namespace policy context",
+    );
+
+    my $plan = GlabGroups::_build_plan( $config, $inventory, 25 );
+    is(
+        $plan->{plan}->[0]->{target_relative_project_path},
+        "openai/gpt-oss",
+        "authoritative explicit project planning uses the namespace-relative target path",
+    );
+    ok(
+        $plan->{plan}->[0]->{policy}->{force_lfs},
+        "authoritative explicit project planning keeps explicit per-project boolean overrides",
+    );
+    is(
+        $plan->{plan}->[0]->{policy}->{git_timeout_seconds},
+        900,
+        "authoritative explicit project planning keeps explicit per-project scalar overrides",
+    );
+    is_deeply(
+        [ map { $_->{name} } @{ $plan->{plan}->[0]->{policy}->{target_branches_protect} } ],
+        ["gitlab/mcr/main"],
+        "authoritative explicit project planning inherits namespace branch protection",
     );
 }
 
@@ -761,7 +1074,6 @@ HTML
         {
             defaults => { additional_branches => [], additional_tags => [], force_lfs => JSON::PP::false },
             exclusions => {},
-            overrides => {},
         },
         {
             inventory => [
@@ -799,7 +1111,6 @@ HTML
         {
             defaults => { additional_branches => [], additional_tags => [], force_lfs => JSON::PP::false },
             exclusions => {},
-            overrides => {},
         },
         {
             inventory => [
@@ -833,7 +1144,7 @@ HTML
     );
     is( $plan->{plan}->[0]->{target_full_path}, "glab-forks/labwc/darkman", "explicit project planning uses the configured target group path without deriving namespace segments from the source path" );
     is( $plan->{plan}->[0]->{target_namespace_path}, "glab-forks/labwc", "explicit project planning keeps the configured target group path as the target namespace path" );
-    is( $plan->{plan}->[0]->{target_relative_project_path}, "glab-forks/labwc/darkman", "explicit project planning keys overrides and exclusions by the full explicit target project path" );
+    is( $plan->{plan}->[0]->{target_relative_project_path}, "glab-forks/labwc/darkman", "explicit project planning keys exclusions by the resolved explicit target project path" );
     is_deeply( $plan->{plan}->[0]->{source_available_branches}, [ "main", "release" ], "explicit project planning carries discovered source branches into the plan" );
     is_deeply( $plan->{plan}->[0]->{source_available_tags}, [ "v1.0.0" ], "explicit project planning carries discovered source tags into the plan" );
 }
@@ -843,7 +1154,6 @@ HTML
         {
             defaults => { additional_branches => [], additional_tags => [], force_lfs => JSON::PP::false },
             exclusions => {},
-            overrides => {},
         },
         {
             inventory => [
@@ -924,7 +1234,6 @@ HTML
         {
             defaults => { additional_branches => [], additional_tags => [], force_lfs => JSON::PP::false },
             exclusions => {},
-            overrides => {},
         },
         {
             inventory => [
@@ -967,7 +1276,6 @@ HTML
                 force_lfs => JSON::PP::false,
             },
             exclusions => {},
-            overrides => {},
         },
         {
             inventory => [
@@ -1029,7 +1337,6 @@ HTML
                 force_lfs => JSON::PP::false,
             },
             exclusions => {},
-            overrides => {},
         },
         {
             inventory => [
@@ -2445,6 +2752,43 @@ HTML
             "refs/tags/v1.0.0:refs/tags/v1.0.0",
         ],
         "push_selected_refs mirrors the source default branch only to gitlab/mcr/main",
+    );
+}
+
+{
+    no warnings 'redefine';
+    my @refspecs;
+
+    local *GlabGroups::_run_command = sub {
+        my ( $cmd, $opt ) = @_;
+        push @refspecs, $cmd->[-1] if $cmd->[3] eq "push";
+        return { output => q{}, status => 0 };
+    };
+
+    GlabGroups::_push_selected_refs(
+        "/tmp/repo",
+        {
+            branches => [ "main", "release" ],
+            tags => ["v1.0.0"],
+        },
+        {
+            additional_branches => [ { name => "main" }, { name => "release" } ],
+            git_timeout_seconds => 60,
+            retry_attempts => 1,
+            retry_backoff_seconds => 1,
+        },
+        "main",
+    );
+
+    is_deeply(
+        \@refspecs,
+        [
+            "refs/heads/main:refs/heads/main",
+            "refs/heads/release:refs/heads/release",
+            "refs/heads/main:refs/heads/gitlab/mcr/main",
+            "refs/tags/v1.0.0:refs/tags/v1.0.0",
+        ],
+        "push_selected_refs also mirrors the source default branch by name when it is explicitly listed in additional_branches",
     );
 }
 

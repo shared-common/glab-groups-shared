@@ -246,6 +246,7 @@ jobs:
             plan \
             --config-dir "gh-actions-cfg/${{ inputs.config-path }}" \
             --batch-size "${{ inputs.batch-size }}" \
+            --max-batches 250 \
             --discover-output discover.json \
             --output plan.json \
             --summary plan.md
@@ -266,7 +267,7 @@ jobs:
               raise SystemExit("plan batch_size must be greater than zero")
           if total_batches < 0:
               raise SystemExit("plan total_batches must not be negative")
-          max_matrix_jobs = 256
+          max_matrix_jobs = 250
           job_count = min(max(total_batches, 1), max_matrix_jobs)
           include = [
               {
@@ -366,7 +367,7 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
-      max-parallel: 5
+      max-parallel: 10
       matrix: ${{ fromJSON(needs.plan.outputs.batch-matrix) }}
     steps:
       - name: Checkout shared workflow repository

@@ -125,12 +125,21 @@ sub load_config_dir {
         },
         namespaces => [],
         projects => [],
-        overrides => {},
         exclusions => {},
     );
 
     for my $file (@files) {
         my $payload = _read_config_payload( File::Spec->catfile( $config_dir, $file ) );
+        if ( ref($payload) eq "ARRAY" ) {
+            if ( $file =~ /\Aprojects\.ya?ml\z/ ) {
+                for my $index ( 0 .. $#{$payload} ) {
+                    push @{ $config{projects} },
+                      _normalize_project( $payload->[$index], "$file\[$index\]" );
+                }
+                next;
+            }
+            die "config payload must be an object: $file\n";
+        }
         ref($payload) eq "HASH" or die "config payload must be an object: $file\n";
         my $kind = _required_string( $payload->{kind}, "$file.kind" );
 
@@ -163,16 +172,6 @@ sub load_config_dir {
             next;
         }
 
-        if ( $kind eq "glab-groups/project-overrides" ) {
-            my $projects = $payload->{projects};
-            ref($projects) eq "ARRAY" or die "$file.projects must be a list\n";
-            for my $index ( 0 .. $#{$projects} ) {
-                my $override = _normalize_override( $projects->[$index], "$file.projects[$index]" );
-                $config{overrides}->{ $override->{target_project_path} } = $override;
-            }
-            next;
-        }
-
         if ( $kind eq "glab-groups/project-exclusions" ) {
             my $projects = $payload->{projects};
             ref($projects) eq "ARRAY" or die "$file.projects must be a list\n";
@@ -191,6 +190,7 @@ sub load_config_dir {
 
     @{ $config{namespaces} } || @{ $config{projects} }
       or die "config dir must contain at least one namespace root or explicit project\n";
+    _config_authoritative_projects_by_target_full_path( \%config );
     return \%config;
 }
 
@@ -391,6 +391,7 @@ sub _cmd_plan {
     my %opt = (
         discover_output => "discover.json",
         batch_size => 25,
+        max_batches => 0,
         output => "plan.json",
         summary => "plan.md",
     );
@@ -398,10 +399,12 @@ sub _cmd_plan {
         \@argv,
         "config-dir=s" => \$opt{config_dir},
         "batch-size=i" => \$opt{batch_size},
+        "max-batches=i" => \$opt{max_batches},
         "discover-output=s" => \$opt{discover_output},
         "output=s" => \$opt{output},
         "summary=s" => \$opt{summary},
     ) or die _usage();
+    $opt{max_batches} >= 0 or die "max-batches must be zero or greater\n";
 
     my $config = load_config_dir( $opt{config_dir} );
     warn "performing live inventory discovery\n";
@@ -411,7 +414,9 @@ sub _cmd_plan {
         $config,
         $normalized,
         $opt{batch_size},
-        {},
+        {
+            max_batches => $opt{max_batches},
+        },
     );
     $plan->{total_targets} > 0
       or die "discovery produced zero targets; refusing to continue with a no-op mirror plan\n";
@@ -462,6 +467,41 @@ sub _build_group_batches {
 
     push @batches, $current_batch if $current_batch;
     return ( \@batches, scalar keys %seen_groups );
+}
+
+sub _select_effective_batch_size {
+    my ( $plan, $batch_size, $max_batches ) = @_;
+    $batch_size > 0 or die "batch-size must be greater than zero\n";
+
+    my ( $batches, $total_groups ) = _build_group_batches( $plan, $batch_size );
+    return ( $batch_size, $batches, $total_groups )
+      if !$max_batches || scalar(@{$batches}) <= $max_batches;
+
+    my $total_targets = scalar @{$plan};
+    my $effective_batch_size = $batch_size;
+    my $minimum_batch_size =
+      int( ( $total_targets + $max_batches - 1 ) / $max_batches );
+    $effective_batch_size = $minimum_batch_size
+      if $effective_batch_size < $minimum_batch_size;
+
+    while (1) {
+        ( $batches, $total_groups ) =
+          _build_group_batches( $plan, $effective_batch_size );
+        last if scalar(@{$batches}) <= $max_batches;
+        last if $effective_batch_size >= $total_targets;
+
+        my $next_batch_size = int(
+            ( $effective_batch_size * scalar(@{$batches}) + $max_batches - 1 ) /
+              $max_batches
+        );
+        $next_batch_size = $effective_batch_size + 1
+          if $next_batch_size <= $effective_batch_size;
+        $next_batch_size = $total_targets
+          if $next_batch_size > $total_targets;
+        $effective_batch_size = $next_batch_size;
+    }
+
+    return ( $effective_batch_size, $batches, $total_groups );
 }
 
 sub _cmd_prepare_target {
@@ -654,13 +694,61 @@ sub _discover_inventory {
     my ($config) = @_;
     my $source_auth = _load_source_auth();
     my @inventory;
+    my $authoritative_projects = _config_authoritative_projects_by_target_full_path($config);
+    my $has_authoritative_projects = scalar keys %{$authoritative_projects};
+    my %authoritative_namespaces;
     for my $namespace ( @{ $config->{namespaces} } ) {
         my $policy = _merge_policy( $config->{defaults}, $namespace, {} );
-        push @inventory, @{ _discover_namespace_inventory( $namespace, $policy, $source_auth ) };
+        my $namespace_inventory = _discover_namespace_inventory( $namespace, $policy, $source_auth );
+        if ( !$has_authoritative_projects ) {
+            push @inventory, @{$namespace_inventory};
+            next;
+        }
+        for my $bucket ( @{$namespace_inventory} ) {
+            my @projects;
+            for my $source_project ( @{ $bucket->{projects} || [] } ) {
+                my $source_full_path = _required_string( $source_project->{path_with_namespace}, "path_with_namespace" );
+                my $target_paths = _resolve_namespace_project_target_paths(
+                    $bucket->{namespace},
+                    $bucket->{group_path},
+                    $source_full_path,
+                );
+                my $authoritative = $authoritative_projects->{ $target_paths->{target_full_path} };
+                if ($authoritative) {
+                    my $existing = $authoritative_namespaces{ $target_paths->{target_full_path} };
+                    if (
+                        $existing
+                        && (
+                            ( $existing->{target_owner_path} || q{} ) ne ( $bucket->{namespace}->{target_owner_path} || q{} )
+                            || ( $existing->{target_namespace_path} || q{} ) ne ( $bucket->{namespace}->{target_namespace_path} || q{} )
+                            || ( $existing->{source_group_url} || q{} ) ne ( $bucket->{namespace}->{source_group_url} || q{} )
+                        )
+                      )
+                    {
+                        die "authoritative projects.yml target maps to multiple namespace entries: $target_paths->{target_full_path}\n";
+                    }
+                    $authoritative_namespaces{ $target_paths->{target_full_path} } = $bucket->{namespace};
+                    next;
+                }
+                push @projects, $source_project;
+            }
+            next unless @projects;
+            push @inventory, { %{$bucket}, projects => \@projects };
+        }
     }
     for my $project ( @{ $config->{projects} || [] } ) {
         my $policy = _merge_policy( $config->{defaults}, $project, {} );
-        push @inventory, @{ _discover_project_inventory( $project, $policy, $source_auth ) };
+        my $target_paths = _resolve_explicit_project_target_paths($project);
+        push @inventory, @{
+            _discover_project_inventory(
+                $project,
+                $policy,
+                $source_auth,
+                {
+                    namespace => $authoritative_namespaces{ $target_paths->{target_full_path} },
+                },
+            )
+        };
     }
     return {
         discovered_at => _timestamp(),
@@ -777,20 +865,34 @@ sub _discover_namespace_inventory {
 }
 
 sub _discover_project_inventory {
-    my ( $project, $policy, $source_auth ) = @_;
+    my ( $project, $policy, $source_auth, $opt ) = @_;
+    $opt ||= {};
     my $source = _parse_source_project_url( $project->{source_project_url}, $project->{name} );
+    my $project_source_auth = {};
+    my $source_auth_mode = "none";
+    if ( $source->{kind} eq "github_project" ) {
+        $project_source_auth = _github_installation_source_auth(
+            $source_auth,
+            $source->{base_url},
+            $source->{group_path},
+            $policy,
+        );
+        $source_auth_mode = "github_app";
+    }
     my $chosen_clone_url = $source->{clone_url};
-    my $available = _discover_project_remote_refs( $source, {}, $policy, \$chosen_clone_url );
+    my $available = _discover_project_remote_refs( $source, $project_source_auth, $policy, \$chosen_clone_url );
     my $has_refs =
          scalar( keys %{ $available->{branches} || {} } )
       || scalar( keys %{ $available->{tags} || {} } );
+    $chosen_clone_url = _strip_auth_from_url($chosen_clone_url);
 
     return [
         {
             base_url => $source->{base_url},
             group_path => $source->{group_path},
+            namespace => $opt->{namespace},
             project_entry => $project,
-            source_auth_mode => "none",
+            source_auth_mode => $source_auth_mode,
             projects => [
                 {
                     archived => JSON::PP::false,
@@ -845,19 +947,31 @@ sub _build_plan {
     for my $bucket ( @{ $inventory->{inventory} || [] } ) {
         if ( ref( $bucket->{project_entry} ) eq "HASH" ) {
             my $project_entry = $bucket->{project_entry};
-            my $target_namespace_path = $project_entry->{target_group_path};
+            my $matched_namespace =
+              ref( $bucket->{namespace} ) eq "HASH" ? $bucket->{namespace} : undef;
 
             for my $source_project ( @{ $bucket->{projects} || [] } ) {
                 my $source_full_path = _required_string( $source_project->{path_with_namespace}, "path_with_namespace" );
-                my $target_full_path = _join_path( $target_namespace_path, $project_entry->{name} );
-                my $override = $config->{overrides}->{$target_full_path} || {};
-                my $policy = _merge_policy( $config->{defaults}, $project_entry, $override );
-                my $skip_reason = $config->{exclusions}->{$target_full_path};
+                my $target_paths = _resolve_explicit_project_target_paths(
+                    $project_entry,
+                    $matched_namespace,
+                );
+                my $policy =
+                  $matched_namespace
+                  ? _merge_policy( $config->{defaults}, $matched_namespace, $project_entry )
+                  : _merge_policy( $config->{defaults}, $project_entry, {} );
+                my $skip_reason = _config_exclusion_reason(
+                    $config,
+                    $target_paths->{target_relative_project_path},
+                    $target_paths->{target_full_path},
+                );
                 if ( !$skip_reason && $source_project->{archived} ) {
                     $skip_reason = "Archived source repository is excluded from mirroring.";
                 }
                 if ( !$skip_reason ) {
-                    $skip_reason = _gitlab_invalid_target_path_reason($target_full_path);
+                    $skip_reason = _gitlab_invalid_target_path_reason(
+                        $target_paths->{target_full_path}
+                    );
                 }
                 my $action =
                     $skip_reason ? "skip"
@@ -901,9 +1015,9 @@ sub _build_plan {
                     source_project_id => $source_project->{id},
                     source_ssh_url => $source_project->{ssh_url_to_repo},
                     source_visibility => $source_project->{visibility},
-                    target_full_path => $target_full_path,
-                    target_relative_project_path => $target_full_path,
-                    target_namespace_path => $target_namespace_path,
+                    target_full_path => $target_paths->{target_full_path},
+                    target_relative_project_path => $target_paths->{target_relative_project_path},
+                    target_namespace_path => $target_paths->{target_namespace_path},
                   };
             }
             next;
@@ -916,18 +1030,24 @@ sub _build_plan {
         for my $source_project ( @{ $bucket->{projects} || [] } ) {
             my $source_full_path = _required_string( $source_project->{path_with_namespace}, "path_with_namespace" );
             next if $source_full_path eq $source_group_path;
-            my $relative_path = _relative_path( $source_group_path, $source_full_path );
-            my $target_relative_project_path = _join_path( $namespace->{target_namespace_path}, $relative_path );
-            my $target_full_path = _join_path( $target_root_path, $target_relative_project_path );
-            my $target_namespace_path = dirname($target_full_path);
-            my $override = $config->{overrides}->{$target_relative_project_path} || {};
-            my $policy = _merge_policy( $config->{defaults}, $namespace, $override );
-            my $skip_reason = $config->{exclusions}->{$target_relative_project_path};
+            my $target_paths = _resolve_namespace_project_target_paths(
+                $namespace,
+                $source_group_path,
+                $source_full_path,
+            );
+            my $policy = _merge_policy( $config->{defaults}, $namespace, {} );
+            my $skip_reason = _config_exclusion_reason(
+                $config,
+                $target_paths->{target_relative_project_path},
+                $target_paths->{target_full_path},
+            );
             if ( !$skip_reason && $source_project->{archived} ) {
                 $skip_reason = "Archived source repository is excluded from mirroring.";
             }
             if ( !$skip_reason ) {
-                $skip_reason = _gitlab_invalid_target_path_reason($target_full_path);
+                $skip_reason = _gitlab_invalid_target_path_reason(
+                    $target_paths->{target_full_path}
+                );
             }
             my $action =
                 $skip_reason ? "skip"
@@ -970,9 +1090,9 @@ sub _build_plan {
                 source_project_id => $source_project->{id},
                 source_ssh_url => $source_project->{ssh_url_to_repo},
                 source_visibility => $source_project->{visibility},
-                target_full_path => $target_full_path,
-                target_relative_project_path => $target_relative_project_path,
-                target_namespace_path => $target_namespace_path,
+                target_full_path => $target_paths->{target_full_path},
+                target_relative_project_path => $target_paths->{target_relative_project_path},
+                target_namespace_path => $target_paths->{target_namespace_path},
               };
         }
     }
@@ -981,12 +1101,14 @@ sub _build_plan {
         ( $a->{target_namespace_path} || q{} ) cmp ( $b->{target_namespace_path} || q{} )
           || $a->{target_full_path} cmp $b->{target_full_path}
     } @plan;
-    my ( $batches, $total_groups ) = _build_group_batches( \@plan, $batch_size );
+    my ( $effective_batch_size, $batches, $total_groups ) =
+      _select_effective_batch_size( \@plan, $batch_size, $opt->{max_batches} || 0 );
     return {
         batches => $batches,
-        batch_size => $batch_size,
+        batch_size => $effective_batch_size,
         counts => \%counts,
         generated_at => _timestamp(),
+        max_batches => $opt->{max_batches} || 0,
         plan => \@plan,
         total_batches => scalar @{$batches},
         total_groups => $total_groups,
@@ -1328,29 +1450,6 @@ sub _normalize_project {
         source_project_url => _required_https_url( $payload->{source_project_url}, "$label.source_project_url" ),
         target_branches_protect => _normalize_ref_specs( $payload->{target_branches_protect}, "$label.target_branches_protect" ),
         target_group_path => _required_relative_namespace_path( $payload->{target_group_path}, "$label.target_group_path" ),
-    };
-}
-
-sub _normalize_override {
-    my ( $payload, $label ) = @_;
-    ref($payload) eq "HASH" or die "$label must be an object\n";
-    _reject_visibility_key( $payload, $label );
-    return {
-        additional_branches => _normalize_ref_specs( $payload->{additional_branches}, "$label.additional_branches" ),
-        additional_tags => _normalize_ref_specs( $payload->{additional_tags}, "$label.additional_tags" ),
-        allow_blob_rewrite => _optional_bool( $payload->{allow_blob_rewrite} ),
-        force_lfs => _optional_bool( $payload->{force_lfs} ),
-        git_timeout_seconds => $payload->{git_timeout_seconds},
-        gitlab_source_include_subgroups => _optional_bool( $payload->{gitlab_source_include_subgroups} ),
-        mirror_pristine_tar => _optional_bool( $payload->{mirror_pristine_tar} ),
-        read_retry_attempts => _optional_positive_int( $payload->{read_retry_attempts}, "$label.read_retry_attempts" ),
-        read_retry_backoff_seconds => _optional_positive_int( $payload->{read_retry_backoff_seconds}, "$label.read_retry_backoff_seconds" ),
-        retry_attempts => _optional_positive_int( $payload->{retry_attempts}, "$label.retry_attempts" ),
-        retry_backoff_seconds => _optional_positive_int( $payload->{retry_backoff_seconds}, "$label.retry_backoff_seconds" ),
-        size_limit_bytes => _optional_bounded_positive_int( $payload->{size_limit_bytes}, $DEFAULTS{size_limit_bytes}, "$label.size_limit_bytes" ),
-        max_blob_bytes => _optional_bounded_positive_int( $payload->{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, "$label.max_blob_bytes" ),
-        target_project_path => _required_relative_project_path( $payload->{target_project_path}, "$label.target_project_path" ),
-        target_branches_protect => _normalize_ref_specs( $payload->{target_branches_protect}, "$label.target_branches_protect" ),
     };
 }
 
@@ -2576,8 +2675,9 @@ sub _fetch_selected_refs {
 
 sub _push_selected_refs {
     my ( $repo_dir, $selected, $policy, $default_branch ) = @_;
+    my %additional_branch_names = map { $_->{name} => 1 } @{ $policy->{additional_branches} || [] };
     for my $branch ( @{ $selected->{branches} || [] } ) {
-        next if $default_branch && $branch eq $default_branch;
+        next if $default_branch && $branch eq $default_branch && !$additional_branch_names{$branch};
         _push_target_refspec(
             $repo_dir,
             "refs/heads/$branch:refs/heads/$branch",
@@ -3022,11 +3122,95 @@ sub _read_config_payload {
     my $text = do { local $/; <$fh> };
     close $fh;
 
+    if ( $path =~ /projects\.ya?ml\z/ ) {
+        my $candidate = defined $text ? $text : q{};
+        $candidate =~ s/^\s*#.*\n//mg;
+        $candidate =~ s/\A\s+//;
+        $candidate =~ s/\s+\z//;
+        return [] if !length $candidate || $candidate eq '[]';
+    }
+
     my $docs = CPAN::Meta::YAML->read_string($text)
       or die "unable to parse YAML config: $path\n";
     eval { @{$docs} == 1 }
       or die "config file must contain exactly one YAML document: $path\n";
     return $docs->[0];
+}
+
+sub _config_authoritative_projects_by_target_full_path {
+    my ($config) = @_;
+    if ( ref( $config->{authoritative_projects_by_target_full_path} ) eq "HASH" ) {
+        return $config->{authoritative_projects_by_target_full_path};
+    }
+    my %targets;
+    for my $project ( @{ $config->{projects} || [] } ) {
+        my $target_paths = _resolve_explicit_project_target_paths($project);
+        my $target_full_path = $target_paths->{target_full_path};
+        die "duplicate authoritative projects.yml target path: $target_full_path\n"
+          if exists $targets{$target_full_path};
+        $targets{$target_full_path} = $project;
+    }
+    $config->{authoritative_projects_by_target_full_path} = \%targets
+      if ref($config) eq "HASH";
+    return \%targets;
+}
+
+sub _config_exclusion_reason {
+    my ( $config, $target_relative_project_path, $target_full_path ) = @_;
+    return undef unless ref( $config->{exclusions} ) eq "HASH";
+    return $config->{exclusions}->{$target_full_path}
+      if exists $config->{exclusions}->{$target_full_path};
+    return $config->{exclusions}->{$target_relative_project_path}
+      if exists $config->{exclusions}->{$target_relative_project_path};
+    return undef;
+}
+
+sub _resolve_explicit_project_target_paths {
+    my ( $project, $namespace ) = @_;
+    my $target_namespace_path = _required_relative_namespace_path(
+        $project->{target_group_path},
+        "target_group_path",
+    );
+    my $target_full_path = _join_path(
+        $target_namespace_path,
+        _required_path_segment( $project->{name}, "project.name" ),
+    );
+    my $target_relative_project_path = $target_full_path;
+
+    if ( ref($namespace) eq "HASH" ) {
+        my $target_owner_path = $namespace->{target_owner_path};
+        if ( defined $target_owner_path && !ref($target_owner_path) && length $target_owner_path ) {
+            my $normalized_owner_path = _required_relative_namespace_path(
+                $target_owner_path,
+                "target_owner_path",
+            );
+            my $prefix = $normalized_owner_path . "/";
+            if ( index( $target_full_path, $prefix ) == 0 ) {
+                $target_relative_project_path =
+                  substr( $target_full_path, length($prefix) );
+            }
+        }
+    }
+
+    return {
+        target_full_path => $target_full_path,
+        target_relative_project_path => $target_relative_project_path,
+        target_namespace_path => $target_namespace_path,
+    };
+}
+
+sub _resolve_namespace_project_target_paths {
+    my ( $namespace, $source_group_path, $source_full_path ) = @_;
+    my $target_root_path = _resolve_target_root_group_path($namespace);
+    my $relative_path = _relative_path( $source_group_path, $source_full_path );
+    my $target_relative_project_path =
+      _join_path( $namespace->{target_namespace_path}, $relative_path );
+    my $target_full_path = _join_path( $target_root_path, $target_relative_project_path );
+    return {
+        target_full_path => $target_full_path,
+        target_relative_project_path => $target_relative_project_path,
+        target_namespace_path => dirname($target_full_path),
+    };
 }
 
 sub _write_json {
@@ -3365,9 +3549,17 @@ sub _discover_remote_refs_from_urls {
 
 sub _maybe_auth_url {
     my ( $url, $username, $token ) = @_;
+    return $url unless defined $url && length $url;
     return $url unless $username && $token;
     $url =~ /\Ahttps:\/\/([^\/]+)(\/.*)\z/ or return $url;
     return "https://" . uri_escape_utf8($username) . ":" . uri_escape_utf8($token) . "\@$1$2";
+}
+
+sub _strip_auth_from_url {
+    my ($url) = @_;
+    return $url unless defined $url && length $url;
+    $url =~ s{\A(https://)[^/@]+@}{$1};
+    return $url;
 }
 
 sub _encode_path {

@@ -24,12 +24,17 @@ Parquet artifacts on every run. Source inventory reuse is handled only through
 the GitHub Actions cache; target GitLab group resolution stays path-based and
 in-memory for the lifetime of each mirror job.
 
-Config directories can use `.json`, `.yml`, or `.yaml` files.
+Config directories can use `.json`, `.yml`, or `.yaml` files. `projects.yml`
+is the authoritative explicit-project config for a wrapper. In namespace-based
+wrappers, any target path defined in `projects.yml` overrides namespace
+discovery for that one project: discovery skips the namespace-discovered copy
+and the explicit project entry becomes the source of truth for source URL and
+per-project policy.
 
-Mirroring runs through deterministic batch shards with `max-parallel: 5`. Small
-plans still create one job per batch; larger plans cap the matrix at 256 jobs
-and let each shard process every 256th batch so GitHub Actions matrix limits are
-not exceeded.
+Mirroring runs through deterministic batch shards with `max-parallel: 10`. Small
+plans still create one job per batch. Larger plans raise the effective batch
+size when necessary so the final plan stays within 250 batches, and the matrix
+remains capped at 250 jobs without dropping any target repositories.
 
 ## Supported source roots
 
@@ -131,9 +136,13 @@ Each config directory exposes these defaults:
 - `size_limit_bytes`: selected-ref packed storage budget, defaulting to 9 GiB
 - `max_blob_bytes`: blob limit, defaulting to 100 MiB
 
-The source default branch is mirrored to the managed target branch
-`gitlab/mcr/main` instead of a target-side `main` branch. After the synced
-branch lands, the runtime bootstraps these target-only branches when missing:
+Configured additional branches are force-synced to same-name target branches.
+Configured additional tags are force-synced to same-name target tags. The
+source default branch is always mirrored to the managed target branch
+`gitlab/mcr/main`; if that same source branch is also listed in
+`additional_branches`, it is mirrored both to `gitlab/mcr/main` and to its
+same-name target branch. After the synced branch lands, the runtime bootstraps
+these target-only branches when missing:
 
 - `mcr/main` from `gitlab/mcr/main` and sets it as the target default branch
 - `mcr/feature/init` from `mcr/main`

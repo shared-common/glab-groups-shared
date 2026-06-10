@@ -21,10 +21,11 @@ class SharedWorkflowContractTests(unittest.TestCase):
 
     def test_caps_mirror_matrix_with_batch_strides(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("max-parallel: 5", text)
+        self.assertIn("max-parallel: 10", text)
         self.assertIn("matrix: ${{ fromJSON(needs.plan.outputs.batch-matrix) }}", text)
         self.assertIn("batch-matrix: ${{ steps.batch_matrix.outputs.matrix }}", text)
-        self.assertIn("max_matrix_jobs = 256", text)
+        self.assertIn("--max-batches 250", text)
+        self.assertIn("max_matrix_jobs = 250", text)
         self.assertIn('"shard_index": index', text)
         self.assertIn('"batch_stride": job_count', text)
         self.assertIn("--batch-start \"${{ matrix.batch_start }}\"", text)
