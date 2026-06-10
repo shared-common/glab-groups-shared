@@ -872,7 +872,14 @@ HTML
         },
         25,
     );
-    is( $plan->{plan}->[0]->{target_full_path}, "glab-forks/crowdsecurity/.github", "planning accepts GitHub repo names like .github in the source-relative path" );
+    is( $plan->{plan}->[0]->{target_full_path}, "glab-forks/crowdsecurity/.github", "planning preserves the source-relative target path for GitHub repos like .github" );
+    is( $plan->{plan}->[0]->{action}, "skip", "planning skips GitHub repo names that GitLab cannot create unchanged" );
+    is(
+        $plan->{plan}->[0]->{skip_reason},
+        "Target GitLab path segment '.github' is invalid: path segments must not start with '-', '_', or '.'",
+        "planning records the GitLab path validation reason for unsyncable targets",
+    );
+    is( $plan->{counts}->{skip}, 1, "invalid GitLab target paths count as skipped rows in the plan" );
 }
 
 {

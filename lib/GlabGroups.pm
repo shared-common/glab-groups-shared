@@ -856,6 +856,9 @@ sub _build_plan {
                 if ( !$skip_reason && $source_project->{archived} ) {
                     $skip_reason = "Archived source repository is excluded from mirroring.";
                 }
+                if ( !$skip_reason ) {
+                    $skip_reason = _gitlab_invalid_target_path_reason($target_full_path);
+                }
                 my $action =
                     $skip_reason ? "skip"
                   : ref($source_project) eq "HASH" ? "sync"
@@ -922,6 +925,9 @@ sub _build_plan {
             my $skip_reason = $config->{exclusions}->{$target_relative_project_path};
             if ( !$skip_reason && $source_project->{archived} ) {
                 $skip_reason = "Archived source repository is excluded from mirroring.";
+            }
+            if ( !$skip_reason ) {
+                $skip_reason = _gitlab_invalid_target_path_reason($target_full_path);
             }
             my $action =
                 $skip_reason ? "skip"
@@ -3138,6 +3144,29 @@ sub _relative_path {
           or die "invalid relative project path: $relative\n";
     }
     return $relative;
+}
+
+sub _gitlab_invalid_target_path_reason {
+    my ($path) = @_;
+    $path = _required_string( $path, "target_full_path" );
+    for my $segment ( split m{/}, $path ) {
+        my $reason = _gitlab_invalid_path_segment_reason($segment);
+        next unless defined $reason;
+        return "Target GitLab path segment '$segment' is invalid: $reason";
+    }
+    return undef;
+}
+
+sub _gitlab_invalid_path_segment_reason {
+    my ($segment) = @_;
+    $segment = _required_string( $segment, "target path segment" );
+    return "path segments may contain only ASCII letters, digits, '_', '-', and '.'"
+      if $segment !~ /\A[A-Za-z0-9._-]+\z/;
+    return "path segments must not start with '-', '_', or '.'"
+      if $segment =~ /\A[-_.]/;
+    return "path segments must not end with '-', '_', '.', '.git', or '.atom'"
+      if $segment =~ /(?:[-_.]|\.(?:git|atom))\z/i;
+    return undef;
 }
 
 sub _strip_optional_git_suffix {
