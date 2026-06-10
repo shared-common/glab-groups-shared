@@ -1,0 +1,94 @@
+---
+name: validate-shared
+
+"on":
+  pull_request:
+  push:
+    branches:
+      - "mcr/**"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: validate-shared-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shared-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout shared repository
+        # actions/checkout v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Validate CLI syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          LC_ALL=C TZ=UTC perl -c .github/scripts/glab_groups.pl
+
+      - name: Run Perl runtime tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          LC_ALL=C TZ=UTC prove -Ilib tests/test_glab_groups.t
+
+      - name: Run Python workflow tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          LC_ALL=C TZ=UTC python3 -m unittest discover -s tests -p 'test_*.py'
+
+  config-compatibility:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout shared repository
+        # actions/checkout v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          path: shared
+          persist-credentials: false
+
+      - name: Checkout central config repository
+        # actions/checkout v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: shared-common/gh-actions-cfg
+          ref: mcr/main
+          path: gh-actions-cfg
+          persist-credentials: false
+
+      - name: Validate checked-in config directories with shared loader
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t config_dirs < <(find gh-actions-cfg -mindepth 1 -maxdepth 1 -type d -name 'glab-groups-*' | sort)
+          if [ "${#config_dirs[@]}" -eq 0 ]; then
+            printf '%s\n' "no checked-in config directories found" >&2
+            exit 1
+          fi
+          LC_ALL=C TZ=UTC perl -I shared/lib -MGlabGroups=load_config_dir - "${config_dirs[@]}" <<'PERL'
+          use strict;
+          use warnings;
+
+          for my $dir (@ARGV) {
+              load_config_dir($dir);
+              print "ok $dir\n";
+          }
+          PERL
+
+      - name: Run central config contract tests
+        shell: bash
+        working-directory: gh-actions-cfg
+        run: |
+          set -euo pipefail
+          LC_ALL=C TZ=UTC python3 -m unittest discover -s tests -p 'test_*.py'

@@ -31,10 +31,11 @@ discovery for that one project: discovery skips the namespace-discovered copy
 and the explicit project entry becomes the source of truth for source URL and
 per-project policy.
 
-Mirroring runs through deterministic batch shards with `max-parallel: 10`. Small
-plans still create one job per batch. Larger plans raise the effective batch
-size when necessary so the final plan stays within 250 batches, and the matrix
-remains capped at 250 jobs without dropping any target repositories.
+Mirroring runs through deterministic prepare and mirror batch shards with
+`max-parallel: 10`. Small plans still create one job per batch. Larger plans
+raise the effective batch size when necessary so the final plan stays within
+250 batches, and the matrix remains capped at 250 jobs without dropping any
+target repositories.
 
 ## Supported source roots
 
@@ -114,11 +115,10 @@ Managed projects are reconciled to:
 - `shared_runners_enabled=false`
 
 The planning phase does not pre-create missing target groups or recursively
-inventory the full target namespace tree. It builds subgroup-aware batches so a
-missing subgroup is created only when that subgroup's mirror work runs, then
-the repositories beneath that subgroup are mirrored in the same job. Target
-group IDs are resolved live from the configured path and cached only inside the
-current mirror job.
+inventory the full target namespace tree. It builds subgroup-aware batches so
+the target preparation stage and the matching mirror shard operate on the same
+target subgroup slice. Target group IDs are resolved live from the configured
+path and cached only inside the current job.
 
 ## Ref selection
 
@@ -158,9 +158,17 @@ Those `mcr/*` branches are one-shot target bootstrap branches. They are not
 force-synced from source on later runs.
 
 Plan runs always perform live source discovery. The workflow no longer restores
-or reuses a persisted source inventory cache between runs.
+or reuses a persisted source inventory cache between runs. Target preparation is
+best-effort per repository: it records entry failures and keeps the matrix
+moving so the mirror stage can retry the same targets and emit the final
+per-project result rows.
 
 ## Validation
+
+Repo-native CI in `validate-shared.yml` validates both this shared runtime and
+the current checked-in `shared-common/gh-actions-cfg` config repo, so config
+key changes stay centralized instead of being rechecked separately in every
+wrapper repository.
 
 ```sh
 perl -c .github/scripts/glab_groups.pl

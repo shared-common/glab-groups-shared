@@ -76,6 +76,7 @@ sub run_cmd {
     is( $config->{defaults}->{additional_branches}->[0]->{name}, "release", "normalizes default branches" );
     is( $config->{defaults}->{target_branches_protect}->[0]->{name}, "gitlab/mcr/main", "normalizes default protected target branches" );
     is( $config->{defaults}->{batch_size}, 10, "keeps default batch size at 10" );
+    is( $config->{defaults}->{max_parallel}, 10, "keeps default max parallel at 10" );
     is( $config->{namespaces}->[0]->{target_branches_protect}->[0]->{name}, "gitlab/mcr/main", "loads namespace protected target branches" );
 }
 
@@ -106,6 +107,38 @@ sub run_cmd {
     );
     my $config = load_config_dir($dir);
     is( $config->{namespaces}->[0]->{target_owner_path}, "glab-forks", "loads target owner path from namespace entries" );
+}
+
+{
+    my $dir = tempdir( CLEANUP => 1 );
+    write_json_file(
+        File::Spec->catfile( $dir, "defaults.json" ),
+        {
+            kind => "glab-groups/defaults",
+            version => 1,
+            defaults => {
+                max_parallel => 11,
+            },
+        }
+    );
+    write_json_file(
+        File::Spec->catfile( $dir, "namespaces.json" ),
+        {
+            kind => "glab-groups/namespaces",
+            version => 1,
+            namespaces => [
+                {
+                    name => "kali",
+                    source_group_url => "https://gitlab.com/kalilinux",
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "kalilinux",
+                },
+            ],
+        }
+    );
+
+    my $error = eval { load_config_dir($dir); 1 } ? undef : $@;
+    like( $error, qr/defaults\.json\.defaults\.max_parallel must be less than or equal to 10/, "rejects max_parallel values above the workflow contract" );
 }
 
 {
@@ -1665,6 +1698,64 @@ HTML
         [ "owner/group-b/project-c" ],
         "prepare-target prepares only the selected batch shard entries",
     );
+}
+
+{
+    no warnings 'redefine';
+    my $dir = tempdir( CLEANUP => 1 );
+    my $plan_path = File::Spec->catfile( $dir, "plan.json" );
+    my $output_path = File::Spec->catfile( $dir, "prepared.json" );
+    my @prepared_paths;
+
+    write_json_file(
+        $plan_path,
+        {
+            plan => [
+                {
+                    action => "sync",
+                    target_full_path => "owner/group/project-a",
+                },
+                {
+                    action => "sync",
+                    target_full_path => "owner/group/project-b",
+                },
+            ],
+        }
+    );
+
+    local *GlabGroups::_load_target_client = sub { return {}; };
+    local *GlabGroups::_ensure_target_project = sub {
+        my ( $client, $entry ) = @_;
+        push @prepared_paths, $entry->{target_full_path};
+        die "path conflict\n" if $entry->{target_full_path} eq "owner/group/project-a";
+        return { project_id => 99 };
+    };
+
+    is(
+        GlabGroups::run_cli(
+            "prepare-target",
+            "--plan", $plan_path,
+            "--output", $output_path,
+        ),
+        0,
+        "prepare-target keeps going after per-entry target preparation failures",
+    );
+    is_deeply(
+        \@prepared_paths,
+        [ "owner/group/project-a", "owner/group/project-b" ],
+        "prepare-target attempts later entries after one target preparation failure",
+    );
+
+    my $prepared = JSON::PP->new->decode(
+        do {
+            open( my $fh, "<:encoding(UTF-8)", $output_path ) or die $!;
+            local $/;
+            <$fh>;
+        }
+    );
+    is( $prepared->{prepared_count}, 1, "prepare-target records successful target preparations" );
+    is( $prepared->{failure_count}, 1, "prepare-target records failed target preparations" );
+    is( $prepared->{failures}->[0]->{target_full_path}, "owner/group/project-a", "prepare-target captures the failed target path" );
 }
 
 {

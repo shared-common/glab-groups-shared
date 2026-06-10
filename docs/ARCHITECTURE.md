@@ -25,18 +25,22 @@ entry instead.
 ## Execution order
 
 1. `plan`
-2. `mirror` in batch jobs capped at ten concurrent jobs
-3. `report`
-4. `post_run_analytics.py`
+2. `prepare-target` in batch jobs capped at ten concurrent jobs
+3. `mirror` in matching batch jobs capped at ten concurrent jobs
+4. `report`
+5. `post_run_analytics.py`
 
 The shared workflow creates one deterministic plan, uploads it as a run
-artifact, and then builds a dynamic matrix capped at 250 mirror jobs. Small
-plans still use one job per batch. Larger plans raise the effective batch size
-until the plan fits within that cap, while GitHub Actions runs at most ten jobs
-concurrently. Batch construction never splits one target subgroup across
-multiple mirror jobs. The final report job downloads all batch artifacts,
-aggregates them into one report, CSV, JSON analytics file, and optional Parquet
-file, then publishes those artifacts back to the workflow run.
+artifact, and then builds a dynamic matrix capped at 250 prepare and mirror
+jobs. Small plans still use one job per batch. Larger plans raise the effective
+batch size until the plan fits within that cap, while GitHub Actions runs at
+most ten jobs concurrently. Batch construction never splits one target subgroup
+across multiple jobs. The prepare stage is best-effort per entry so one target
+path failure does not block unrelated shards; the mirror stage retries target
+creation/update during the real sync path and records final per-project
+outcomes. The final report job downloads all batch artifacts, aggregates them
+into one report, CSV, JSON analytics file, and optional Parquet file, then
+publishes those artifacts back to the workflow run.
 
 ## Planning model
 
@@ -52,9 +56,10 @@ The plan includes:
   - `skip`
   - `fail`
 
-Planning no longer crawls the entire target namespace tree to precompute project
-state. It keeps the target path only and defers live target group resolution
-and missing subgroup creation to the target-preparation gate before mirror fanout.
+Planning no longer crawls the entire target namespace tree to precompute
+project state. It keeps the target path only and defers live target group
+resolution and missing subgroup creation to the target-preparation gate before
+mirror fanout.
 
 The plan job always performs live source discovery. The workflow does not
 restore or reuse a persisted source inventory cache between runs.

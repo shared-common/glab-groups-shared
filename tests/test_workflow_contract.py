@@ -4,6 +4,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "group-sync-core.yml"
+VALIDATE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "validate-shared.yml"
 
 
 class SharedWorkflowContractTests(unittest.TestCase):
@@ -132,6 +133,27 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("shared-common/glab-groups-metadata", text)
         self.assertNotIn("update_metadata_repo.py", text)
         self.assertNotIn("target-groups-${{ matrix.shard_index }}.jsonl", text)
+
+    def test_validation_workflow_covers_runtime_and_central_config_repo(self) -> None:
+        text = VALIDATE_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("name: validate-shared", text)
+        self.assertIn('group: validate-shared-${{ github.ref }}', text)
+        self.assertIn("shared-runtime:", text)
+        self.assertIn("config-compatibility:", text)
+        self.assertIn(
+            "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+            text,
+        )
+        self.assertIn("repository: shared-common/gh-actions-cfg", text)
+        self.assertIn("ref: mcr/main", text)
+        self.assertIn("LC_ALL=C TZ=UTC perl -c .github/scripts/glab_groups.pl", text)
+        self.assertIn("LC_ALL=C TZ=UTC prove -Ilib tests/test_glab_groups.t", text)
+        self.assertIn(
+            "LC_ALL=C TZ=UTC python3 -m unittest discover -s tests -p 'test_*.py'",
+            text,
+        )
+        self.assertIn("perl -I shared/lib -MGlabGroups=load_config_dir -", text)
+        self.assertIn("find gh-actions-cfg -mindepth 1 -maxdepth 1 -type d -name 'glab-groups-*' | sort", text)
 
 
 if __name__ == "__main__":

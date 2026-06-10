@@ -365,7 +365,6 @@ sub _cmd_discover {
         "output=s" => \$opt{output},
     ) or die _usage();
 
-    $opt{batch_size} > 0 or die "batch-size must be greater than zero\n";
     my $config = load_config_dir( $opt{config_dir} );
     my $inventory = _discover_inventory($config);
     _write_json( $opt{output}, $inventory );
@@ -530,6 +529,7 @@ sub _cmd_prepare_target {
     my @entries = @{ $plan->{plan} || [] };
     my @batches = @{ $plan->{batches} || [] };
     my @prepared;
+    my @failed;
     my $processed_batches = 0;
     my $total_batches = scalar @batches;
 
@@ -547,7 +547,22 @@ sub _cmd_prepare_target {
             for my $index ( $start .. $end ) {
                 my $entry = $entries[$index];
                 next if $entry->{action} eq "skip" || $entry->{action} eq "fail";
-                push @prepared, _ensure_target_project( $client, $entry );
+                my $prepared = eval { _ensure_target_project( $client, $entry ) };
+                if ($@) {
+                    my $error = _trim_error($@);
+                    warn sprintf "prepare-target failed for %s: %s\n",
+                      ( $entry->{target_full_path} || "<unknown target>" ),
+                      $error;
+                    push @failed,
+                      {
+                        error => $error,
+                        planned_action => $entry->{action},
+                        status => "failed",
+                        target_full_path => $entry->{target_full_path},
+                      };
+                    next;
+                }
+                push @prepared, $prepared;
             }
             $processed_batches++;
         }
@@ -555,7 +570,22 @@ sub _cmd_prepare_target {
     else {
         for my $entry (@entries) {
             next if $entry->{action} eq "skip" || $entry->{action} eq "fail";
-            push @prepared, _ensure_target_project( $client, $entry );
+            my $prepared = eval { _ensure_target_project( $client, $entry ) };
+            if ($@) {
+                my $error = _trim_error($@);
+                warn sprintf "prepare-target failed for %s: %s\n",
+                  ( $entry->{target_full_path} || "<unknown target>" ),
+                  $error;
+                push @failed,
+                  {
+                    error => $error,
+                    planned_action => $entry->{action},
+                    status => "failed",
+                    target_full_path => $entry->{target_full_path},
+                  };
+                next;
+            }
+            push @prepared, $prepared;
         }
     }
     _write_json(
@@ -564,7 +594,10 @@ sub _cmd_prepare_target {
             batch_start => $opt{batch_start},
             batch_stride => $opt{batch_stride},
             batch_limit => $opt{batch_limit},
+            failure_count => scalar @failed,
+            failures => \@failed,
             processed_batches => $processed_batches,
+            prepared_count => scalar @prepared,
             total_batches => $total_batches,
             prepared => \@prepared,
         }
@@ -1434,7 +1467,7 @@ sub _normalize_defaults_payload {
         force_lfs => _bool_or_default( $payload->{force_lfs}, 0 ),
         git_timeout_seconds => _defaulted_positive_int( $payload->{git_timeout_seconds}, $DEFAULTS{git_timeout_seconds}, "$label.defaults.git_timeout_seconds" ),
         max_blob_bytes => _defaulted_bounded_positive_int( $payload->{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, "$label.defaults.max_blob_bytes" ),
-        max_parallel => _defaulted_positive_int( $payload->{max_parallel}, $DEFAULTS{max_parallel}, "$label.defaults.max_parallel" ),
+        max_parallel => _defaulted_bounded_positive_int( $payload->{max_parallel}, $DEFAULTS{max_parallel}, $DEFAULTS{max_parallel}, "$label.defaults.max_parallel" ),
         mirror_pristine_tar => _bool_or_default( $payload->{mirror_pristine_tar}, 1 ),
         gitlab_source_include_subgroups => _bool_or_default( $payload->{gitlab_source_include_subgroups}, 0 ),
         read_retry_attempts => _defaulted_positive_int( $payload->{read_retry_attempts}, $GITLAB_READ_DEFAULTS{retry_attempts}, "$label.defaults.read_retry_attempts" ),
