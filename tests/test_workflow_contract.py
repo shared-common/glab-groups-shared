@@ -7,14 +7,18 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "group-sync-core.yml"
 
 
 class SharedWorkflowContractTests(unittest.TestCase):
-    def test_artifact_actions_are_pinned_to_node24_releases(self) -> None:
+    def test_actions_are_pinned_to_current_node24_releases(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn(
-            "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
+            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
             text,
         )
         self.assertIn(
-            "actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131",
+            "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+            text,
+        )
+        self.assertIn(
+            "actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae",
             text,
         )
 
@@ -71,6 +75,10 @@ class SharedWorkflowContractTests(unittest.TestCase):
         )
         self.assertIn("$config->{projects}", text)
         self.assertIn("inventory-cache-max-age-seconds", text)
+        self.assertIn('if [ "${SHARED_REPO}" != "shared-common/glab-groups-shared" ]; then', text)
+        self.assertIn('if [ "${CONFIG_REPO}" != "shared-common/gh-actions-cfg" ]; then', text)
+        self.assertIn("mcr/main|mcr/staging|mcr/release|v[0-9]*", text)
+        self.assertIn('[[ ! "${ref_value}" =~ ^[0-9a-f]{40}$ ]]', text)
         self.assertNotIn('config_meta_json="$(', text)
         self.assertNotIn("NEEDS_GITHUB_SOURCE_AUTH", text)
         self.assertEqual(
@@ -108,7 +116,6 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("force-refresh-discovery:", text)
         self.assertIn("Restore source inventory cache", text)
         self.assertIn("if: ${{ !inputs.force-refresh-discovery }}", text)
-        self.assertIn("actions/cache@v5", text)
         self.assertIn("inventory-cache", text)
         self.assertIn("--discover-output discover.json", text)
         self.assertIn("--inventory-output \"inventory-cache/discover.json\"", text)
@@ -130,6 +137,9 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("repository: shared-common/glab-groups-metadata", text)
         self.assertIn("path: metadata", text)
         self.assertIn("python3 shared/.github/scripts/update_metadata_repo.py", text)
+        self.assertIn('metadata_paths=(', text)
+        self.assertIn('mkdir -p "${metadata_path}"', text)
+        self.assertIn('git add -A -- "${metadata_paths[@]}"', text)
         self.assertIn('git push origin HEAD:main', text)
 
 

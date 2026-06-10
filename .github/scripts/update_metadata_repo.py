@@ -229,6 +229,8 @@ def main() -> int:
 
     cache_dir = metadata_dir / "cache" / config_path
     runs_dir = metadata_dir / "runs" / config_path
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    runs_dir.mkdir(parents=True, exist_ok=True)
 
     append_new_group_records(
         cache_dir / "source-groups.jsonl",

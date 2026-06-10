@@ -19,6 +19,116 @@ def load_jsonl(path: Path) -> list[dict]:
 
 
 class UpdateMetadataRepoTests(unittest.TestCase):
+    def test_creates_empty_cache_directory_for_runs_without_cache_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base = Path(tmp_dir)
+            metadata_dir = base / "metadata"
+            metadata_dir.mkdir()
+
+            discovery_path = base / "discover.json"
+            discovery_path.write_text(
+                json.dumps(
+                    {
+                        "discovered_at": "2026-06-09T12:00:00Z",
+                        "inventory": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            plan_path = base / "plan.json"
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "batch_size": 25,
+                        "counts": {"sync": 1, "skip": 0, "fail": 0},
+                        "generated_at": "2026-06-09T12:01:00Z",
+                        "total_batches": 1,
+                        "total_groups": 0,
+                        "total_targets": 1,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            report_path = base / "report.json"
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "generated_at": "2026-06-09T12:02:00Z",
+                        "plan_counts": {"sync": 1, "skip": 0, "fail": 0},
+                        "result_counts": {"mirrored": 1, "skipped": 0, "failed": 0},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            analytics_path = base / "analytics.json"
+            analytics_path.write_text(
+                json.dumps({"generated_rows": 1, "status_breakdown": {"mirrored": 1}}) + "\n",
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [
+                    "python3",
+                    str(SCRIPT),
+                    "--metadata-dir",
+                    str(metadata_dir),
+                    "--config-path",
+                    "glab-groups-projects",
+                    "--plan",
+                    str(plan_path),
+                    "--discovery",
+                    str(discovery_path),
+                    "--report",
+                    str(report_path),
+                    "--analytics",
+                    str(analytics_path),
+                    "--event-name",
+                    "schedule",
+                    "--repository",
+                    "shared-common/glab-groups-projects",
+                    "--run-attempt",
+                    "1",
+                    "--run-id",
+                    "999",
+                    "--sha",
+                    "deadbeef",
+                    "--workflow-ref",
+                    "shared-common/glab-groups-projects/.github/workflows/group-sync.yml@refs/heads/mcr/main",
+                ],
+                check=True,
+            )
+
+            cache_dir = metadata_dir / "cache" / "glab-groups-projects"
+            runs_dir = metadata_dir / "runs" / "glab-groups-projects"
+            cache_dir_exists = cache_dir.is_dir()
+            runs_dir_exists = runs_dir.is_dir()
+            plan_runs = load_jsonl(runs_dir / "plan.jsonl")
+            subprocess.run(["git", "-C", str(metadata_dir), "init", "-q"], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(metadata_dir),
+                    "add",
+                    "-A",
+                    "--",
+                    "cache/glab-groups-projects",
+                    "runs/glab-groups-projects",
+                ],
+                check=True,
+            )
+
+        self.assertTrue(cache_dir_exists)
+        self.assertTrue(runs_dir_exists)
+        self.assertEqual(len(plan_runs), 1)
+        self.assertEqual(plan_runs[0]["summary"]["total_targets"], 1)
+
     def test_appends_gitlab_group_caches_and_run_summaries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             base = Path(tmp_dir)
