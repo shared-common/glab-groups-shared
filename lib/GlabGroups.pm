@@ -1815,6 +1815,22 @@ sub _clear_group_path_cache_tree {
 sub _ensure_target_project {
     my ( $client, $entry ) = @_;
     my $group_cache = $client->{group_path_cache} ||= {};
+    my $name = basename( $entry->{target_full_path} );
+    my $lookup_existing_project = sub {
+        my ($group_id) = @_;
+        my $project;
+        $project = _get_project( $client, $entry->{target_full_path} )
+          if defined $entry->{target_full_path};
+        if ( !$project && defined $group_id && defined $entry->{target_full_path} ) {
+            $project = _find_project_by_namespace_and_path(
+                $client,
+                $group_id,
+                $entry->{target_full_path},
+                $name,
+            );
+        }
+        return $project;
+    };
     my $existing =
       defined $entry->{target_project_id}
       ? {
@@ -1828,13 +1844,12 @@ sub _ensure_target_project {
 	            shared_runners_enabled =>
 	              defined $entry->{target_shared_runners_enabled}
 	              ? ( $entry->{target_shared_runners_enabled} ? JSON::PP::true : JSON::PP::false )
-	              : undef,
-	        }
-	      : undef;
+		              : undef,
+		        }
+		      : undef;
     if ( !$existing && defined $entry->{target_full_path} ) {
-        $existing = _get_project( $client, $entry->{target_full_path} );
+        $existing = $lookup_existing_project->(undef);
     }
-    my $name = basename( $entry->{target_full_path} );
     my $target_group_id;
     if ( !$existing && defined $entry->{target_namespace_path} ) {
         $target_group_id = _ensure_group_path(
@@ -1842,14 +1857,7 @@ sub _ensure_target_project {
             $entry->{target_namespace_path},
             $group_cache,
         );
-        if ( !$existing && defined $entry->{target_full_path} ) {
-            $existing = _find_project_by_namespace_and_path(
-                $client,
-                $target_group_id,
-                $entry->{target_full_path},
-                $name,
-            );
-        }
+        $existing = $lookup_existing_project->($target_group_id) if !$existing;
     }
     my %payload;
     if ( !exists( $entry->{source_description_known} ) || $entry->{source_description_known} ) {
@@ -1895,66 +1903,61 @@ sub _ensure_target_project {
         }
         else {
             my $create_error = $@ || "unknown project creation error\n";
-            $project = _get_project( $client, $entry->{target_full_path} )
-              if defined $entry->{target_full_path};
-            if ( !$project && defined $target_group_id && defined $entry->{target_full_path} ) {
-                $project = _find_project_by_namespace_and_path(
-                    $client,
-                    $target_group_id,
-                    $entry->{target_full_path},
-                    $name,
-                );
-            }
+            $project = $lookup_existing_project->($target_group_id);
             if ($project) {
                 $created = JSON::PP::false;
             }
-            elsif (
-                _is_gitlab_invalid_namespace_error($create_error)
-                && defined $entry->{target_namespace_path}
-              )
-            {
-                _clear_group_path_cache_tree( $group_cache, $entry->{target_namespace_path} );
-                $target_group_id = _ensure_group_path(
-                    $client,
-                    $entry->{target_namespace_path},
-                    $group_cache,
-                );
-                my $retry_ok = eval {
-                    $project = $create_project->();
-                    1;
-                };
-                if ($retry_ok) {
-                    $created = JSON::PP::true;
+            else {
+                my $invalid_namespace_error = _is_gitlab_invalid_namespace_error($create_error);
+                my $path_conflict_error = _is_gitlab_path_conflict_error($create_error);
+                my $refreshed_namespace = 0;
+                if ( ( $invalid_namespace_error || $path_conflict_error ) && defined $entry->{target_namespace_path} ) {
+                    _clear_group_path_cache_tree( $group_cache, $entry->{target_namespace_path} );
+                    $target_group_id = _ensure_group_path(
+                        $client,
+                        $entry->{target_namespace_path},
+                        $group_cache,
+                    );
+                    $refreshed_namespace = 1;
                 }
-                else {
-                    $create_error = $@ || "unknown project creation error\n";
-                    $project = _get_project( $client, $entry->{target_full_path} )
-                      if defined $entry->{target_full_path};
-                    if ( !$project && defined $target_group_id && defined $entry->{target_full_path} ) {
-                        $project = _find_project_by_namespace_and_path(
-                            $client,
-                            $target_group_id,
-                            $entry->{target_full_path},
-                            $name,
-                        );
+                if ($path_conflict_error && $refreshed_namespace) {
+                    $project = $lookup_existing_project->($target_group_id);
+                }
+                if ($project) {
+                    $created = JSON::PP::false;
+                }
+                elsif ($invalid_namespace_error) {
+                    my $retry_ok = eval {
+                        $project = $create_project->();
+                        1;
+                    };
+                    if ($retry_ok) {
+                        $created = JSON::PP::true;
+                    }
+                    else {
+                        $create_error = $@ || "unknown project creation error\n";
+                        $project = $lookup_existing_project->($target_group_id);
                     }
                 }
-            }
-            if ( !$created && !$project && _is_gitlab_path_conflict_error($create_error) ) {
-                $project = _get_project( $client, $entry->{target_full_path} )
-                  if defined $entry->{target_full_path};
-                if ( !$project && defined $target_group_id && defined $entry->{target_full_path} ) {
-                    $project = _find_project_by_namespace_and_path(
-                        $client,
-                        $target_group_id,
-                        $entry->{target_full_path},
-                        $name,
-                    );
+                elsif ($path_conflict_error) {
+                    my $retry_ok = eval {
+                        $project = $create_project->();
+                        1;
+                    };
+                    if ($retry_ok) {
+                        $created = JSON::PP::true;
+                    }
+                    else {
+                        $create_error = $@ || "unknown project creation error\n";
+                        $project = $lookup_existing_project->($target_group_id);
+                    }
                 }
-                die "gitlab project path conflict for $entry->{target_full_path}: $create_error" unless $project;
-            }
-            elsif ( !$created && !$project ) {
-                die $create_error;
+                if ( !$created && !$project && $path_conflict_error ) {
+                    die "gitlab project path conflict for $entry->{target_full_path}: $create_error";
+                }
+                elsif ( !$created && !$project ) {
+                    die $create_error;
+                }
             }
         }
     }

@@ -2197,6 +2197,78 @@ HTML
 {
     no warnings 'redefine';
     my @requests;
+    my @resolved_namespaces;
+    my @resolved_ids = ( 42, 77 );
+
+    local *GlabGroups::_get_project = sub {
+        return undef;
+    };
+
+    local *GlabGroups::_ensure_group_path = sub {
+        my ( $client, $group_path, $cache ) = @_;
+        push @resolved_namespaces, $group_path;
+        return shift @resolved_ids;
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        push @requests, { method => $method, path => $path, payload => $payload };
+        die "gitlab request failed [400] POST /projects: {\"message\":{\"base\":[\"path has already been taken\"]}}\n"
+          if $method eq "POST"
+          && $path eq "/projects"
+          && $payload->{namespace_id} == 42;
+        return []
+          if $method eq "GET"
+          && (
+            $path eq "/groups/42/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&search=yubikey-piv-manager&simple=true"
+            || $path eq "/groups/42/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&simple=true"
+          );
+        return [
+            {
+                id => 901,
+                archived => JSON::PP::false,
+                description => "existing",
+                group_runners_enabled => JSON::PP::false,
+                lfs_enabled => JSON::PP::false,
+                path => "yubikey-piv-manager",
+                path_with_namespace => "glab-forks/debian/auth-team/yubikey-piv-manager",
+                shared_runners_enabled => JSON::PP::false,
+            },
+        ] if $method eq "GET"
+          && (
+            $path eq "/groups/77/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&search=yubikey-piv-manager&simple=true"
+            || $path eq "/groups/77/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&simple=true"
+          );
+        die "unexpected gitlab request: $method $path";
+    };
+
+    my $result = GlabGroups::_ensure_target_project(
+        {},
+        {
+            policy => { force_lfs => JSON::PP::false },
+            source_archived => JSON::PP::false,
+            source_description => "existing",
+            source_lfs_enabled => JSON::PP::false,
+            target_full_path => "glab-forks/debian/auth-team/yubikey-piv-manager",
+            target_namespace_path => "glab-forks/debian/auth-team",
+        }
+    );
+    ok( !$result->{created}, "reuses an existing target project after re-resolving a stale nested namespace on project path conflict" );
+    is_deeply(
+        \@resolved_namespaces,
+        [ "glab-forks/debian/auth-team", "glab-forks/debian/auth-team" ],
+        "project path conflict recovery re-resolves the exact nested target namespace path before reusing the existing project",
+    );
+    is_deeply(
+        [ map { $_->{payload}->{namespace_id} } grep { $_->{method} eq "POST" && $_->{path} eq "/projects" } @requests ],
+        [42],
+        "project path conflict recovery does not create a duplicate project once the refreshed nested namespace lookup finds the existing target",
+    );
+}
+
+{
+    no warnings 'redefine';
+    my @requests;
     my @ensured_groups;
 
     local *GlabGroups::_get_project = sub {
