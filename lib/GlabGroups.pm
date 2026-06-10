@@ -1786,6 +1786,9 @@ sub _is_gitlab_invalid_namespace_error {
     return 0 unless defined $error && !ref($error);
     return 1 if $error =~ /namespace[^[]*\[[^\]]*is not valid[^\]]*\]/i;
     return 1 if $error =~ /namespace_id[^[]*\[[^\]]*is invalid[^\]]*\]/i;
+    return 1 if $error =~ /namespace[^[]*\[[^\]]*not found[^\]]*\]/i;
+    return 1 if $error =~ /namespace_id[^[]*\[[^\]]*does not exist[^\]]*\]/i;
+    return 1 if $error =~ /namespace[^[]*\[[^\]]*can't be blank[^\]]*\]/i;
     return 0;
 }
 
@@ -1828,6 +1831,31 @@ sub _resolve_existing_group_path {
     return $parent_id;
 }
 
+sub _resolve_target_namespace_id {
+    my ( $client, $entry, $group_cache ) = @_;
+    return undef unless defined $entry->{target_namespace_path};
+
+    my $group_path = $entry->{target_namespace_path};
+    return $group_cache->{$group_path} if exists $group_cache->{$group_path};
+
+    my $group = _get_group( $client, $group_path );
+    if ($group) {
+        my $group_id = 0 + $group->{id};
+        $group_cache->{$group_path} = $group_id;
+        return $group_id;
+    }
+
+    if ( defined $entry->{target_namespace_id} ) {
+        my $group_id = 0 + $entry->{target_namespace_id};
+        $group_cache->{$group_path} = $group_id;
+        return $group_id;
+    }
+
+    my $group_id = _ensure_group_path( $client, $group_path, $group_cache );
+    $group_cache->{$group_path} = $group_id;
+    return $group_id;
+}
+
 sub _ensure_target_project {
     my ( $client, $entry ) = @_;
     my $group_cache = $client->{group_path_cache} ||= {};
@@ -1841,24 +1869,19 @@ sub _ensure_target_project {
               : undef,
             id => $entry->{target_project_id},
             lfs_enabled => $entry->{target_lfs_enabled} ? JSON::PP::true : JSON::PP::false,
-            shared_runners_enabled =>
-              defined $entry->{target_shared_runners_enabled}
-              ? ( $entry->{target_shared_runners_enabled} ? JSON::PP::true : JSON::PP::false )
-              : undef,
-        }
-      : undef;
-    if ( defined $entry->{target_namespace_path} ) {
-        if ( exists $group_cache->{ $entry->{target_namespace_path} } ) {
-            $entry->{target_namespace_id} = $group_cache->{ $entry->{target_namespace_path} };
-        }
-        elsif ( defined $entry->{target_namespace_id} ) {
-            $group_cache->{ $entry->{target_namespace_path} } = $entry->{target_namespace_id};
-        }
+	            shared_runners_enabled =>
+	              defined $entry->{target_shared_runners_enabled}
+	              ? ( $entry->{target_shared_runners_enabled} ? JSON::PP::true : JSON::PP::false )
+	              : undef,
+	        }
+	      : undef;
+    if ( !$existing && defined $entry->{target_full_path} ) {
+        $existing = _get_project( $client, $entry->{target_full_path} );
     }
-    if ( !defined $entry->{target_namespace_id} ) {
-        $entry->{target_namespace_id} = _ensure_group_path(
+    if ( !$existing && defined $entry->{target_namespace_path} ) {
+        $entry->{target_namespace_id} = _resolve_target_namespace_id(
             $client,
-            $entry->{target_namespace_path},
+            $entry,
             $group_cache,
         );
     }
@@ -1907,7 +1930,12 @@ sub _ensure_target_project {
         }
         else {
             my $create_error = $@ || "unknown project creation error\n";
-            if (
+            $project = _get_project( $client, $entry->{target_full_path} )
+              if defined $entry->{target_full_path};
+            if ($project) {
+                $created = JSON::PP::false;
+            }
+            elsif (
                 _is_gitlab_invalid_namespace_error($create_error)
                 && defined $entry->{target_namespace_path}
               )
@@ -1942,13 +1970,15 @@ sub _ensure_target_project {
                 }
                 else {
                     $create_error = $@ || "unknown project creation error\n";
+                    $project = _get_project( $client, $entry->{target_full_path} )
+                      if defined $entry->{target_full_path};
                 }
             }
-            if ( !$created && _is_gitlab_path_conflict_error($create_error) ) {
+            if ( !$created && !$project && _is_gitlab_path_conflict_error($create_error) ) {
                 $project = _get_project( $client, $entry->{target_full_path} );
                 die "gitlab project path conflict for $entry->{target_full_path}: $create_error" unless $project;
             }
-            elsif ( !$created ) {
+            elsif ( !$created && !$project ) {
                 die $create_error;
             }
         }

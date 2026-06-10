@@ -1757,7 +1757,54 @@ HTML
 {
     no warnings 'redefine';
     my @requests;
+
+    local *GlabGroups::_get_project = sub {
+        my ( $client, $project_path ) = @_;
+        return {
+            id => 321,
+            archived => JSON::PP::false,
+            description => "existing",
+            group_runners_enabled => JSON::PP::false,
+            lfs_enabled => JSON::PP::false,
+            shared_runners_enabled => JSON::PP::false,
+        } if $project_path eq "owner/group/project";
+        return undef;
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        push @requests, { method => $method, path => $path, payload => $payload };
+        return { id => 321, archived => JSON::PP::false };
+    };
+
+    my $result = GlabGroups::_ensure_target_project(
+        {},
+        {
+            policy => { force_lfs => JSON::PP::false },
+            source_archived => JSON::PP::false,
+            source_description => "existing",
+            source_lfs_enabled => JSON::PP::false,
+            target_full_path => "owner/group/project",
+            target_namespace_id => 42,
+            target_namespace_path => "owner/group",
+        }
+    );
+    ok( !$result->{created}, "reuses an existing target project found by exact full path lookup" );
+    is( scalar @requests, 0, "does not issue create or update requests when the exact target project path already exists" );
+}
+
+{
+    no warnings 'redefine';
+    my @requests;
     my @ensured_groups;
+
+    local *GlabGroups::_get_project = sub {
+        return undef;
+    };
+
+    local *GlabGroups::_get_group = sub {
+        return undef;
+    };
 
     local *GlabGroups::_ensure_group_path = sub {
         my ( $client, $group_path, $cache ) = @_;
@@ -1792,6 +1839,10 @@ HTML
     my @requests;
     my @group_lookups;
 
+    local *GlabGroups::_get_project = sub {
+        return undef;
+    };
+
     local *GlabGroups::_get_group = sub {
         my ( $client, $group_path ) = @_;
         push @group_lookups, $group_path;
@@ -1818,11 +1869,11 @@ HTML
         }
     );
     ok( $result->{created}, "creates missing target project after resolving the live target group id" );
-    is_deeply( \@group_lookups, [], "does not preflight locked namespaces before the first project create attempt" );
+    is_deeply( \@group_lookups, [ "glab-forks/crowdsecurity" ], "checks the exact locked namespace path before creating the target project" );
     is_deeply(
         [ map { $_->{payload}->{namespace_id} } grep { $_->{method} eq "POST" && $_->{path} eq "/projects" } @requests ],
-        [42],
-        "uses the configured namespace id on the first project create attempt",
+        [88],
+        "uses the live namespace id when the configured target namespace path already exists",
     );
 }
 
@@ -1831,6 +1882,10 @@ HTML
     my @requests;
     my @group_lookups;
     my $lookup_count = 0;
+
+    local *GlabGroups::_get_project = sub {
+        return undef;
+    };
 
     local *GlabGroups::_get_group = sub {
         my ( $client, $group_path ) = @_;
@@ -1887,8 +1942,73 @@ HTML
     );
     is_deeply(
         \@group_lookups,
-        [ "glab-forks", "glab-forks/google" ],
-        "invalid namespace refresh falls back to read-only parent and subgroup lookup when direct full-path lookup misses",
+        [ "glab-forks/google", "glab-forks", "glab-forks/google" ],
+        "invalid namespace refresh first checks the exact target namespace path, then falls back to parent and subgroup lookup when needed",
+    );
+}
+
+{
+    no warnings 'redefine';
+    my @requests;
+    my @group_lookups;
+    my $lookup_count = 0;
+
+    local *GlabGroups::_get_project = sub {
+        return undef;
+    };
+
+    local *GlabGroups::_get_group = sub {
+        my ( $client, $group_path ) = @_;
+        push @group_lookups, $group_path;
+        $lookup_count++;
+        return undef if $group_path eq "glab-forks";
+        return { id => 77, full_path => $group_path, path => "google" } if $group_path eq "glab-forks/google" && $lookup_count >= 2;
+        return undef;
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        push @requests, { method => $method, path => $path, payload => $payload };
+        die "gitlab request failed [400] POST /projects: {\"message\":{\"namespace_id\":[\"does not exist\"]}}\n"
+          if $method eq "POST"
+          && $path eq "/projects"
+          && $payload->{namespace_id} == 42;
+        return [
+            {
+                id => 66,
+                full_path => "glab-forks",
+                path => "glab-forks",
+            },
+        ] if $method eq "GET"
+          && $path eq "/groups?top_level_only=true&per_page=100&page=1&search=glab-forks";
+        return [
+            {
+                id => 77,
+                full_path => "glab-forks/google",
+                path => "google",
+            },
+        ] if $method eq "GET"
+          && $path eq "/groups/66/subgroups?per_page=100&page=1&search=google";
+        return { id => 124, archived => JSON::PP::false };
+    };
+
+    my $result = GlabGroups::_ensure_target_project(
+        {},
+        {
+            policy => { force_lfs => JSON::PP::false },
+            source_archived => JSON::PP::false,
+            source_description => "source",
+            source_lfs_enabled => JSON::PP::false,
+            target_full_path => "glab-forks/google/user-recovery-tools",
+            target_namespace_path => "glab-forks/google",
+            target_namespace_id => 42,
+        }
+    );
+    ok( $result->{created}, "retries project creation after refreshing a namespace_id does not exist error" );
+    is_deeply(
+        [ map { $_->{payload}->{namespace_id} } grep { $_->{method} eq "POST" && $_->{path} eq "/projects" } @requests ],
+        [ 42, 77 ],
+        "stale configured namespace ids are refreshed even when GitLab reports namespace_id does not exist",
     );
 }
 
@@ -1896,6 +2016,10 @@ HTML
     no warnings 'redefine';
     my @requests;
     my @ensured_groups;
+
+    local *GlabGroups::_get_project = sub {
+        return undef;
+    };
 
     local *GlabGroups::_get_group = sub {
         my ( $client, $group_path ) = @_;
