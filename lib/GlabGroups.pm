@@ -506,23 +506,65 @@ sub _select_effective_batch_size {
 
 sub _cmd_prepare_target {
     my (@argv) = @_;
-    my %opt = ( output => "prepared.json" );
+    my %opt = (
+        output => "prepared.json",
+        batch_start => 0,
+        batch_stride => 1,
+        batch_limit => 0,
+    );
     GetOptionsFromArray(
         \@argv,
         "plan=s" => \$opt{plan},
         "output=s" => \$opt{output},
+        "batch-start=i" => \$opt{batch_start},
+        "batch-stride=i" => \$opt{batch_stride},
+        "batch-limit=i" => \$opt{batch_limit},
     ) or die _usage();
+    $opt{batch_start} >= 0 or die "batch-start must be zero or greater\n";
+    $opt{batch_stride} > 0 or die "batch-stride must be greater than zero\n";
+    $opt{batch_limit} >= 0 or die "batch-limit must be zero or greater\n";
 
     my $plan = _read_json( $opt{plan} );
     my $client = _load_target_client();
+    my @entries = @{ $plan->{plan} || [] };
+    my @batches = @{ $plan->{batches} || [] };
     my @prepared;
-    for my $entry ( @{ $plan->{plan} || [] } ) {
-        next if $entry->{action} eq "skip" || $entry->{action} eq "fail";
-        push @prepared, _ensure_target_project( $client, $entry );
+    my $processed_batches = 0;
+    my $total_batches = scalar @batches;
+
+    if (@batches) {
+        for ( my $batch_index = $opt{batch_start}; $batch_index < $total_batches; $batch_index += $opt{batch_stride} ) {
+            last if $opt{batch_limit} > 0 && $processed_batches >= $opt{batch_limit};
+            my $batch = $batches[$batch_index];
+            next unless ref($batch) eq "HASH";
+            my $start = $batch->{start_index};
+            my $end = $batch->{end_index};
+            next unless defined $start && defined $end;
+            last if $start > $#entries;
+            $end = $#entries if $end > $#entries;
+
+            for my $index ( $start .. $end ) {
+                my $entry = $entries[$index];
+                next if $entry->{action} eq "skip" || $entry->{action} eq "fail";
+                push @prepared, _ensure_target_project( $client, $entry );
+            }
+            $processed_batches++;
+        }
+    }
+    else {
+        for my $entry (@entries) {
+            next if $entry->{action} eq "skip" || $entry->{action} eq "fail";
+            push @prepared, _ensure_target_project( $client, $entry );
+        }
     }
     _write_json(
         $opt{output},
         {
+            batch_start => $opt{batch_start},
+            batch_stride => $opt{batch_stride},
+            batch_limit => $opt{batch_limit},
+            processed_batches => $processed_batches,
+            total_batches => $total_batches,
             prepared => \@prepared,
         }
     );
@@ -2808,8 +2850,7 @@ sub _gitlab_request {
         if (
             (
                 $response->{status} != 0
-                || $http_status == 429
-                || $http_status >= 500
+                || _is_retryable_gitlab_http_error( $http_status, $body )
             )
             && $attempt < $attempts
           )
@@ -2823,6 +2864,17 @@ sub _gitlab_request {
         die "gitlab request failed [$status_label] $method $path: $message\n";
     }
     die "gitlab request exhausted retries for $method $path\n";
+}
+
+sub _is_retryable_gitlab_http_error {
+    my ( $http_status, $body ) = @_;
+    return 1 if $http_status == 408;
+    return 1 if $http_status == 429;
+    return 1 if $http_status >= 500;
+    return 0 unless defined $body && !ref($body) && length $body;
+    return 1 if $body =~ /request timed out/i;
+    return 1 if $body =~ /timed out/i && $body =~ /please try again/i;
+    return 0;
 }
 
 sub _github_request {

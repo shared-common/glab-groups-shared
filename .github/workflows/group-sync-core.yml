@@ -305,6 +305,10 @@ jobs:
     timeout-minutes: 120
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix: ${{ fromJSON(needs.plan.outputs.batch-matrix) }}
     steps:
       - name: Checkout shared workflow repository
         # actions/checkout v6.0.2
@@ -350,7 +354,10 @@ jobs:
           perl shared/.github/scripts/glab_groups.pl \
             prepare-target \
             --plan plan.json \
-            --output prepared.json
+            --batch-start "${{ matrix.batch_start }}" \
+            --batch-stride "${{ matrix.batch_stride }}" \
+            --batch-limit "${{ matrix.batch_limit }}" \
+            --output "prepared-${{ matrix.shard_index }}.json"
 
       - name: Cleanup secrets
         if: always()

@@ -1603,6 +1603,71 @@ HTML
 }
 
 {
+    my @prepared_paths;
+    my $dir = tempdir( CLEANUP => 1 );
+    my $plan_path = File::Spec->catfile( $dir, "plan.json" );
+    my $output_path = File::Spec->catfile( $dir, "prepared.json" );
+    write_json_file(
+        $plan_path,
+        {
+            batches => [
+                {
+                    start_index => 0,
+                    end_index => 1,
+                    group_paths => ["owner/group-a"],
+                    target_count => 2,
+                },
+                {
+                    start_index => 2,
+                    end_index => 2,
+                    group_paths => ["owner/group-b"],
+                    target_count => 1,
+                },
+            ],
+            plan => [
+                {
+                    action => "sync",
+                    target_full_path => "owner/group-a/project-a",
+                },
+                {
+                    action => "skip",
+                    target_full_path => "owner/group-a/project-b",
+                },
+                {
+                    action => "sync",
+                    target_full_path => "owner/group-b/project-c",
+                },
+            ],
+        }
+    );
+
+    local *GlabGroups::_load_target_client = sub { return {}; };
+    local *GlabGroups::_ensure_target_project = sub {
+        my ( $client, $entry ) = @_;
+        push @prepared_paths, $entry->{target_full_path};
+        return { project_id => 99 };
+    };
+
+    is(
+        GlabGroups::run_cli(
+            "prepare-target",
+            "--plan", $plan_path,
+            "--batch-start", 1,
+            "--batch-stride", 2,
+            "--batch-limit", 1,
+            "--output", $output_path,
+        ),
+        0,
+        "prepare-target accepts batch slicing arguments",
+    );
+    is_deeply(
+        \@prepared_paths,
+        [ "owner/group-b/project-c" ],
+        "prepare-target prepares only the selected batch shard entries",
+    );
+}
+
+{
     no warnings 'redefine';
     my %cache = ( owner => 7 );
 
@@ -2752,6 +2817,31 @@ HTML
     is( scalar @requests, 1, "group runners drift triggers exactly one project update call" );
     ok( !$requests[0]->{payload}->{group_runners_enabled}, "group runners drift is corrected by disabling group runners" );
     ok( !$requests[0]->{payload}->{shared_runners_enabled}, "instance runners drift is corrected by disabling instance runners" );
+}
+
+{
+    no warnings 'redefine';
+    my @calls;
+    local *GlabGroups::_run_command = sub {
+        my ( $args, $opt ) = @_;
+        push @calls, [ @{$args} ];
+        return {
+            status => 0,
+            output => scalar(@calls) == 1
+                ? "{\"message\":{\"base\":[\"Request timed out. Please try again.\"]}}\n400"
+                : "{\"id\":99}\n201",
+        };
+    };
+
+    my $result = GlabGroups::_gitlab_request(
+        { base_url => "https://gitlab.example.invalid", token => "secret" },
+        "POST",
+        "/projects",
+        { name => "demo" },
+        { retry_attempts => 2, retry_backoff_seconds => 1 },
+    );
+    is( scalar @calls, 2, "gitlab request retries a transient Request timed out 400 response" );
+    is( $result->{id}, 99, "gitlab request returns the successful retry payload" );
 }
 
 {

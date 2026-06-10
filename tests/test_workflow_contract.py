@@ -117,6 +117,11 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("prepare:\n    needs: plan", text)
         self.assertIn("Prepare target namespaces and projects", text)
         self.assertIn("prepare-target", text)
+        self.assertIn('matrix: ${{ fromJSON(needs.plan.outputs.batch-matrix) }}', text)
+        self.assertIn('--batch-start "${{ matrix.batch_start }}"', text)
+        self.assertIn('--batch-stride "${{ matrix.batch_stride }}"', text)
+        self.assertIn('--batch-limit "${{ matrix.batch_limit }}"', text)
+        self.assertIn('prepared-${{ matrix.shard_index }}.json', text)
         self.assertIn("needs: [plan, prepare]", text)
 
     def test_metadata_repo_is_not_used(self) -> None:
