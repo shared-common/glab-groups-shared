@@ -37,10 +37,11 @@ my $JSON = JSON::PP->new->canonical(1)->utf8(1);
 
 my %DEFAULTS = (
     allow_blob_rewrite => JSON::PP::true,
-    batch_size => 25,
+    batch_size => 10,
     force_lfs => JSON::PP::false,
     git_timeout_seconds => 1800,
     max_blob_bytes => 100 * 1024 * 1024,
+    max_parallel => 10,
     mirror_pristine_tar => JSON::PP::true,
     retry_attempts => 3,
     retry_backoff_seconds => 2,
@@ -390,7 +391,7 @@ sub _cmd_plan {
     my (@argv) = @_;
     my %opt = (
         discover_output => "discover.json",
-        batch_size => 25,
+        batch_size => 10,
         max_batches => 0,
         output => "plan.json",
         summary => "plan.md",
@@ -576,7 +577,7 @@ sub _cmd_mirror {
     my %opt = (
         output => "results.json",
         jsonl => "results.jsonl",
-        batch_size => 25,
+        batch_size => 10,
         batch_start => 0,
         batch_stride => 1,
         batch_limit => 0,
@@ -1433,6 +1434,7 @@ sub _normalize_defaults_payload {
         force_lfs => _bool_or_default( $payload->{force_lfs}, 0 ),
         git_timeout_seconds => _defaulted_positive_int( $payload->{git_timeout_seconds}, $DEFAULTS{git_timeout_seconds}, "$label.defaults.git_timeout_seconds" ),
         max_blob_bytes => _defaulted_bounded_positive_int( $payload->{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, "$label.defaults.max_blob_bytes" ),
+        max_parallel => _defaulted_positive_int( $payload->{max_parallel}, $DEFAULTS{max_parallel}, "$label.defaults.max_parallel" ),
         mirror_pristine_tar => _bool_or_default( $payload->{mirror_pristine_tar}, 1 ),
         gitlab_source_include_subgroups => _bool_or_default( $payload->{gitlab_source_include_subgroups}, 0 ),
         read_retry_attempts => _defaulted_positive_int( $payload->{read_retry_attempts}, $GITLAB_READ_DEFAULTS{retry_attempts}, "$label.defaults.read_retry_attempts" ),

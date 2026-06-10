@@ -22,10 +22,6 @@ name: group-sync-core
       target-token-secret:
         required: true
         type: string
-      batch-size:
-        required: false
-        type: number
-        default: 25
       emit-parquet:
         required: false
         type: boolean
@@ -54,6 +50,8 @@ jobs:
       contents: read
     outputs:
       batch-matrix: ${{ steps.batch_matrix.outputs.matrix }}
+      batch-size: ${{ steps.config_meta.outputs.batch-size }}
+      max-parallel: ${{ steps.config_meta.outputs.max-parallel }}
       mirror-secret-list: ${{ steps.config_meta.outputs.secret-list }}
     steps:
       - name: Validate workflow inputs
@@ -211,9 +209,16 @@ jobs:
               push @secret_names, "GH_ORG_READ_APP_ID", "GH_ORG_READ_APP_INSTALL_ID", "GH_ORG_READ_APP_PEM";
           }
 
+          my $batch_size = $config->{defaults}->{batch_size};
+          my $max_parallel = $config->{defaults}->{max_parallel};
+          defined $batch_size or die "config defaults.batch_size is required\n";
+          defined $max_parallel or die "config defaults.max_parallel is required\n";
+
           open( my $fh, ">>:encoding(UTF-8)", $github_output )
             or die "unable to append to \$GITHUB_OUTPUT: $github_output\n";
           print {$fh} "secret-list=", join( ",", @secret_names ), "\n";
+          print {$fh} "batch-size=$batch_size\n";
+          print {$fh} "max-parallel=$max_parallel\n";
           close $fh;
           PERL
 
@@ -245,7 +250,7 @@ jobs:
           perl shared/.github/scripts/glab_groups.pl \
             plan \
             --config-dir "gh-actions-cfg/${{ inputs.config-path }}" \
-            --batch-size "${{ inputs.batch-size }}" \
+            --batch-size "${{ steps.config_meta.outputs.batch-size }}" \
             --max-batches 250 \
             --discover-output discover.json \
             --output plan.json \
@@ -307,7 +312,7 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
-      max-parallel: 10
+      max-parallel: ${{ fromJSON(needs.plan.outputs.max-parallel) }}
       matrix: ${{ fromJSON(needs.plan.outputs.batch-matrix) }}
     steps:
       - name: Checkout shared workflow repository
@@ -374,7 +379,7 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
-      max-parallel: 10
+      max-parallel: ${{ fromJSON(needs.plan.outputs.max-parallel) }}
       matrix: ${{ fromJSON(needs.plan.outputs.batch-matrix) }}
     steps:
       - name: Checkout shared workflow repository
@@ -421,7 +426,7 @@ jobs:
           perl shared/.github/scripts/glab_groups.pl \
             mirror \
             --plan plan.json \
-            --batch-size "${{ inputs.batch-size }}" \
+            --batch-size "${{ needs.plan.outputs.batch-size }}" \
             --batch-start "${{ matrix.batch_start }}" \
             --batch-stride "${{ matrix.batch_stride }}" \
             --batch-limit "${{ matrix.batch_limit }}" \

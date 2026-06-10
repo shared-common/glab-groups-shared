@@ -75,7 +75,7 @@ sub run_cmd {
     is( scalar @{ $config->{namespaces} }, 1, "loads namespace roots" );
     is( $config->{defaults}->{additional_branches}->[0]->{name}, "release", "normalizes default branches" );
     is( $config->{defaults}->{target_branches_protect}->[0]->{name}, "gitlab/mcr/main", "normalizes default protected target branches" );
-    is( $config->{defaults}->{batch_size}, 25, "keeps default batch size at 25" );
+    is( $config->{defaults}->{batch_size}, 10, "keeps default batch size at 10" );
     is( $config->{namespaces}->[0]->{target_branches_protect}->[0]->{name}, "gitlab/mcr/main", "loads namespace protected target branches" );
 }
 

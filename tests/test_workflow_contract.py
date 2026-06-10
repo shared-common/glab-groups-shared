@@ -21,7 +21,7 @@ class SharedWorkflowContractTests(unittest.TestCase):
 
     def test_caps_mirror_matrix_with_batch_strides(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("max-parallel: 10", text)
+        self.assertIn('max-parallel: ${{ fromJSON(needs.plan.outputs.max-parallel) }}', text)
         self.assertIn("matrix: ${{ fromJSON(needs.plan.outputs.batch-matrix) }}", text)
         self.assertIn("batch-matrix: ${{ steps.batch_matrix.outputs.matrix }}", text)
         self.assertIn("--max-batches 250", text)
@@ -36,6 +36,8 @@ class SharedWorkflowContractTests(unittest.TestCase):
     def test_uses_config_specific_target_pat_secret(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("mirror-secret-list: ${{ steps.config_meta.outputs.secret-list }}", text)
+        self.assertIn("batch-size: ${{ steps.config_meta.outputs.batch-size }}", text)
+        self.assertIn("max-parallel: ${{ steps.config_meta.outputs.max-parallel }}", text)
         self.assertIn("target-token-secret:", text)
         self.assertIn("GL_PAT_GROUP_ANDROID_SVC", text)
         self.assertIn("GL_PAT_GROUP_CHROMIUM_SVC", text)
@@ -117,6 +119,7 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("prepare:\n    needs: plan", text)
         self.assertIn("Prepare target namespaces and projects", text)
         self.assertIn("prepare-target", text)
+        self.assertIn('max-parallel: ${{ fromJSON(needs.plan.outputs.max-parallel) }}', text)
         self.assertIn('matrix: ${{ fromJSON(needs.plan.outputs.batch-matrix) }}', text)
         self.assertIn('--batch-start "${{ matrix.batch_start }}"', text)
         self.assertIn('--batch-stride "${{ matrix.batch_stride }}"', text)
