@@ -76,7 +76,7 @@ sub run_cmd {
     is( $config->{defaults}->{additional_branches}->[0]->{name}, "release", "normalizes default branches" );
     is( $config->{defaults}->{target_branches_protect}->[0]->{name}, "gitlab/mcr/main", "normalizes default protected target branches" );
     is( $config->{defaults}->{batch_size}, 10, "keeps default batch size at 10" );
-    is( $config->{defaults}->{max_parallel}, 2, "keeps default max parallel at 2" );
+    is( $config->{defaults}->{max_parallel}, 5, "keeps default max parallel at 5" );
     is( $config->{namespaces}->[0]->{target_branches_protect}->[0]->{name}, "gitlab/mcr/main", "loads namespace protected target branches" );
 }
 
@@ -117,7 +117,7 @@ sub run_cmd {
             kind => "glab-groups/defaults",
             version => 1,
             defaults => {
-                max_parallel => 3,
+                max_parallel => 6,
             },
         }
     );
@@ -138,7 +138,7 @@ sub run_cmd {
     );
 
     my $error = eval { load_config_dir($dir); 1 } ? undef : $@;
-    like( $error, qr/defaults\.json\.defaults\.max_parallel must be less than or equal to 2/, "rejects max_parallel values above the workflow contract" );
+    like( $error, qr/defaults\.json\.defaults\.max_parallel must be less than or equal to 5/, "rejects max_parallel values above the workflow contract" );
 }
 
 {

@@ -115,22 +115,21 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("--inventory-max-age-seconds", text)
         self.assertNotIn("--inventory-input", text)
 
-    def test_prepare_job_runs_before_mirror(self) -> None:
+    def test_mirror_runs_directly_from_plan_without_prepare_job(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("prepare:\n    needs: plan", text)
-        self.assertIn("Prepare target namespaces and projects", text)
-        self.assertIn("Upload prepared target artifacts", text)
-        self.assertIn("prepare-target", text)
         self.assertIn('max-parallel: ${{ fromJSON(needs.plan.outputs.max-parallel) }}', text)
         self.assertIn('matrix: ${{ fromJSON(needs.plan.outputs.batch-matrix) }}', text)
         self.assertIn('--batch-start "${{ matrix.batch_start }}"', text)
         self.assertIn('--batch-stride "${{ matrix.batch_stride }}"', text)
         self.assertIn('--batch-limit "${{ matrix.batch_limit }}"', text)
-        self.assertIn('prepared-${{ matrix.shard_index }}.json', text)
-        self.assertIn('name: glab-prepared-${{ matrix.shard_index }}-${{ github.run_id }}', text)
-        self.assertIn("needs: [plan, prepare]", text)
-        self.assertIn("Download prepared target artifact", text)
-        self.assertIn('--prepared "prepared-${{ matrix.shard_index }}.json"', text)
+        self.assertIn("mirror:\n    needs: plan", text)
+        self.assertNotIn("prepare:\n    needs: plan", text)
+        self.assertNotIn("Prepare target namespaces and projects", text)
+        self.assertNotIn("Upload prepared target artifacts", text)
+        self.assertNotIn("prepare-target", text)
+        self.assertNotIn('prepared-${{ matrix.shard_index }}.json', text)
+        self.assertNotIn("Download prepared target artifact", text)
+        self.assertNotIn('--prepared "prepared-${{ matrix.shard_index }}.json"', text)
 
     def test_metadata_repo_is_not_used(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")

@@ -304,84 +304,8 @@ jobs:
           set -euo pipefail
           rm -rf .secrets
 
-  prepare:
-    needs: plan
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      max-parallel: ${{ fromJSON(needs.plan.outputs.max-parallel) }}
-      matrix: ${{ fromJSON(needs.plan.outputs.batch-matrix) }}
-    steps:
-      - name: Checkout shared workflow repository
-        # actions/checkout v6.0.2
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-        with:
-          repository: ${{ inputs.shared-repo }}
-          ref: ${{ inputs.shared-ref }}
-          path: shared
-          persist-credentials: false
-
-      - name: Download plan artifact
-        # actions/download-artifact v8.0.1
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          name: glab-groups-plan-${{ github.run_id }}
-          path: .
-
-      - name: Fetch target secrets from BWS
-        uses: >-
-          shared-common/gh-actions-shared/.github/actions/bws-fetch@v0.0.41
-        with:
-          access-token: ${{ secrets.BWS_ACCESS_TOKEN }}
-          project-id: ${{ secrets.BWS_PROJECT_ID }}
-          bws-version: ${{ inputs.bws-version }}
-          bws-sha256: ${{ inputs.bws-sha256 }}
-          secrets: ${{ needs.plan.outputs.mirror-secret-list }}
-          output-dir: .secrets
-
-      - name: Mask fetched secrets
-        shell: bash
-        env:
-          SECRET_NAMES: ${{ needs.plan.outputs.mirror-secret-list }}
-        run: |
-          set -euo pipefail
-          python3 shared/.github/scripts/mask_secret_files.py
-
-      - name: Prepare target namespaces and projects
-        shell: bash
-        env:
-          GL_TARGET_TOKEN_SECRET_NAME: ${{ inputs.target-token-secret }}
-        run: |
-          set -euo pipefail
-          perl shared/.github/scripts/glab_groups.pl \
-            prepare-target \
-            --plan plan.json \
-            --batch-start "${{ matrix.batch_start }}" \
-            --batch-stride "${{ matrix.batch_stride }}" \
-            --batch-limit "${{ matrix.batch_limit }}" \
-            --output "prepared-${{ matrix.shard_index }}.json"
-
-      - name: Upload prepared target artifacts
-        # actions/upload-artifact v7.0.1
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: glab-prepared-${{ matrix.shard_index }}-${{ github.run_id }}
-          if-no-files-found: error
-          path: |
-            prepared-${{ matrix.shard_index }}.json
-
-      - name: Cleanup secrets
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf .secrets
-
   mirror:
-    needs: [plan, prepare]
+    needs: plan
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     permissions:
@@ -405,13 +329,6 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: glab-groups-plan-${{ github.run_id }}
-          path: .
-
-      - name: Download prepared target artifact
-        # actions/download-artifact v8.0.1
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          name: glab-prepared-${{ matrix.shard_index }}-${{ github.run_id }}
           path: .
 
       - name: Fetch target secrets from BWS
@@ -442,7 +359,6 @@ jobs:
           perl shared/.github/scripts/glab_groups.pl \
             mirror \
             --plan plan.json \
-            --prepared "prepared-${{ matrix.shard_index }}.json" \
             --batch-size "${{ needs.plan.outputs.batch-size }}" \
             --batch-start "${{ matrix.batch_start }}" \
             --batch-stride "${{ matrix.batch_stride }}" \
