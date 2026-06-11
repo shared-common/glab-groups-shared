@@ -76,7 +76,7 @@ sub run_cmd {
     is( $config->{defaults}->{additional_branches}->[0]->{name}, "release", "normalizes default branches" );
     is( $config->{defaults}->{target_branches_protect}->[0]->{name}, "gitlab/mcr/main", "normalizes default protected target branches" );
     is( $config->{defaults}->{batch_size}, 10, "keeps default batch size at 10" );
-    is( $config->{defaults}->{max_parallel}, 10, "keeps default max parallel at 10" );
+    is( $config->{defaults}->{max_parallel}, 2, "keeps default max parallel at 2" );
     is( $config->{namespaces}->[0]->{target_branches_protect}->[0]->{name}, "gitlab/mcr/main", "loads namespace protected target branches" );
 }
 
@@ -117,7 +117,7 @@ sub run_cmd {
             kind => "glab-groups/defaults",
             version => 1,
             defaults => {
-                max_parallel => 11,
+                max_parallel => 3,
             },
         }
     );
@@ -138,7 +138,7 @@ sub run_cmd {
     );
 
     my $error = eval { load_config_dir($dir); 1 } ? undef : $@;
-    like( $error, qr/defaults\.json\.defaults\.max_parallel must be less than or equal to 10/, "rejects max_parallel values above the workflow contract" );
+    like( $error, qr/defaults\.json\.defaults\.max_parallel must be less than or equal to 2/, "rejects max_parallel values above the workflow contract" );
 }
 
 {
@@ -1590,6 +1590,125 @@ HTML
 }
 
 {
+    my $dir = tempdir( CLEANUP => 1 );
+    my $plan_path = File::Spec->catfile( $dir, "plan.json" );
+    my $results_ok = File::Spec->catfile( $dir, "results-0.json" );
+    my $results_empty = File::Spec->catfile( $dir, "results-1.json" );
+    my $report_path = File::Spec->catfile( $dir, "report.json" );
+    my $summary_path = File::Spec->catfile( $dir, "report.md" );
+    write_json_file(
+        $plan_path,
+        {
+            counts => { sync => 1, fail => 0, skip => 0 },
+        }
+    );
+    write_json_file(
+        $results_ok,
+        {
+            results => [
+                {
+                    target_full_path => "owner/debian/demo",
+                    planned_action => "create_project",
+                    status => "mirrored",
+                },
+            ],
+        }
+    );
+    write_text_file( $results_empty, q{} );
+
+    is(
+        GlabGroups::run_cli(
+            "report",
+            "--plan", $plan_path,
+            "--results", $results_ok,
+            "--results", $results_empty,
+            "--output", $report_path,
+            "--summary", $summary_path,
+        ),
+        0,
+        "report keeps valid shard results when one shard JSON file is empty",
+    );
+    my $report = JSON::PP->new->decode( do { open( my $fh, "<:encoding(UTF-8)", $report_path ) or die $!; local $/; <$fh> } );
+    is( scalar @{ $report->{results} }, 1, "report keeps valid shard rows" );
+    is( scalar @{ $report->{input_failures} }, 1, "report records one unreadable shard file" );
+    like( $report->{input_failures}->[0]->{error}, qr/empty JSON file/, "report captures the empty-file parse error" );
+}
+
+{
+    no warnings 'redefine';
+    my $dir = tempdir( CLEANUP => 1 );
+    my $plan_path = File::Spec->catfile( $dir, "plan.json" );
+    my $prepared_path = File::Spec->catfile( $dir, "prepared.json" );
+    my $output_path = File::Spec->catfile( $dir, "results.json" );
+    my $jsonl_path = File::Spec->catfile( $dir, "results.jsonl" );
+
+    write_json_file(
+        $plan_path,
+        {
+            batches => [
+                {
+                    start_index => 0,
+                    end_index => 0,
+                    group_paths => ["owner/group"],
+                    target_count => 1,
+                },
+            ],
+            plan => [
+                {
+                    action => "sync",
+                    policy => {},
+                    source_default_branch => "main",
+                    source_empty_repo => JSON::PP::true,
+                    target_full_path => "owner/group/project-a",
+                    target_namespace_path => "owner/group",
+                },
+            ],
+        }
+    );
+    write_json_file(
+        $prepared_path,
+        {
+            prepared => [
+                {
+                    created => JSON::PP::false,
+                    default_branch => "mcr/main",
+                    project_id => 99,
+                    target_full_path => "owner/group/project-a",
+                    updated => JSON::PP::false,
+                },
+            ],
+        }
+    );
+
+    local *GlabGroups::_load_target_client = sub { return {}; };
+    local *GlabGroups::_load_source_auth = sub { return {}; };
+    local *GlabGroups::_ensure_target_project = sub {
+        die "_ensure_target_project should not run when --prepared supplies the target state\n";
+    };
+
+    is(
+        GlabGroups::run_cli(
+            "mirror",
+            "--plan", $plan_path,
+            "--prepared", $prepared_path,
+            "--output", $output_path,
+            "--jsonl", $jsonl_path,
+        ),
+        0,
+        "mirror reuses prepared shard state instead of re-preparing the target project",
+    );
+    my $results = JSON::PP->new->decode(
+        do {
+            open( my $fh, "<:encoding(UTF-8)", $output_path ) or die $!;
+            local $/;
+            <$fh>;
+        }
+    );
+    is( $results->{results}->[0]->{prepared}->{project_id}, 99, "mirror carries forward prepared project identifiers" );
+    ok( $results->{results}->[0]->{verify}->{skipped}, "mirror skips redundant target verification when prepared state is already aligned" );
+}
+
+{
     no warnings 'redefine';
     my $dir = tempdir( CLEANUP => 1 );
     my $plan_path = File::Spec->catfile( $dir, "plan.json" );
@@ -1756,6 +1875,57 @@ HTML
     is( $prepared->{prepared_count}, 1, "prepare-target records successful target preparations" );
     is( $prepared->{failure_count}, 1, "prepare-target records failed target preparations" );
     is( $prepared->{failures}->[0]->{target_full_path}, "owner/group/project-a", "prepare-target captures the failed target path" );
+}
+
+{
+    no warnings 'redefine';
+    my $dir = tempdir( CLEANUP => 1 );
+    my $plan_path = File::Spec->catfile( $dir, "plan.json" );
+    my $output_path = File::Spec->catfile( $dir, "prepared.json" );
+    my $calls = 0;
+
+    write_json_file(
+        $plan_path,
+        {
+            plan => [
+                {
+                    action => "sync",
+                    target_full_path => "owner/group/project-a",
+                },
+                {
+                    action => "sync",
+                    target_full_path => "owner/group/project-b",
+                },
+            ],
+        }
+    );
+
+    local *GlabGroups::_load_target_client = sub { return {}; };
+    local *GlabGroups::_ensure_target_project = sub {
+        my ( $client, $entry ) = @_;
+        $calls++;
+        die "gitlab request failed [403] GET /projects/$entry->{target_full_path}: {\"message\":\"403 Forbidden - Your account has been blocked.\"}\n";
+    };
+
+    is(
+        GlabGroups::run_cli(
+            "prepare-target",
+            "--plan", $plan_path,
+            "--output", $output_path,
+        ),
+        0,
+        "prepare-target stops issuing further API work after the target account is blocked",
+    );
+    is( $calls, 1, "prepare-target does not retry later entries after a blocked-account error" );
+    my $prepared = JSON::PP->new->decode(
+        do {
+            open( my $fh, "<:encoding(UTF-8)", $output_path ) or die $!;
+            local $/;
+            <$fh>;
+        }
+    );
+    is( $prepared->{failure_count}, 2, "prepare-target records later entries as blocked failures without reissuing API calls" );
+    is( $prepared->{failures}->[1]->{failure_context}, "prepare-target", "later entries are marked with the blocked-account prepare context" );
 }
 
 {

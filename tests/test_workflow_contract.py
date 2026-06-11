@@ -119,6 +119,7 @@ class SharedWorkflowContractTests(unittest.TestCase):
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("prepare:\n    needs: plan", text)
         self.assertIn("Prepare target namespaces and projects", text)
+        self.assertIn("Upload prepared target artifacts", text)
         self.assertIn("prepare-target", text)
         self.assertIn('max-parallel: ${{ fromJSON(needs.plan.outputs.max-parallel) }}', text)
         self.assertIn('matrix: ${{ fromJSON(needs.plan.outputs.batch-matrix) }}', text)
@@ -126,7 +127,10 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn('--batch-stride "${{ matrix.batch_stride }}"', text)
         self.assertIn('--batch-limit "${{ matrix.batch_limit }}"', text)
         self.assertIn('prepared-${{ matrix.shard_index }}.json', text)
+        self.assertIn('name: glab-prepared-${{ matrix.shard_index }}-${{ github.run_id }}', text)
         self.assertIn("needs: [plan, prepare]", text)
+        self.assertIn("Download prepared target artifact", text)
+        self.assertIn('--prepared "prepared-${{ matrix.shard_index }}.json"', text)
 
     def test_metadata_repo_is_not_used(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")

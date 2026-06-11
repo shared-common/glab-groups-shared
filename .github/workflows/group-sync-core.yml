@@ -364,6 +364,15 @@ jobs:
             --batch-limit "${{ matrix.batch_limit }}" \
             --output "prepared-${{ matrix.shard_index }}.json"
 
+      - name: Upload prepared target artifacts
+        # actions/upload-artifact v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: glab-prepared-${{ matrix.shard_index }}-${{ github.run_id }}
+          if-no-files-found: error
+          path: |
+            prepared-${{ matrix.shard_index }}.json
+
       - name: Cleanup secrets
         if: always()
         shell: bash
@@ -398,6 +407,13 @@ jobs:
           name: glab-groups-plan-${{ github.run_id }}
           path: .
 
+      - name: Download prepared target artifact
+        # actions/download-artifact v8.0.1
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: glab-prepared-${{ matrix.shard_index }}-${{ github.run_id }}
+          path: .
+
       - name: Fetch target secrets from BWS
         uses: >-
           shared-common/gh-actions-shared/.github/actions/bws-fetch@v0.0.41
@@ -426,6 +442,7 @@ jobs:
           perl shared/.github/scripts/glab_groups.pl \
             mirror \
             --plan plan.json \
+            --prepared "prepared-${{ matrix.shard_index }}.json" \
             --batch-size "${{ needs.plan.outputs.batch-size }}" \
             --batch-start "${{ matrix.batch_start }}" \
             --batch-stride "${{ matrix.batch_stride }}" \

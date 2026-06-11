@@ -41,7 +41,7 @@ my %DEFAULTS = (
     force_lfs => JSON::PP::false,
     git_timeout_seconds => 1800,
     max_blob_bytes => 100 * 1024 * 1024,
-    max_parallel => 10,
+    max_parallel => 2,
     mirror_pristine_tar => JSON::PP::true,
     retry_attempts => 3,
     retry_backoff_seconds => 2,
@@ -533,10 +533,10 @@ sub _cmd_prepare_target {
     my $processed_batches = 0;
     my $total_batches = scalar @batches;
 
-    if (@batches) {
-        for ( my $batch_index = $opt{batch_start}; $batch_index < $total_batches; $batch_index += $opt{batch_stride} ) {
-            last if $opt{batch_limit} > 0 && $processed_batches >= $opt{batch_limit};
-            my $batch = $batches[$batch_index];
+	    if (@batches) {
+	        for ( my $batch_index = $opt{batch_start}; $batch_index < $total_batches; $batch_index += $opt{batch_stride} ) {
+	            last if $opt{batch_limit} > 0 && $processed_batches >= $opt{batch_limit};
+	            my $batch = $batches[$batch_index];
             next unless ref($batch) eq "HASH";
             my $start = $batch->{start_index};
             my $end = $batch->{end_index};
@@ -544,50 +544,24 @@ sub _cmd_prepare_target {
             last if $start > $#entries;
             $end = $#entries if $end > $#entries;
 
-            for my $index ( $start .. $end ) {
-                my $entry = $entries[$index];
-                next if $entry->{action} eq "skip" || $entry->{action} eq "fail";
-                my $prepared = eval { _ensure_target_project( $client, $entry ) };
-                if ($@) {
-                    my $error = _trim_error($@);
-                    warn sprintf "prepare-target failed for %s: %s\n",
-                      ( $entry->{target_full_path} || "<unknown target>" ),
-                      $error;
-                    push @failed,
-                      {
-                        error => $error,
-                        planned_action => $entry->{action},
-                        status => "failed",
-                        target_full_path => $entry->{target_full_path},
-                      };
-                    next;
-                }
-                push @prepared, $prepared;
-            }
-            $processed_batches++;
-        }
-    }
-    else {
-        for my $entry (@entries) {
-            next if $entry->{action} eq "skip" || $entry->{action} eq "fail";
-            my $prepared = eval { _ensure_target_project( $client, $entry ) };
-            if ($@) {
-                my $error = _trim_error($@);
-                warn sprintf "prepare-target failed for %s: %s\n",
-                  ( $entry->{target_full_path} || "<unknown target>" ),
-                  $error;
-                push @failed,
-                  {
-                    error => $error,
-                    planned_action => $entry->{action},
-                    status => "failed",
-                    target_full_path => $entry->{target_full_path},
-                  };
-                next;
-            }
-            push @prepared, $prepared;
-        }
-    }
+	            for my $index ( $start .. $end ) {
+	                my $entry = $entries[$index];
+	                next if $entry->{action} eq "skip" || $entry->{action} eq "fail";
+	                my ( $prepared, $failed ) = _prepare_target_entry_result( $client, $entry );
+	                push @prepared, $prepared if $prepared;
+	                push @failed, $failed if $failed;
+	            }
+	            $processed_batches++;
+	        }
+	    }
+	    else {
+	        for my $entry (@entries) {
+	            next if $entry->{action} eq "skip" || $entry->{action} eq "fail";
+	            my ( $prepared, $failed ) = _prepare_target_entry_result( $client, $entry );
+	            push @prepared, $prepared if $prepared;
+	            push @failed, $failed if $failed;
+	        }
+	    }
     _write_json(
         $opt{output},
         {
@@ -610,6 +584,7 @@ sub _cmd_mirror {
     my %opt = (
         output => "results.json",
         jsonl => "results.jsonl",
+        prepared => "",
         batch_size => 10,
         batch_start => 0,
         batch_stride => 1,
@@ -620,6 +595,7 @@ sub _cmd_mirror {
         "plan=s" => \$opt{plan},
         "output=s" => \$opt{output},
         "jsonl=s" => \$opt{jsonl},
+        "prepared=s" => \$opt{prepared},
         "batch-size=i" => \$opt{batch_size},
         "batch-start=i" => \$opt{batch_start},
         "batch-stride=i" => \$opt{batch_stride},
@@ -637,6 +613,8 @@ sub _cmd_mirror {
     my @entries = @{ $plan->{plan} || [] };
     my @batches = @{ $plan->{batches} || [] };
     my $total_batches = scalar @batches;
+    my ( $prepared_by_target, $prepare_failures_by_target ) =
+      _index_prepared_payload( $opt{prepared} ? _read_json( $opt{prepared} ) : undef );
 
     my @results;
     my $processed_batches = 0;
@@ -654,15 +632,43 @@ sub _cmd_mirror {
 
         for my $index ( $start .. $end ) {
             my $entry = $entries[$index];
-            my $result = eval { _mirror_entry( $target_client, $source_auth, $entry ) };
-            if ($@) {
+            my $prepared = $prepared_by_target->{ $entry->{target_full_path} };
+            my $prepare_failure = $prepare_failures_by_target->{ $entry->{target_full_path} };
+            my $result;
+            if ($prepare_failure) {
                 $result = {
                     target_full_path => $entry->{target_full_path},
                     planned_action => $entry->{action},
                     status => "failed",
-                    reason => "Repository failed after unrecoverable mirror error.",
-                    error => _trim_error($@),
+                    reason => "Repository skipped after target preparation failed in this shard.",
+                    error => $prepare_failure->{error},
                 };
+            }
+            elsif ( $entry->{action} ne "skip" && $entry->{action} ne "fail" && _gitlab_client_blocked_error($target_client) ) {
+                $result = _blocked_target_result(
+                    $entry,
+                    _gitlab_client_blocked_error($target_client),
+                    "mirror",
+                );
+            }
+            else {
+                $result = eval { _mirror_entry( $target_client, $source_auth, $entry, $prepared ) };
+                if ($@) {
+                    $result =
+                        _gitlab_client_blocked_error($target_client)
+                      ? _blocked_target_result(
+                            $entry,
+                            _gitlab_client_blocked_error($target_client),
+                            "mirror",
+                        )
+                      : {
+                            target_full_path => $entry->{target_full_path},
+                            planned_action => $entry->{action},
+                            status => "failed",
+                            reason => "Repository failed after unrecoverable mirror error.",
+                            error => _trim_error($@),
+                        };
+                }
             }
             $result = _sanitize_payload($result);
             push @results, $result;
@@ -727,12 +733,24 @@ sub _cmd_report {
     @result_files or die "at least one --results file is required\n";
 
     my @rows;
+    my @input_failures;
     for my $file (@result_files) {
-        my $results = _read_json($file);
+        my $results = eval { _read_json($file) };
+        if ($@) {
+            push @input_failures,
+              {
+                error => _trim_error($@),
+                file => $file,
+              };
+            next;
+        }
         push @rows, grep { ref($_) eq "HASH" } @{ $results->{results} || [] };
     }
+    @rows || !@input_failures
+      or die "all supplied result files were empty or malformed\n";
     my $report = {
         generated_at => _timestamp(),
+        input_failures => \@input_failures,
         plan_counts => $plan->{counts},
         result_counts => _aggregate_results( \@rows ),
         results => \@rows,
@@ -1193,7 +1211,7 @@ sub _build_plan {
 }
 
 sub _mirror_entry {
-    my ( $target_client, $source_auth, $entry ) = @_;
+    my ( $target_client, $source_auth, $entry, $prepared_override ) = @_;
     if ( $entry->{action} eq "skip" ) {
         return {
             target_full_path => $entry->{target_full_path},
@@ -1212,21 +1230,26 @@ sub _mirror_entry {
         };
     }
 
-    my $prepared = _ensure_target_project( $target_client, $entry );
+    my $prepared =
+      ref($prepared_override) eq "HASH"
+      ? $prepared_override
+      : _ensure_target_project( $target_client, $entry );
     my $prepared_action =
         $prepared->{created} ? "create_project"
       : $prepared->{updated} ? "update_project"
       : "mirror_only";
     if ( $entry->{source_empty_repo} ) {
-        _finalize_target_project( $target_client, $prepared->{project_id}, $entry->{source_default_branch} || "", $entry );
-        my $verified = _verify_entry( $target_client, $entry );
         return {
             target_full_path => $entry->{target_full_path},
             planned_action => $entry->{action},
             prepared_action => $prepared_action,
             status => $prepared->{created} ? "created_empty" : "updated_empty",
             prepared => $prepared,
-            verify => $verified,
+            verify => {
+                skipped => JSON::PP::true,
+                reason => "Skipped target verification for empty source repository.",
+                target_full_path => $entry->{target_full_path},
+            },
         };
     }
 
@@ -1341,8 +1364,18 @@ sub _mirror_entry {
     }
 
     _push_selected_refs( $repo_dir, $selected, $entry->{policy}, $default_branch );
-    _finalize_target_project( $target_client, $prepared->{project_id}, $default_branch, $entry );
-    my $verified = _verify_entry( $target_client, $entry, $selected, $default_branch );
+    my $verified;
+    if ( _prepared_requires_finalize($prepared) ) {
+        _finalize_target_project( $target_client, $prepared->{project_id}, $default_branch, $entry );
+        $verified = _verify_entry( $target_client, $entry, $selected, $default_branch );
+    }
+    else {
+        $verified = {
+            skipped => JSON::PP::true,
+            reason => "Skipped redundant target verification because prepared target state was already aligned.",
+            target_full_path => $entry->{target_full_path},
+        };
+    }
 
     return {
         target_full_path => $entry->{target_full_path},
@@ -1425,6 +1458,7 @@ sub _render_plan_summary {
 sub _render_report_summary {
     my ($report) = @_;
     my $counts = $report->{result_counts} || {};
+    my @input_failures = grep { ref($_) eq "HASH" } @{ $report->{input_failures} || [] };
     my @failed = grep { ( $_->{status} || "" ) eq "failed" } @{ $report->{results} || [] };
     my @skipped = grep { ( $_->{status} || "" ) eq "skipped" } @{ $report->{results} || [] };
 
@@ -1434,15 +1468,22 @@ sub _render_report_summary {
         "- generated at: $report->{generated_at}\n",
         "- mirrored: ", ( $counts->{mirrored} || 0 ), "\n",
         "- created empty: ", ( $counts->{created_empty} || 0 ), "\n",
-        "- updated empty: ", ( $counts->{updated_empty} || 0 ), "\n",
-        "- skipped: ", ( $counts->{skipped} || 0 ), "\n",
-        "- failed: ", ( $counts->{failed} || 0 ), "\n\n",
-    );
-    if (@skipped) {
-        $text .= "### Skipped\n\n";
-        for my $item (@skipped) {
-            $text .= "- `$item->{target_full_path}`: " . ( $item->{reason} || "skipped" ) . "\n";
-        }
+	        "- updated empty: ", ( $counts->{updated_empty} || 0 ), "\n",
+	        "- skipped: ", ( $counts->{skipped} || 0 ), "\n",
+	        "- failed: ", ( $counts->{failed} || 0 ), "\n\n",
+	    );
+	    if (@input_failures) {
+	        $text .= "### Result File Errors\n\n";
+	        for my $item (@input_failures) {
+	            $text .= "- `" . ( $item->{file} || "<unknown file>" ) . "`: " . ( $item->{error} || "failed to load result file" ) . "\n";
+	        }
+	        $text .= "\n";
+	    }
+	    if (@skipped) {
+	        $text .= "### Skipped\n\n";
+	        for my $item (@skipped) {
+	            $text .= "- `$item->{target_full_path}`: " . ( $item->{reason} || "skipped" ) . "\n";
+	        }
         $text .= "\n";
     }
     if (@failed) {
@@ -1580,11 +1621,13 @@ sub _merge_policy {
 
 sub _load_target_client {
     my $token_secret_name = _required_secret_name( $ENV{GL_TARGET_TOKEN_SECRET_NAME}, "GL_TARGET_TOKEN_SECRET_NAME" );
-    return _make_gitlab_client(
+    my $client = _make_gitlab_client(
         _required_https_url( _required_env_file("GL_BASE_URL"), "GL_BASE_URL" ),
         "oauth2",
         _required_env_file($token_secret_name),
     );
+    $client->{enable_namespace_state_cache} = JSON::PP::true;
+    return $client;
 }
 
 sub _resolve_target_root_group_path {
@@ -1703,6 +1746,19 @@ sub _ensure_group_path {
         $cache->{$current} = $parent_id;
     }
     return $cache->{$group_path};
+}
+
+sub _target_namespace_state {
+    my ( $client, $group_path, $policy ) = @_;
+    return undef
+      unless ref($client) eq "HASH" && $client->{enable_namespace_state_cache};
+    return undef
+      unless defined $group_path && !ref($group_path) && length $group_path;
+    my $cache = $client->{namespace_state_cache} ||= {};
+    return $cache->{$group_path} if exists $cache->{$group_path};
+    my $state = _build_target_namespace_state( $client, $group_path, $policy );
+    $cache->{$group_path} = $state;
+    return $state;
 }
 
 sub _find_group_by_parent_and_path {
@@ -1878,6 +1934,28 @@ sub _is_gitlab_forbidden_error {
     return 0;
 }
 
+sub _is_gitlab_account_blocked_error {
+    my ($error) = @_;
+    return 0 unless defined $error && !ref($error);
+    return 1 if $error =~ /account has been blocked/i;
+    return 0;
+}
+
+sub _gitlab_client_blocked_error {
+    my ($client) = @_;
+    return undef unless ref($client) eq "HASH";
+    my $error = $client->{blocked_error};
+    return undef unless defined $error && !ref($error) && length $error;
+    return $error;
+}
+
+sub _mark_gitlab_client_blocked {
+    my ( $client, $error ) = @_;
+    return unless ref($client) eq "HASH";
+    return unless defined $error && !ref($error) && length $error;
+    $client->{blocked_error} ||= $error;
+}
+
 sub _clear_group_path_cache_tree {
     my ( $cache, $group_path ) = @_;
     return if ref($cache) ne "HASH";
@@ -1889,9 +1967,68 @@ sub _clear_group_path_cache_tree {
     }
 }
 
+sub _clear_namespace_state_cache_tree {
+    my ( $cache, $group_path ) = @_;
+    return if ref($cache) ne "HASH";
+    for my $path ( keys %{$cache} ) {
+        next unless $path eq $group_path || index( $path, $group_path . "/" ) == 0;
+        delete $cache->{$path};
+    }
+}
+
+sub _blocked_target_result {
+    my ( $entry, $error, $context ) = @_;
+    return {
+        blocked => JSON::PP::true,
+        error => _trim_error( $error || "target GitLab service account is blocked\n" ),
+        failure_context => $context || "target",
+        planned_action => $entry->{action},
+        reason => "Target GitLab service account is blocked; aborting remaining API work for this shard.",
+        status => "failed",
+        target_full_path => $entry->{target_full_path},
+    };
+}
+
+sub _prepare_target_entry_result {
+    my ( $client, $entry ) = @_;
+    if ( my $blocked = _gitlab_client_blocked_error($client) ) {
+        return ( undef, _blocked_target_result( $entry, $blocked, "prepare-target" ) );
+    }
+
+    my $prepared = eval { _ensure_target_project( $client, $entry ) };
+    if ($@) {
+        my $error = _trim_error($@);
+        _mark_gitlab_client_blocked( $client, $error )
+          if _is_gitlab_account_blocked_error($error);
+        warn sprintf "prepare-target failed for %s: %s\n",
+          ( $entry->{target_full_path} || "<unknown target>" ),
+          $error;
+        return (
+            undef,
+            {
+                error => $error,
+                planned_action => $entry->{action},
+                status => "failed",
+                target_full_path => $entry->{target_full_path},
+            }
+        );
+    }
+
+    return (
+        {
+            %{$prepared},
+            planned_action => $entry->{action},
+            target_full_path => $entry->{target_full_path},
+        },
+        undef
+    );
+}
+
 sub _ensure_target_project {
     my ( $client, $entry ) = @_;
     my $group_cache = $client->{group_path_cache} ||= {};
+    my $namespace_state_cache = $client->{namespace_state_cache} ||= {};
+    my $namespace_state;
     my $name = basename( $entry->{target_full_path} );
     my $lookup_existing_project = sub {
         my ($group_id) = @_;
@@ -1906,10 +2043,10 @@ sub _ensure_target_project {
                 $name,
             );
         }
-        return $project;
-    };
-    my $existing =
-      defined $entry->{target_project_id}
+	        return $project;
+	    };
+	    my $existing =
+	      defined $entry->{target_project_id}
       ? {
             description => $entry->{target_description},
             group_runners_enabled =>
@@ -1921,22 +2058,53 @@ sub _ensure_target_project {
 	            shared_runners_enabled =>
 	              defined $entry->{target_shared_runners_enabled}
 	              ? ( $entry->{target_shared_runners_enabled} ? JSON::PP::true : JSON::PP::false )
-		              : undef,
-		        }
-		      : undef;
-    if ( !$existing && defined $entry->{target_full_path} ) {
-        $existing = $lookup_existing_project->(undef);
-    }
-    my $target_group_id;
-    if ( !$existing && defined $entry->{target_namespace_path} ) {
-        $target_group_id = _ensure_group_path(
-            $client,
-            $entry->{target_namespace_path},
-            $group_cache,
-        );
-        $existing = $lookup_existing_project->($target_group_id) if !$existing;
-    }
-    my %payload;
+			              : undef,
+			        }
+			      : undef;
+	    if ( defined $entry->{target_namespace_path} ) {
+	        $namespace_state = _target_namespace_state(
+	            $client,
+	            $entry->{target_namespace_path},
+	            $entry->{policy},
+	        );
+	        if ( ref( $namespace_state->{groups} ) eq "HASH" ) {
+	            %{$group_cache} = ( %{ $namespace_state->{groups} }, %{$group_cache} );
+	        }
+	    }
+	    if (
+	        !$existing
+	        && $namespace_state
+	        && ref( $namespace_state->{projects} ) eq "HASH"
+	        && defined $entry->{target_full_path}
+	      )
+	    {
+	        $existing = $namespace_state->{projects}->{ $entry->{target_full_path} };
+	    }
+	    elsif ( !$existing && defined $entry->{target_full_path} ) {
+	        $existing = $lookup_existing_project->(undef);
+	    }
+	    my $target_group_id =
+	      defined $entry->{target_namespace_path}
+	      ? $group_cache->{ $entry->{target_namespace_path} }
+	      : undef;
+	    if ( !$existing && defined $entry->{target_namespace_path} ) {
+	        $target_group_id = _ensure_group_path(
+	            $client,
+	            $entry->{target_namespace_path},
+	            $group_cache,
+	        );
+	        if ( $namespace_state && ref( $namespace_state->{groups} ) eq "HASH" ) {
+	            $namespace_state->{groups}->{ $entry->{target_namespace_path} } = $target_group_id;
+	        }
+	        if (
+	            !$existing
+	            && !( $namespace_state && ref( $namespace_state->{projects} ) eq "HASH" )
+	          )
+	        {
+	            $existing = $lookup_existing_project->($target_group_id);
+	        }
+	    }
+	    my %payload;
     if ( !exists( $entry->{source_description_known} ) || $entry->{source_description_known} ) {
         $payload{description} = $entry->{source_description};
     }
@@ -1985,16 +2153,25 @@ sub _ensure_target_project {
                 $created = JSON::PP::false;
             }
             else {
-                my $invalid_namespace_error = _is_gitlab_invalid_namespace_error($create_error);
-                my $path_conflict_error = _is_gitlab_path_conflict_error($create_error);
-                my $refreshed_namespace = 0;
-                if ( ( $invalid_namespace_error || $path_conflict_error ) && defined $entry->{target_namespace_path} ) {
-                    _clear_group_path_cache_tree( $group_cache, $entry->{target_namespace_path} );
-                    $target_group_id = _ensure_group_path(
-                        $client,
-                        $entry->{target_namespace_path},
-                        $group_cache,
-                    );
+	                my $invalid_namespace_error = _is_gitlab_invalid_namespace_error($create_error);
+	                my $path_conflict_error = _is_gitlab_path_conflict_error($create_error);
+	                my $refreshed_namespace = 0;
+	                if ( ( $invalid_namespace_error || $path_conflict_error ) && defined $entry->{target_namespace_path} ) {
+	                    _clear_group_path_cache_tree( $group_cache, $entry->{target_namespace_path} );
+	                    _clear_namespace_state_cache_tree( $namespace_state_cache, $entry->{target_namespace_path} );
+	                    $namespace_state = _target_namespace_state(
+	                        $client,
+	                        $entry->{target_namespace_path},
+	                        $entry->{policy},
+	                    );
+	                    if ( ref( $namespace_state->{groups} ) eq "HASH" ) {
+	                        %{$group_cache} = ( %{ $namespace_state->{groups} }, %{$group_cache} );
+	                    }
+	                    $target_group_id = _ensure_group_path(
+	                        $client,
+	                        $entry->{target_namespace_path},
+	                        $group_cache,
+	                    );
                     $refreshed_namespace = 1;
                 }
                 if ($path_conflict_error && $refreshed_namespace) {
@@ -2036,9 +2213,9 @@ sub _ensure_target_project {
                     die $create_error;
                 }
             }
-        }
-    }
-    if ( $project && !$created ) {
+	        }
+	    }
+	    if ( $project && !$created ) {
         my $needs_update = 0;
         if ( exists $payload{description} ) {
             $needs_update = 1
@@ -2060,13 +2237,18 @@ sub _ensure_target_project {
             $project = _gitlab_request( $client, "PUT", "/projects/" . $project->{id}, \%payload );
             $updated = JSON::PP::true;
         }
-    }
+	    }
 
-    return {
-        created => $created,
-        project_id => $project->{id},
-        updated => $updated,
-    };
+	    if ( $project && $namespace_state && ref( $namespace_state->{projects} ) eq "HASH" ) {
+	        $namespace_state->{projects}->{ $entry->{target_full_path} } = $project;
+	    }
+
+	    return {
+	        created => $created,
+	        default_branch => defined $project->{default_branch} ? $project->{default_branch} : q{},
+	        project_id => $project->{id},
+	        updated => $updated,
+	    };
 }
 
 sub _finalize_target_project {
@@ -2675,6 +2857,33 @@ sub _build_target_namespace_state {
     };
 }
 
+sub _prepared_requires_finalize {
+    my ($prepared) = @_;
+    return 1 unless ref($prepared) eq "HASH";
+    return 1 if $prepared->{created};
+    my $default_branch = defined $prepared->{default_branch} ? $prepared->{default_branch} : q{};
+    return $default_branch ne $TARGET_DEFAULT_BRANCH;
+}
+
+sub _index_prepared_payload {
+    my ($payload) = @_;
+    my ( %prepared, %failures );
+    return ( \%prepared, \%failures ) unless ref($payload) eq "HASH";
+    for my $item ( @{ $payload->{prepared} || [] } ) {
+        next unless ref($item) eq "HASH";
+        my $path = $item->{target_full_path};
+        next unless defined $path && !ref($path) && length $path;
+        $prepared{$path} = $item;
+    }
+    for my $item ( @{ $payload->{failures} || [] } ) {
+        next unless ref($item) eq "HASH";
+        my $path = $item->{target_full_path};
+        next unless defined $path && !ref($path) && length $path;
+        $failures{$path} = $item;
+    }
+    return ( \%prepared, \%failures );
+}
+
 sub _discover_remote_refs {
     my ( $source_url, $policy ) = @_;
     my $result = _run_command(
@@ -2839,6 +3048,9 @@ sub _repo_has_lfs_files {
 sub _gitlab_request {
     my ( $client, $method, $path, $payload, $opt ) = @_;
     $opt ||= {};
+    if ( my $blocked = _gitlab_client_blocked_error($client) ) {
+        die $blocked =~ /\n\z/ ? $blocked : $blocked . "\n";
+    }
     my $url = $client->{base_url} . "/api/v4" . $path;
     my $attempts = $opt->{retry_attempts} || $DEFAULTS{retry_attempts};
     my $backoff = $opt->{retry_backoff_seconds} || $DEFAULTS{retry_backoff_seconds};
@@ -2896,7 +3108,10 @@ sub _gitlab_request {
 
         my $status_label = $http_status || $response->{status};
         my $message = defined $body && length $body ? $body : ( $response->{output} || "unknown error" );
-        die "gitlab request failed [$status_label] $method $path: $message\n";
+        my $error = "gitlab request failed [$status_label] $method $path: $message\n";
+        _mark_gitlab_client_blocked( $client, $error )
+          if _is_gitlab_account_blocked_error($message);
+        die $error;
     }
     die "gitlab request exhausted retries for $method $path\n";
 }
@@ -3188,7 +3403,13 @@ sub _read_json {
     open( my $fh, "<:encoding(UTF-8)", $path ) or die "unable to read $path\n";
     my $text = do { local $/; <$fh> };
     close $fh;
-    return $JSON->decode($text);
+    defined $text or die "empty JSON file: $path\n";
+    $text =~ s/\A\s+//;
+    $text =~ s/\s+\z//;
+    length $text or die "empty JSON file: $path\n";
+    my $decoded = eval { $JSON->decode($text) };
+    die "unable to parse JSON file $path: $@" if $@;
+    return $decoded;
 }
 
 sub _read_jsonl {
