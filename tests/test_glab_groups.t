@@ -51,7 +51,6 @@ sub run_cmd {
             defaults => {
                 additional_branches => ["release"],
                 mirror_pristine_tar => JSON::PP::true,
-                target_branches_protect => ["gitlab/mcr/main"],
             },
         }
     );
@@ -64,7 +63,6 @@ sub run_cmd {
                 {
                     name => "kali",
                     source_group_url => "https://gitlab.com/kalilinux",
-                    target_branches_protect => ["gitlab/mcr/main"],
                     target_owner_path => "glab-forks",
                     target_namespace_path => "kalilinux",
                 },
@@ -74,10 +72,8 @@ sub run_cmd {
     my $config = load_config_dir($dir);
     is( scalar @{ $config->{namespaces} }, 1, "loads namespace roots" );
     is( $config->{defaults}->{additional_branches}->[0]->{name}, "release", "normalizes default branches" );
-    is( $config->{defaults}->{target_branches_protect}->[0]->{name}, "gitlab/mcr/main", "normalizes default protected target branches" );
     is( $config->{defaults}->{batch_size}, 10, "keeps default batch size at 10" );
     is( $config->{defaults}->{max_parallel}, 5, "keeps default max parallel at 5" );
-    is( $config->{namespaces}->[0]->{target_branches_protect}->[0]->{name}, "gitlab/mcr/main", "loads namespace protected target branches" );
 }
 
 {
@@ -154,8 +150,6 @@ defaults:
   additional_tags:
     - v1.0.0
   mirror_pristine_tar: true
-  target_branches_protect:
-    - gitlab/mcr/main
 YAML
     );
     write_text_file(
@@ -171,8 +165,6 @@ projects:
       - stable
     additional_tags:
       - v2.0.0
-    target_branches_protect:
-      - gitlab/mcr/main
 YAML
     );
 
@@ -181,7 +173,7 @@ YAML
     is( $config->{projects}->[0]->{target_group_path}, "glab-forks/labwc", "keeps the full explicit target group path" );
     is( $config->{defaults}->{additional_branches}->[0]->{name}, "release", "loads default branches from YAML config" );
     is( $config->{projects}->[0]->{additional_branches}->[0]->{name}, "stable", "loads per-project branch overrides from YAML config" );
-    is( $config->{projects}->[0]->{target_branches_protect}->[0]->{name}, "gitlab/mcr/main", "loads per-project protected target branches from YAML config" );
+    is( scalar @{ $config->{projects}->[0]->{target_branches_protect} }, 0, "raw config loading keeps protected target branches empty until runtime policy merge" );
 }
 
 {
@@ -207,7 +199,6 @@ YAML
     - debian/experimental
   additional_tags: []
   target_branches_protect:
-    - gitlab/mcr/main
     - mcr/main
 YAML
     );
@@ -217,9 +208,9 @@ YAML
     is( $config->{projects}->[0]->{name}, "poweralertd", "keeps the explicit project name from bare projects.yml" );
     is( $config->{projects}->[0]->{additional_branches}->[1]->{name}, "debian/experimental", "loads branch overrides from bare projects.yml" );
     is(
-        $config->{projects}->[0]->{target_branches_protect}->[1]->{name},
+        $config->{projects}->[0]->{target_branches_protect}->[0]->{name},
         "mcr/main",
-        "loads protected branch overrides from bare projects.yml",
+        "raw config loading keeps explicit protected branch overrides from bare projects.yml",
     );
 }
 
@@ -261,6 +252,89 @@ YAML
 }
 
 {
+    my $dir = tempdir( CLEANUP => 1 );
+    write_json_file(
+        File::Spec->catfile( $dir, "defaults.json" ),
+        {
+            kind => "glab-groups/defaults",
+            version => 1,
+            defaults => {},
+        }
+    );
+    write_json_file(
+        File::Spec->catfile( $dir, "namespaces.json" ),
+        {
+            kind => "glab-groups/namespaces",
+            version => 1,
+            namespaces => [
+                {
+                    name => "kde-root",
+                    source_group_url => "https://invent.kde.org",
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "kde",
+                },
+            ],
+        }
+    );
+    write_text_file(
+        File::Spec->catfile( $dir, "groups.jsonl" ),
+        <<'JSONL'
+"frameworks"
+{"source_group_path":"plasma"}
+JSONL
+    );
+
+    my $config = load_config_dir($dir);
+    is_deeply(
+        $config->{namespaces}->[0]->{source_group_paths},
+        [ "frameworks", "plasma" ],
+        "loads optional groups.jsonl allowlists for a single instance-root namespace",
+    );
+}
+
+{
+    my $dir = tempdir( CLEANUP => 1 );
+    write_json_file(
+        File::Spec->catfile( $dir, "defaults.json" ),
+        {
+            kind => "glab-groups/defaults",
+            version => 1,
+            defaults => {},
+        }
+    );
+    write_json_file(
+        File::Spec->catfile( $dir, "namespaces.json" ),
+        {
+            kind => "glab-groups/namespaces",
+            version => 1,
+            namespaces => [
+                {
+                    name => "kde-root",
+                    source_group_url => "https://invent.kde.org",
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "kde",
+                },
+                {
+                    name => "gnome-root",
+                    source_group_url => "https://gitlab.gnome.org",
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "gnome",
+                },
+            ],
+        }
+    );
+    write_text_file(
+        File::Spec->catfile( $dir, "groups.jsonl" ),
+        <<'JSONL'
+"frameworks"
+JSONL
+    );
+
+    my $error = eval { load_config_dir($dir); 1 } ? undef : $@;
+    like( $error, qr/groups\.jsonl requires exactly one namespace root/, "rejects groups.jsonl for multi-namespace configs" );
+}
+
+{
     my $policy = GlabGroups::_merge_policy(
         {
             additional_branches => [],
@@ -271,14 +345,15 @@ YAML
             target_branches_protect => [ { name => "mcr/feature/init" } ],
         },
         {
+            additional_branches => [ { name => "release" } ],
             target_branches_protect => [ { name => "mcr/feature/init" } ],
         },
     );
 
     is_deeply(
         [ map { $_->{name} } @{ $policy->{target_branches_protect} } ],
-        [ "gitlab/mcr/main", "mcr/feature/init", "mcr/feature/init" ],
-        "merge policy carries configured protected target branches into the runtime policy",
+        [ "mcr/feature/init", "release" ],
+        "merge policy only protects explicit project branches and auto-protects explicit project additional_branches",
     );
 }
 
@@ -470,7 +545,6 @@ YAML
                 source_group_url => "https://github.com/openai",
                 target_owner_path => "glab-forks",
                 target_namespace_path => "openai",
-                target_branches_protect => [ { name => "gitlab/mcr/main" } ],
             },
         ],
         projects => [
@@ -478,6 +552,7 @@ YAML
                 name => "gpt-oss",
                 source_project_url => "https://github.com/openai/gpt-oss",
                 target_group_path => "glab-forks/openai",
+                additional_branches => [ { name => "release" } ],
                 force_lfs => JSON::PP::true,
                 git_timeout_seconds => 900,
             },
@@ -514,8 +589,8 @@ YAML
     );
     is_deeply(
         [ map { $_->{name} } @{ $plan->{plan}->[0]->{policy}->{target_branches_protect} } ],
-        ["gitlab/mcr/main"],
-        "authoritative explicit project planning inherits namespace branch protection",
+        ["release"],
+        "authoritative explicit project planning auto-protects explicit project additional_branches only",
     );
 }
 
@@ -770,6 +845,100 @@ YAML
     is( $inventory->{inventory}->[0]->{group_path}, "plasma", "GitLab instance-root discovery expands the top-level group path" );
     is( $inventory->{inventory}->[0]->{namespace}->{target_namespace_path}, "kde/plasma", "GitLab instance-root discovery prefixes the target namespace with the top-level group path" );
     is( $inventory->{inventory}->[0]->{projects}->[0]->{path_with_namespace}, "plasma/kwin", "GitLab instance-root discovery keeps the source project namespace" );
+}
+
+{
+    no warnings 'redefine';
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        return [ { id => 1, full_path => "frameworks" }, { id => 2, full_path => "plasma" } ]
+          if $method eq "GET"
+          && $path =~ m{\A/groups\?top_level_only=true};
+        return { id => 1, full_path => "frameworks" }
+          if $method eq "GET" && $path eq "/groups/frameworks";
+        return { id => 2, full_path => "plasma" }
+          if $method eq "GET" && $path eq "/groups/plasma";
+        return []
+          if $method eq "GET" && $path =~ m{\A/groups/(?:1|2)/subgroups\?};
+        return [
+            {
+                archived => JSON::PP::false,
+                default_branch => "master",
+                description => "KConfig",
+                empty_repo => JSON::PP::false,
+                http_url_to_repo => "https://invent.kde.org/frameworks/kconfig.git",
+                id => 201,
+                lfs_enabled => JSON::PP::false,
+                path_with_namespace => "frameworks/kconfig",
+                ssh_url_to_repo => 'git@invent.kde.org:frameworks/kconfig.git',
+                visibility => "public",
+            },
+        ] if $method eq "GET" && $path =~ m{\A/groups/1/projects\?};
+        return [
+            {
+                archived => JSON::PP::false,
+                default_branch => "master",
+                description => "KWin",
+                empty_repo => JSON::PP::false,
+                http_url_to_repo => "https://invent.kde.org/plasma/kwin.git",
+                id => 202,
+                lfs_enabled => JSON::PP::false,
+                path_with_namespace => "plasma/kwin",
+                ssh_url_to_repo => 'git@invent.kde.org:plasma/kwin.git',
+                visibility => "public",
+            },
+        ] if $method eq "GET" && $path =~ m{\A/groups/2/projects\?};
+        die "unexpected gitlab request: $method $path";
+    };
+
+    my $inventory = GlabGroups::_discover_inventory(
+        {
+            defaults => { additional_branches => [], additional_tags => [] },
+            namespaces => [
+                {
+                    name => "kde-root",
+                    source_group_paths => [ "plasma" ],
+                    source_group_url => "https://invent.kde.org",
+                    target_namespace_path => "kde",
+                },
+            ],
+        }
+    );
+
+    is( scalar @{ $inventory->{inventory} }, 1, "GitLab instance-root allowlist limits discovery to the checked-in source groups" );
+    is( $inventory->{inventory}->[0]->{group_path}, "plasma", "GitLab instance-root allowlist keeps the configured source group path" );
+    is( $inventory->{inventory}->[0]->{projects}->[0]->{path_with_namespace}, "plasma/kwin", "GitLab instance-root allowlist keeps the selected group projects" );
+}
+
+{
+    no warnings 'redefine';
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        return [ { id => 1, full_path => "frameworks" } ]
+          if $method eq "GET"
+          && $path =~ m{\A/groups\?top_level_only=true};
+        die "unexpected gitlab request: $method $path";
+    };
+
+    my $error = eval {
+        GlabGroups::_discover_inventory(
+            {
+                defaults => { additional_branches => [], additional_tags => [] },
+                namespaces => [
+                    {
+                        name => "kde-root",
+                        source_group_paths => [ "plasma" ],
+                        source_group_url => "https://invent.kde.org",
+                        target_namespace_path => "kde",
+                    },
+                ],
+            }
+        );
+        1;
+    } ? undef : $@;
+    like( $error, qr/configured source group path not found at GitLab instance root: plasma/, "GitLab instance-root allowlist fails closed when a configured group disappears" );
 }
 
 {
@@ -2884,35 +3053,11 @@ HTML
     my @requests;
     my %branches = (
         main => { name => "main", protected => JSON::PP::false },
-        "mcr/release" => { name => "mcr/release", protected => JSON::PP::true },
-        "mcr/staging" => { name => "mcr/staging", protected => JSON::PP::true },
     );
-
-    local *GlabGroups::_get_branch = sub {
-        my ( $client, $project_id, $branch_name ) = @_;
-        my $branch = $branches{$branch_name};
-        return undef unless $branch;
-        return { %{$branch} };
-    };
 
     local *GlabGroups::_gitlab_request = sub {
         my ( $client, $method, $path, $payload, $opt ) = @_;
         push @requests, { method => $method, path => $path, payload => $payload };
-        if ( $method eq "POST" && $path eq "/projects/99/repository/branches" ) {
-            die "Branch already exists\n" if exists $branches{ $payload->{branch} };
-            $branches{ $payload->{branch} } = {
-                name => $payload->{branch},
-                protected => JSON::PP::false,
-            };
-            return { %{ $branches{ $payload->{branch} } } };
-        }
-        if ( $method eq "GET" && $path eq "/projects/99/protected_branches" ) {
-            return [
-                map { { %{$_} } }
-                  sort { $a->{name} cmp $b->{name} }
-                  grep { $_->{protected} } values %branches
-            ];
-        }
         if ( $method eq "GET" && $path =~ m{\A/projects/99/protected_branches/} ) {
             my ($branch_name) = $path =~ m{\A/projects/99/protected_branches/(.+)\z};
             $branch_name =~ s/%2F/\//g;
@@ -2922,7 +3067,15 @@ HTML
         if ( $method eq "POST" && $path eq "/projects/99/protected_branches" ) {
             $branches{ $payload->{name} } ||= { name => $payload->{name} };
             $branches{ $payload->{name} }->{protected} = JSON::PP::true;
+            $branches{ $payload->{name} }->{allow_force_push} = $payload->{allow_force_push} ? JSON::PP::true : JSON::PP::false;
             return { %{ $branches{ $payload->{name} } } };
+        }
+        if ( $method eq "PATCH" && $path =~ m{\A/projects/99/protected_branches/(.+)\?allow_force_push=true\z} ) {
+            my ($branch_name) = $path =~ m{\A/projects/99/protected_branches/(.+)\?allow_force_push=true\z};
+            $branch_name =~ s/%2F/\//g;
+            $branches{$branch_name} ||= { name => $branch_name };
+            $branches{$branch_name}->{allow_force_push} = JSON::PP::true;
+            return { %{ $branches{$branch_name} } };
         }
         if ( $method eq "DELETE" && $path =~ m{\A/projects/99/protected_branches/} ) {
             my ($branch_name) = $path =~ m{\A/projects/99/protected_branches/(.+)\z};
@@ -2957,48 +3110,30 @@ HTML
     ok( !$requests[0]->{payload}->{shared_runners_enabled}, "project update disables instance runners" );
     ok( !exists $requests[0]->{payload}->{visibility}, "project update payload does not set visibility" );
 
-    GlabGroups::_finalize_target_project(
+        GlabGroups::_finalize_target_project(
         {},
         99,
         "main",
         {
             policy => {
                 target_branches_protect => [
-                    { name => "gitlab/mcr/main" },
+                    { name => "release" },
                 ],
             },
             source_description => "source",
         }
     );
-    my @branch_create_requests =
-      grep { $_->{method} eq "POST" && $_->{path} eq "/projects/99/repository/branches" } @requests;
-    is_deeply(
-        [ map { $_->{payload}->{branch} } @branch_create_requests ],
-        [ "gitlab/mcr/main", "mcr/main", "mcr/feature/init", "mcr/staging", "mcr/release" ],
-        "finalize bootstraps the managed target branches in order",
-    );
-    is_deeply(
-        [ map { $_->{payload}->{ref} } @branch_create_requests ],
-        [ "main", "gitlab/mcr/main", "mcr/main", "mcr/main", "mcr/main" ],
-        "managed target branches are created from the expected refs",
-    );
     my @protect_requests =
       grep { $_->{method} eq "POST" && $_->{path} eq "/projects/99/protected_branches" } @requests;
     is_deeply(
         [ map { $_->{payload}->{name} } @protect_requests ],
-        [ "gitlab/mcr/main" ],
-        "finalize protects only the configured target branches",
+        [ "release" ],
+        "finalize protects only the explicitly configured target branches",
     );
-    my @unprotect_requests =
-      grep { $_->{method} eq "DELETE" && $_->{path} =~ m{\A/projects/99/protected_branches/} } @requests;
-    is_deeply(
-        [ map { my ($name) = $_->{path} =~ m{\A/projects/99/protected_branches/(.+)\z}; $name =~ s/%2F/\//gr } @unprotect_requests ],
-        [ "mcr/release", "mcr/staging" ],
-        "finalize removes legacy protection from managed branches not present in config",
-    );
+    ok( $protect_requests[0]->{payload}->{allow_force_push}, "protected branch creation enables force push for managed protected branches" );
     my @project_put_requests = grep { $_->{method} eq "PUT" && $_->{path} eq "/projects/99" } @requests;
-    ok( !exists $project_put_requests[-1]->{payload}->{visibility}, "project finalize payload does not set visibility" );
-    is( $project_put_requests[-1]->{payload}->{default_branch}, "mcr/main", "project finalize makes mcr/main the default branch" );
+    is( scalar @project_put_requests, 1, "finalize does not emit extra project update calls when only branch protection is needed" );
+    ok( !exists $project_put_requests[-1]->{payload}->{visibility}, "project update payload does not set visibility" );
 }
 
 {
@@ -3126,6 +3261,34 @@ HTML
 
     ok( !$ok, "protect branch fails when GitLab reports already exists but the exact protected branch is still missing" );
     like( $@, qr/protected branch missing after already-exists response: gitlab\/mcr\/main/, "protect branch reports the missing exact protected branch" );
+}
+
+{
+    no warnings 'redefine';
+    my @requests;
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        push @requests, { method => $method, path => $path, payload => $payload };
+        return {
+            allow_force_push => JSON::PP::false,
+            name => "gitlab/mcr/main",
+        } if $method eq "GET"
+          && $path eq "/projects/99/protected_branches/gitlab%2Fmcr%2Fmain";
+        return {
+            allow_force_push => JSON::PP::true,
+            name => "gitlab/mcr/main",
+        } if $method eq "PATCH"
+          && $path eq "/projects/99/protected_branches/gitlab%2Fmcr%2Fmain?allow_force_push=true";
+        die "unexpected request: $method $path";
+    };
+
+    GlabGroups::_ensure_target_branch_protected( {}, 99, "gitlab/mcr/main" );
+    is_deeply(
+        [ map { $_->{method} } @requests ],
+        [ "GET", "PATCH" ],
+        "protect branch upgrades existing protected branches to allow force push",
+    );
 }
 
 {

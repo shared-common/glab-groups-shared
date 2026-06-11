@@ -60,7 +60,6 @@ my $GROUP_PROJECT_CREATION_LEVEL = "maintainer";
 my $GROUP_SHARED_RUNNERS_SETTING = "disabled_and_unoverridable";
 my $GROUP_SUBGROUP_CREATION_LEVEL = "maintainer";
 my $TARGET_SYNC_BRANCH = "gitlab/mcr/main";
-my $TARGET_DEFAULT_BRANCH = "mcr/main";
 
 sub run_cli {
     my (@argv) = @_;
@@ -114,7 +113,7 @@ sub load_config_dir {
     defined $config_dir && -d $config_dir or die "config dir not found: $config_dir\n";
 
     opendir( my $dh, $config_dir ) or die "unable to read config dir: $config_dir\n";
-    my @files = sort grep { /\.(?:json|ya?ml)\z/ && -f File::Spec->catfile( $config_dir, $_ ) } readdir($dh);
+    my @files = sort grep { /\.(?:json|jsonl|ya?ml)\z/ && -f File::Spec->catfile( $config_dir, $_ ) } readdir($dh);
     closedir($dh);
 
     my %config = (
@@ -127,10 +126,20 @@ sub load_config_dir {
         namespaces => [],
         projects => [],
         exclusions => {},
+        source_group_paths => [],
     );
 
     for my $file (@files) {
         my $payload = _read_config_payload( File::Spec->catfile( $config_dir, $file ) );
+        if ( $file eq "groups.jsonl" ) {
+            ref($payload) eq "ARRAY" or die "groups.jsonl must be a JSONL list\n";
+            @{$payload} or die "groups.jsonl must not be empty\n";
+            for my $index ( 0 .. $#{$payload} ) {
+                push @{ $config{source_group_paths} },
+                  _normalize_source_group_path( $payload->[$index], "groups.jsonl[$index]" );
+            }
+            next;
+        }
         if ( ref($payload) eq "ARRAY" ) {
             if ( $file =~ /\Aprojects\.ya?ml\z/ ) {
                 for my $index ( 0 .. $#{$payload} ) {
@@ -191,6 +200,17 @@ sub load_config_dir {
 
     @{ $config{namespaces} } || @{ $config{projects} }
       or die "config dir must contain at least one namespace root or explicit project\n";
+    if ( @{ $config{source_group_paths} } ) {
+        @{ $config{namespaces} } == 1
+          or die "groups.jsonl requires exactly one namespace root in the config dir\n";
+        my %seen_paths;
+        for my $path ( @{ $config{source_group_paths} } ) {
+            $seen_paths{$path}++
+              and die "duplicate source group path in groups.jsonl: $path\n";
+        }
+        $config{namespaces}->[0]->{source_group_paths} =
+          [ @{ $config{source_group_paths} } ];
+    }
     _config_authoritative_projects_by_target_full_path( \%config );
     return \%config;
 }
@@ -831,7 +851,7 @@ sub _discover_inventory {
         }
     }
     for my $project ( @{ $config->{projects} || [] } ) {
-        my $policy = _merge_policy( $config->{defaults}, $project, {} );
+        my $policy = _merge_policy( $config->{defaults}, {}, $project );
         my $target_paths = _resolve_explicit_project_target_paths($project);
         push @inventory, @{
             _discover_project_inventory(
@@ -859,6 +879,10 @@ sub _discover_namespace_inventory {
             return _is_gitlab_instance_root( $base_url, $policy );
         },
     );
+    my $source_group_paths = $namespace->{source_group_paths};
+    if ( ref($source_group_paths) eq "ARRAY" && @{$source_group_paths} && $source->{kind} ne "gitlab_instance_root" ) {
+        die "groups.jsonl is only supported for GitLab instance-root source_group_url values\n";
+    }
 
     if ( $source->{kind} eq "gitlab_group" ) {
         my $source_client = _make_gitlab_client( $source->{base_url}, undef, undef );
@@ -878,8 +902,27 @@ sub _discover_namespace_inventory {
 
     if ( $source->{kind} eq "gitlab_instance_root" ) {
         my $source_client = _make_gitlab_client( $source->{base_url}, undef, undef );
+        my $groups = _list_gitlab_top_level_groups( $source_client, $policy );
+        if ( ref($source_group_paths) eq "ARRAY" && @{$source_group_paths} ) {
+            my %groups_by_path;
+            for my $group ( @{$groups} ) {
+                next unless ref($group) eq "HASH";
+                my $group_path = _required_relative_namespace_path(
+                    $group->{full_path} || $group->{path},
+                    "gitlab top-level group path",
+                );
+                $groups_by_path{$group_path} = $group;
+            }
+            my @selected_groups;
+            for my $path ( @{$source_group_paths} ) {
+                exists $groups_by_path{$path}
+                  or die "configured source group path not found at GitLab instance root: $path\n";
+                push @selected_groups, $groups_by_path{$path};
+            }
+            $groups = \@selected_groups;
+        }
         my @inventory;
-        for my $group ( @{ _list_gitlab_top_level_groups( $source_client, $policy ) } ) {
+        for my $group ( @{$groups} ) {
             next unless ref($group) eq "HASH";
             my $group_path = _required_relative_namespace_path(
                 $group->{full_path} || $group->{path},
@@ -1053,7 +1096,7 @@ sub _build_plan {
                 my $policy =
                   $matched_namespace
                   ? _merge_policy( $config->{defaults}, $matched_namespace, $project_entry )
-                  : _merge_policy( $config->{defaults}, $project_entry, {} );
+                  : _merge_policy( $config->{defaults}, {}, $project_entry );
                 my $skip_reason = _config_exclusion_reason(
                     $config,
                     $target_paths->{target_relative_project_path},
@@ -1364,18 +1407,14 @@ sub _mirror_entry {
     }
 
     _push_selected_refs( $repo_dir, $selected, $entry->{policy}, $default_branch );
-    my $verified;
-    if ( _prepared_requires_finalize($prepared) ) {
+    if ( _prepared_requires_finalize( $prepared, $entry ) ) {
         _finalize_target_project( $target_client, $prepared->{project_id}, $default_branch, $entry );
-        $verified = _verify_entry( $target_client, $entry, $selected, $default_branch );
     }
-    else {
-        $verified = {
-            skipped => JSON::PP::true,
-            reason => "Skipped redundant target verification because prepared target state was already aligned.",
-            target_full_path => $entry->{target_full_path},
-        };
-    }
+    my $verified = {
+        skipped => JSON::PP::true,
+        reason => "Skipped target verification to avoid redundant target API reads.",
+        target_full_path => $entry->{target_full_path},
+    };
 
     return {
         target_full_path => $entry->{target_full_path},
@@ -1516,7 +1555,6 @@ sub _normalize_defaults_payload {
         retry_attempts => _defaulted_positive_int( $payload->{retry_attempts}, $DEFAULTS{retry_attempts}, "$label.defaults.retry_attempts" ),
         retry_backoff_seconds => _defaulted_positive_int( $payload->{retry_backoff_seconds}, $DEFAULTS{retry_backoff_seconds}, "$label.defaults.retry_backoff_seconds" ),
         size_limit_bytes => _defaulted_bounded_positive_int( $payload->{size_limit_bytes}, $DEFAULTS{size_limit_bytes}, $DEFAULTS{size_limit_bytes}, "$label.defaults.size_limit_bytes" ),
-        target_branches_protect => _normalize_ref_specs( $payload->{target_branches_protect}, "$label.defaults.target_branches_protect" ),
     };
 }
 
@@ -1540,7 +1578,6 @@ sub _normalize_namespace {
         size_limit_bytes => _optional_bounded_positive_int( $payload->{size_limit_bytes}, $DEFAULTS{size_limit_bytes}, "$label.size_limit_bytes" ),
         max_blob_bytes => _optional_bounded_positive_int( $payload->{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, "$label.max_blob_bytes" ),
         source_group_url => _required_https_url( $payload->{source_group_url}, "$label.source_group_url" ),
-        target_branches_protect => _normalize_ref_specs( $payload->{target_branches_protect}, "$label.target_branches_protect" ),
         target_owner_path => _required_relative_namespace_path( $payload->{target_owner_path}, "$label.target_owner_path" ),
         target_namespace_path => _required_relative_namespace_path( $payload->{target_namespace_path}, "$label.target_namespace_path" ),
     };
@@ -1569,6 +1606,18 @@ sub _normalize_project {
         target_branches_protect => _normalize_ref_specs( $payload->{target_branches_protect}, "$label.target_branches_protect" ),
         target_group_path => _required_relative_namespace_path( $payload->{target_group_path}, "$label.target_group_path" ),
     };
+}
+
+sub _normalize_source_group_path {
+    my ( $payload, $label ) = @_;
+    if ( !ref($payload) ) {
+        return _required_relative_namespace_path( $payload, $label );
+    }
+    ref($payload) eq "HASH" or die "$label must be a string or object\n";
+    return _required_relative_namespace_path(
+        $payload->{source_group_path},
+        "$label.source_group_path",
+    );
 }
 
 sub _merge_policy {
@@ -1604,11 +1653,21 @@ sub _merge_policy {
         @{ $namespace->{additional_tags} || [] },
         @{ $override->{additional_tags} || [] },
     ];
-    $policy->{target_branches_protect} = [
-        @{ $defaults->{target_branches_protect} || [] },
-        @{ $namespace->{target_branches_protect} || [] },
-        @{ $override->{target_branches_protect} || [] },
-    ];
+    my @target_branches_to_protect;
+    my %seen_target_branches;
+    for my $spec ( @{ $override->{target_branches_protect} || [] } ) {
+        next unless ref($spec) eq "HASH";
+        my $name = _required_string( $spec->{name}, "target_branches_protect.name" );
+        next if $seen_target_branches{$name}++;
+        push @target_branches_to_protect, { name => $name };
+    }
+    for my $spec ( @{ $override->{additional_branches} || [] } ) {
+        next unless ref($spec) eq "HASH";
+        my $name = _required_string( $spec->{name}, "additional_branches.name" );
+        next if $seen_target_branches{$name}++;
+        push @target_branches_to_protect, { name => $name };
+    }
+    $policy->{target_branches_protect} = \@target_branches_to_protect;
     $policy->{git_timeout_seconds} ||= $DEFAULTS{git_timeout_seconds};
     $policy->{read_retry_attempts} ||= $GITLAB_READ_DEFAULTS{retry_attempts};
     $policy->{read_retry_backoff_seconds} ||= $GITLAB_READ_DEFAULTS{retry_backoff_seconds};
@@ -2253,15 +2312,10 @@ sub _ensure_target_project {
 
 sub _finalize_target_project {
     my ( $client, $project_id, $default_branch, $entry ) = @_;
-    my $managed_default_branch = _ensure_managed_target_branches( $client, $project_id, $default_branch, $entry->{policy} );
-    my %payload;
-    if ( !exists( $entry->{source_description_known} ) || $entry->{source_description_known} ) {
-        $payload{description} = $entry->{source_description};
+    for my $branch_name ( @{ _configured_target_branches_to_protect( $entry->{policy} ) } ) {
+        _ensure_target_branch_protected( $client, $project_id, $branch_name );
     }
-    if ($managed_default_branch) {
-        $payload{default_branch} = $managed_default_branch;
-    }
-    _gitlab_request( $client, "PUT", "/projects/$project_id", \%payload );
+    return 1;
 }
 
 sub _ensure_target_lfs_enabled {
@@ -2320,68 +2374,6 @@ sub _get_protected_branch {
     );
 }
 
-sub _ensure_managed_target_branches {
-    my ( $client, $project_id, $source_default_branch, $policy ) = @_;
-    return q{} unless $source_default_branch;
-
-    my @specs = (
-        {
-            name => $TARGET_SYNC_BRANCH,
-            ref => $source_default_branch,
-        },
-        {
-            default => JSON::PP::true,
-            name => $TARGET_DEFAULT_BRANCH,
-            ref => $TARGET_SYNC_BRANCH,
-        },
-        {
-            name => "mcr/feature/init",
-            ref => $TARGET_DEFAULT_BRANCH,
-        },
-        {
-            name => "mcr/staging",
-            ref => $TARGET_DEFAULT_BRANCH,
-        },
-        {
-            name => "mcr/release",
-            ref => $TARGET_DEFAULT_BRANCH,
-        },
-    );
-
-    my $managed_default_branch = q{};
-    my %branch_exists;
-    my %managed_branch_names = map { $_->{name} => 1 } @specs;
-    for my $spec (@specs) {
-        my $exists = _ensure_target_branch_from_ref(
-            $client,
-            $project_id,
-            $spec->{name},
-            $spec->{ref},
-            \%branch_exists,
-        );
-        next unless $exists;
-        $branch_exists{ $spec->{name} } = 1;
-        $managed_default_branch = $spec->{name} if $spec->{default} && $branch_exists{ $spec->{name} };
-    }
-
-    my $configured_target_branches_to_protect = _configured_target_branches_to_protect($policy);
-    my %configured_target_branch_names = map { $_ => 1 } @{$configured_target_branches_to_protect};
-    for my $branch_name ( @{ _list_target_protected_branch_names( $client, $project_id ) } ) {
-        next unless $managed_branch_names{$branch_name};
-        next if $configured_target_branch_names{$branch_name};
-        _ensure_target_branch_unprotected( $client, $project_id, $branch_name );
-    }
-
-    for my $branch_name ( @{$configured_target_branches_to_protect} ) {
-        next unless $branch_exists{$branch_name};
-        _ensure_target_branch_protected( $client, $project_id, $branch_name );
-    }
-
-    return $managed_default_branch && $branch_exists{$managed_default_branch}
-      ? $managed_default_branch
-      : q{};
-}
-
 sub _configured_target_branches_to_protect {
     my ($policy) = @_;
     return [] unless ref($policy) eq "HASH";
@@ -2396,52 +2388,11 @@ sub _configured_target_branches_to_protect {
     return \@names;
 }
 
-sub _list_target_protected_branch_names {
-    my ( $client, $project_id ) = @_;
-    my $protected = _gitlab_request( $client, "GET", "/projects/$project_id/protected_branches" );
-    ref($protected) eq "ARRAY" or die "protected branches response must be a list\n";
-    my @names;
-    for my $item ( @{$protected} ) {
-        next unless ref($item) eq "HASH";
-        next unless defined $item->{name} && length $item->{name};
-        push @names, $item->{name};
-    }
-    return \@names;
-}
-
-sub _ensure_target_branch_from_ref {
-    my ( $client, $project_id, $branch_name, $ref_name, $branch_exists ) = @_;
-    return 1 if $branch_exists && $branch_exists->{$branch_name};
-
-    my $create_ok = eval {
-        _gitlab_request(
-            $client,
-            "POST",
-            "/projects/$project_id/repository/branches",
-            {
-                branch => $branch_name,
-                ref => $ref_name,
-            }
-        );
-        1;
-    };
-    if ($create_ok) {
-        $branch_exists->{$branch_name} = 1 if $branch_exists;
-        return 1;
-    }
-
-    my $create_error = $@ || "unknown branch creation error\n";
-    if ( _is_gitlab_already_exists_error($create_error) ) {
-        $branch_exists->{$branch_name} = 1 if $branch_exists;
-        return 1;
-    }
-    return 0 if _is_gitlab_missing_ref_error($create_error);
-    die $create_error;
-}
-
 sub _ensure_target_branch_protected {
     my ( $client, $project_id, $branch_name ) = @_;
-    return 1 if _get_protected_branch( $client, $project_id, $branch_name );
+    my $protected = _get_protected_branch( $client, $project_id, $branch_name );
+    return _ensure_target_branch_force_push_allowed( $client, $project_id, $branch_name, $protected )
+      if $protected;
 
     my $protect_ok = eval {
         _gitlab_request(
@@ -2449,6 +2400,7 @@ sub _ensure_target_branch_protected {
             "POST",
             "/projects/$project_id/protected_branches",
             {
+                allow_force_push => JSON::PP::true,
                 name => $branch_name,
             }
         );
@@ -2458,20 +2410,24 @@ sub _ensure_target_branch_protected {
 
     my $protect_error = $@ || "unknown protected branch error\n";
     if ( _is_gitlab_already_exists_error($protect_error) ) {
-        return 1 if _get_protected_branch( $client, $project_id, $branch_name );
+        my $existing = _get_protected_branch( $client, $project_id, $branch_name );
+        return _ensure_target_branch_force_push_allowed( $client, $project_id, $branch_name, $existing )
+          if $existing;
         die "protected branch missing after already-exists response: $branch_name\n";
     }
     die $protect_error;
 }
 
-sub _ensure_target_branch_unprotected {
-    my ( $client, $project_id, $branch_name ) = @_;
+sub _ensure_target_branch_force_push_allowed {
+    my ( $client, $project_id, $branch_name, $protected ) = @_;
+    return 1
+      if ref($protected) eq "HASH"
+      && $protected->{allow_force_push};
+
     _gitlab_request(
         $client,
-        "DELETE",
-        "/projects/$project_id/protected_branches/" . _encode_path($branch_name),
-        undef,
-        { allow_missing => 1 }
+        "PATCH",
+        "/projects/$project_id/protected_branches/" . _encode_path($branch_name) . "?allow_force_push=true",
     );
     return 1;
 }
@@ -2858,11 +2814,9 @@ sub _build_target_namespace_state {
 }
 
 sub _prepared_requires_finalize {
-    my ($prepared) = @_;
+    my ( $prepared, $entry ) = @_;
     return 1 unless ref($prepared) eq "HASH";
-    return 1 if $prepared->{created};
-    my $default_branch = defined $prepared->{default_branch} ? $prepared->{default_branch} : q{};
-    return $default_branch ne $TARGET_DEFAULT_BRANCH;
+    return scalar @{ _configured_target_branches_to_protect( $entry->{policy} ) } ? 1 : 0;
 }
 
 sub _index_prepared_payload {
@@ -3416,10 +3370,14 @@ sub _read_jsonl {
     my ($path) = @_;
     open( my $fh, "<:encoding(UTF-8)", $path ) or die "unable to read $path\n";
     my @rows;
+    my $line_no = 0;
     while ( my $line = <$fh> ) {
+        $line_no++;
         $line =~ s/\s+\z//;
         next unless length $line;
-        push @rows, $JSON->decode($line);
+        my $decoded = eval { $JSON->decode($line) };
+        die "unable to parse JSONL file $path line $line_no: $@" if $@;
+        push @rows, $decoded;
     }
     close $fh;
     return \@rows;
@@ -3428,6 +3386,7 @@ sub _read_jsonl {
 sub _read_config_payload {
     my ($path) = @_;
     return _read_json($path) if $path =~ /\.json\z/;
+    return _read_jsonl($path) if $path =~ /\.jsonl\z/;
 
     open( my $fh, "<:encoding(UTF-8)", $path ) or die "unable to read $path\n";
     my $text = do { local $/; <$fh> };

@@ -24,18 +24,21 @@ Parquet artifacts on every run. Source inventory reuse is handled only through
 the GitHub Actions cache; target GitLab group resolution stays path-based and
 in-memory for the lifetime of each mirror job.
 
-Config directories can use `.json`, `.yml`, or `.yaml` files. `projects.yml`
-is the authoritative explicit-project config for a wrapper. In namespace-based
-wrappers, any target path defined in `projects.yml` overrides namespace
-discovery for that one project: discovery skips the namespace-discovered copy
-and the explicit project entry becomes the source of truth for source URL and
-per-project policy.
+Config directories can use `.json`, `.jsonl`, `.yml`, or `.yaml` files.
+`projects.yml` is the authoritative explicit-project config for a wrapper. In
+namespace-based wrappers, any target path defined in `projects.yml` overrides
+namespace discovery for that one project: discovery skips the
+namespace-discovered copy and the explicit project entry becomes the source of
+truth for source URL and per-project policy. The dedicated
+`groups.jsonl` allowlist is only for single-namespace GitLab instance-root
+wrappers; it accepts one JSON string path per line and limits discovery to the
+checked-in top-level source groups instead of expanding the whole instance.
 
-Mirroring runs through deterministic prepare and mirror batch shards with
-`max-parallel: 10`. Small plans still create one job per batch. Larger plans
-raise the effective batch size when necessary so the final plan stays within
-250 batches, and the matrix remains capped at 250 jobs without dropping any
-target repositories.
+Mirroring runs through deterministic prepare and mirror batch shards with the
+checked-in `max-parallel: 5` cap. Small plans still create one job per batch.
+Larger plans raise the effective batch size when necessary so the final plan
+stays within 250 batches, and the matrix remains capped at 250 jobs without
+dropping any target repositories.
 
 ## Supported source roots
 
@@ -43,7 +46,9 @@ Config `source_group_url` values can point at:
 
 - a GitLab group URL with an explicit path, such as `https://gitlab.com/xanmod`
 - a GitLab instance root URL, such as `https://invent.kde.org`, which expands
-  into the current public top-level groups beneath the configured target prefix
+  into the current public top-level groups beneath the configured target prefix,
+  or into the checked-in subset listed in `groups.jsonl` when that allowlist is
+  present for the wrapper
 - a GitHub organization URL, such as `https://github.com/labwc`, which mirrors
   the current organization repositories using the shared GitHub App credentials
   from `GH_ORG_READ_APP_ID` and `GH_ORG_READ_APP_PEM`
@@ -141,21 +146,15 @@ Configured additional tags are force-synced to same-name target tags. The
 source default branch is always mirrored to the managed target branch
 `gitlab/mcr/main`; if that same source branch is also listed in
 `additional_branches`, it is mirrored both to `gitlab/mcr/main` and to its
-same-name target branch. After the synced branch lands, the runtime bootstraps
-these target-only branches when missing:
+same-name target branch.
 
-- `mcr/main` from `gitlab/mcr/main` and sets it as the target default branch
-- `mcr/feature/init` from `mcr/main`
-- `mcr/staging` from `mcr/main`
-- `mcr/release` from `mcr/main`
-
-After bootstrap, the runtime reconciles protection for the managed target
-branches so that only the branch names listed in the config entry
-`target_branches_protect` remain protected. The checked-in configs currently
-protect `gitlab/mcr/main`.
-
-Those `mcr/*` branches are one-shot target bootstrap branches. They are not
-force-synced from source on later runs.
+The shared runtime no longer creates extra target-only `mcr/*` branches, no
+longer resets the project default branch during mirror runs, and no longer
+reconciles a default protected-branch set on every target project. When an
+explicit `projects.yml` entry sets `additional_branches`, those same-name
+target branches are protected after push. Explicit project entries may also set
+`target_branches_protect` for any extra protected target branches that should
+not be implied by mirrored source branches.
 
 Plan runs always perform live source discovery. The workflow no longer restores
 or reuses a persisted source inventory cache between runs. Target preparation is
