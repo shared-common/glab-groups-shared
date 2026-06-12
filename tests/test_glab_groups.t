@@ -1384,14 +1384,17 @@ HTML
         },
         25,
     );
-    is( $plan->{plan}->[0]->{target_full_path}, "glab-forks/crowdsecurity/.github", "planning preserves the source-relative target path for GitHub repos like .github" );
-    is( $plan->{plan}->[0]->{action}, "skip", "planning skips GitHub repo names that GitLab cannot create unchanged" );
+    is( $plan->{plan}->[0]->{target_full_path}, "glab-forks/crowdsecurity/x-2e676974687562", "planning rewrites GitHub repo names like .github into a GitLab-safe target path" );
     is(
-        $plan->{plan}->[0]->{skip_reason},
-        "Target GitLab path segment '.github' is invalid: path segments must not start with '-', '_', or '.'",
-        "planning records the GitLab path validation reason for unsyncable targets",
+        $plan->{plan}->[0]->{requested_target_full_path},
+        "glab-forks/crowdsecurity/.github",
+        "planning preserves the requested unsanitized target path for reporting and exclusions",
     );
-    is( $plan->{counts}->{skip}, 1, "invalid GitLab target paths count as skipped rows in the plan" );
+    is( $plan->{plan}->[0]->{target_project_name}, ".github", "planning keeps the original source repository name for target project creation" );
+    is( $plan->{plan}->[0]->{action}, "sync", "planning keeps GitHub repos like .github syncable after target path normalization" );
+    ok( !defined $plan->{plan}->[0]->{skip_reason}, "normalized GitHub repo names no longer carry a skip reason" );
+    is( $plan->{counts}->{sync}, 1, "normalized GitHub repo names count as sync rows in the plan" );
+    is( $plan->{counts}->{skip}, 0, "normalized GitHub repo names no longer count as skipped rows" );
 }
 
 {
@@ -3294,6 +3297,69 @@ HTML
 {
     no warnings 'redefine';
     my @requests;
+    my @resolved_namespaces;
+
+    local *GlabGroups::_get_project = sub {
+        return undef;
+    };
+
+    local *GlabGroups::_ensure_group_path = sub {
+        my ( $client, $group_path, $cache ) = @_;
+        push @resolved_namespaces, $group_path;
+        return 88;
+    };
+
+    local *GlabGroups::_find_project_by_namespace_and_path = sub {
+        my ( $client, $group_id, $project_full_path, $path_segment ) = @_;
+        return undef;
+    };
+
+    local *GlabGroups::_get_group = sub {
+        my ( $client, $group_path, $opt ) = @_;
+        return { id => 123, full_path => "glab-forks/crowdsecurity/misp-feed-generator" }
+          if $group_path eq "glab-forks/crowdsecurity/misp-feed-generator";
+        return undef;
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        push @requests, { method => $method, path => $path, payload => $payload };
+        die "gitlab request failed [400] POST /projects: {\"message\":{\"base\":[\"path has already been taken\"]}}\n"
+          if $method eq "POST"
+          && $path eq "/projects"
+          && $payload->{namespace_id} == 88;
+        return { id => 556, archived => JSON::PP::false }
+          if $method eq "POST" && $path eq "/projects";
+        die "unexpected request: $method $path";
+    };
+
+    my $result = GlabGroups::_ensure_target_project(
+        {},
+        {
+            policy => { force_lfs => JSON::PP::false },
+            source_archived => JSON::PP::false,
+            source_description => "source",
+            source_lfs_enabled => JSON::PP::false,
+            target_full_path => "glab-forks/crowdsecurity/misp-feed-generator",
+            target_namespace_path => "glab-forks/crowdsecurity",
+            target_project_name => "misp-feed-generator",
+        }
+    );
+    ok( $result->{created}, "creates a nested project when the requested target path is already an existing namespace" );
+    is( $result->{resolved_target_full_path}, "glab-forks/crowdsecurity/misp-feed-generator/misp-feed-generator", "returns the resolved nested target project path after namespace fallback" );
+    is_deeply( \@resolved_namespaces, [ "glab-forks/crowdsecurity", "glab-forks/crowdsecurity" ], "path conflict recovery re-resolves the configured parent namespace before falling through an existing child namespace" );
+    my @create_requests = grep { $_->{method} eq "POST" && $_->{path} eq "/projects" } @requests;
+    is_deeply(
+        [ map { $_->{payload}->{namespace_id} } @create_requests ],
+        [ 88, 123 ],
+        "nested namespace fallback retries project creation inside the conflicting existing namespace after the initial parent-namespace conflict",
+    );
+    is( $create_requests[-1]->{payload}->{path}, "misp-feed-generator", "nested namespace fallback preserves the original repository path segment for the created project" );
+}
+
+{
+    no warnings 'redefine';
+    my @requests;
 
     local *GlabGroups::_gitlab_request = sub {
         my ( $client, $method, $path, $payload, $opt ) = @_;
@@ -3304,6 +3370,67 @@ HTML
     GlabGroups::_ensure_target_lfs_enabled( {}, 99 );
     is( $requests[0]->{path}, "/projects/99", "enables target project LFS by project id" );
     ok( $requests[0]->{payload}->{lfs_enabled}, "sets lfs_enabled true for discovered LFS repositories" );
+}
+
+{
+    no warnings 'redefine';
+    my @commands;
+
+    local *GlabGroups::_run_command = sub {
+        my ( $cmd, $opt ) = @_;
+        push @commands, [ @{$cmd} ];
+        return {
+            output => "4f8f1b5c * assets/model.bin\n",
+            status => 0,
+        };
+    };
+
+    ok( GlabGroups::_repo_has_lfs_files("/tmp/repo"), "LFS detection treats fetched refs with LFS pointers as requiring LFS sync" );
+    is_deeply(
+        $commands[0],
+        [ "git", "-C", "/tmp/repo", "lfs", "ls-files", "--all" ],
+        "LFS detection scans all fetched refs instead of only the checked out branch",
+    );
+}
+
+{
+    no warnings 'redefine';
+    my @commands;
+    my @callbacks;
+    my $push_attempts = 0;
+
+    local *GlabGroups::_run_command = sub {
+        my ( $cmd, $opt ) = @_;
+        push @commands, [ @{$cmd} ];
+        if ( $cmd->[3] eq "push" ) {
+            $push_attempts++;
+            return {
+                output => "remote: GitLab: LFS objects are missing. Ensure LFS is properly set up or try a manual \"git lfs push --all\".\n",
+                status => 1,
+            } if $push_attempts == 1;
+            return { output => q{}, status => 0 };
+        }
+        return { output => q{}, status => 0 };
+    };
+
+    GlabGroups::_push_target_refspec(
+        "/tmp/repo",
+        "refs/heads/main:refs/heads/main",
+        "branch main",
+        {
+            git_timeout_seconds => 60,
+            retry_attempts => 1,
+            retry_backoff_seconds => 1,
+        },
+        {
+            on_missing_lfs => sub {
+                push @callbacks, "sync_lfs";
+            },
+        },
+    );
+
+    is_deeply( \@callbacks, ["sync_lfs"], "push retries call the shared LFS remediation hook before retrying the Git push" );
+    is( $push_attempts, 2, "push retries the target refspec after the LFS remediation hook runs" );
 }
 
 {

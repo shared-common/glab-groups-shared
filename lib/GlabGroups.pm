@@ -1097,11 +1097,7 @@ sub _build_plan {
                   $matched_namespace
                   ? _merge_policy( $config->{defaults}, $matched_namespace, $project_entry )
                   : _merge_policy( $config->{defaults}, {}, $project_entry );
-                my $skip_reason = _config_exclusion_reason(
-                    $config,
-                    $target_paths->{target_relative_project_path},
-                    $target_paths->{target_full_path},
-                );
+                my $skip_reason = _config_exclusion_reason( $config, $target_paths );
                 if ( !$skip_reason && $source_project->{archived} ) {
                     $skip_reason = "Archived source repository is excluded from mirroring.";
                 }
@@ -1152,7 +1148,10 @@ sub _build_plan {
                     source_project_id => $source_project->{id},
                     source_ssh_url => $source_project->{ssh_url_to_repo},
                     source_visibility => $source_project->{visibility},
+                    requested_target_full_path => $target_paths->{requested_target_full_path},
+                    requested_target_relative_project_path => $target_paths->{requested_target_relative_project_path},
                     target_full_path => $target_paths->{target_full_path},
+                    target_project_name => $target_paths->{target_project_name},
                     target_relative_project_path => $target_paths->{target_relative_project_path},
                     target_namespace_path => $target_paths->{target_namespace_path},
                   };
@@ -1173,11 +1172,7 @@ sub _build_plan {
                 $source_full_path,
             );
             my $policy = _merge_policy( $config->{defaults}, $namespace, {} );
-            my $skip_reason = _config_exclusion_reason(
-                $config,
-                $target_paths->{target_relative_project_path},
-                $target_paths->{target_full_path},
-            );
+            my $skip_reason = _config_exclusion_reason( $config, $target_paths );
             if ( !$skip_reason && $source_project->{archived} ) {
                 $skip_reason = "Archived source repository is excluded from mirroring.";
             }
@@ -1227,7 +1222,10 @@ sub _build_plan {
                 source_project_id => $source_project->{id},
                 source_ssh_url => $source_project->{ssh_url_to_repo},
                 source_visibility => $source_project->{visibility},
+                requested_target_full_path => $target_paths->{requested_target_full_path},
+                requested_target_relative_project_path => $target_paths->{requested_target_relative_project_path},
                 target_full_path => $target_paths->{target_full_path},
+                target_project_name => $target_paths->{target_project_name},
                 target_relative_project_path => $target_paths->{target_relative_project_path},
                 target_namespace_path => $target_paths->{target_namespace_path},
               };
@@ -1277,13 +1275,29 @@ sub _mirror_entry {
       ref($prepared_override) eq "HASH"
       ? $prepared_override
       : _ensure_target_project( $target_client, $entry );
+    my $resolved_target_full_path =
+      $prepared->{resolved_target_full_path}
+      || $entry->{target_full_path};
+    my $requested_target_full_path =
+         $prepared->{requested_target_full_path}
+      || $entry->{requested_target_full_path}
+      || (
+        $resolved_target_full_path ne $entry->{target_full_path}
+        ? $entry->{target_full_path}
+        : undef
+      );
     my $prepared_action =
         $prepared->{created} ? "create_project"
       : $prepared->{updated} ? "update_project"
       : "mirror_only";
     if ( $entry->{source_empty_repo} ) {
         return {
-            target_full_path => $entry->{target_full_path},
+            target_full_path => $resolved_target_full_path,
+            (
+                defined $requested_target_full_path
+                ? ( requested_target_full_path => $requested_target_full_path )
+                : ()
+            ),
             planned_action => $entry->{action},
             prepared_action => $prepared_action,
             status => $prepared->{created} ? "created_empty" : "updated_empty",
@@ -1291,7 +1305,7 @@ sub _mirror_entry {
             verify => {
                 skipped => JSON::PP::true,
                 reason => "Skipped target verification for empty source repository.",
-                target_full_path => $entry->{target_full_path},
+                target_full_path => $resolved_target_full_path,
             },
         };
     }
@@ -1325,7 +1339,7 @@ sub _mirror_entry {
             \$chosen_source_url,
         );
     }
-    my $target_url = _maybe_auth_url( _project_git_url( $target_client->{base_url}, $entry->{target_full_path} ), $target_client->{username}, $target_client->{token} );
+    my $target_url = _maybe_auth_url( _project_git_url( $target_client->{base_url}, $resolved_target_full_path ), $target_client->{username}, $target_client->{token} );
 
     my $remote_result = _run_command( [ "git", "-C", $repo_dir, "remote", "add", "source", $chosen_source_url ], { timeout => 60 } );
     $remote_result->{status} == 0 or die "git remote add source failed: $remote_result->{output}\n";
@@ -1343,7 +1357,12 @@ sub _mirror_entry {
     my $size_before = analyze_selected_refs( $repo_dir, $selected, $entry->{policy}->{max_blob_bytes} );
     if ( $size_before->{total_bytes} > $entry->{policy}->{size_limit_bytes} ) {
         return {
-            target_full_path => $entry->{target_full_path},
+            target_full_path => $resolved_target_full_path,
+            (
+                defined $requested_target_full_path
+                ? ( requested_target_full_path => $requested_target_full_path )
+                : ()
+            ),
             planned_action => $entry->{action},
             selected_refs => $selected,
             size => $size_before,
@@ -1370,7 +1389,12 @@ sub _mirror_entry {
     }
     if ( @{ $size_after->{oversized_blobs} } || $lfs_rewrite_error ) {
         return {
-            target_full_path => $entry->{target_full_path},
+            target_full_path => $resolved_target_full_path,
+            (
+                defined $requested_target_full_path
+                ? ( requested_target_full_path => $requested_target_full_path )
+                : ()
+            ),
             planned_action => $entry->{action},
             selected_refs => $selected,
             size => $size_after,
@@ -1382,42 +1406,41 @@ sub _mirror_entry {
     }
 
     my $needs_lfs = $entry->{policy}->{force_lfs} || $entry->{source_lfs_enabled} || _repo_has_lfs_files($repo_dir);
-    if ($needs_lfs) {
+    my $sync_lfs_objects = sub {
+        return if $prepared->{lfs_synced};
         _ensure_target_lfs_enabled( $target_client, $prepared->{project_id} );
-        _prepare_lfs( $repo_dir, $entry->{policy} );
-        for my $branch ( @{ $selected->{branches} || [] } ) {
-            my $lfs_result = _run_command(
-                [ "git", "-C", $repo_dir, "lfs", "fetch", "source", "refs/heads/$branch" ],
-                _git_command_options( $entry->{policy}, JSON::PP::true )
-            );
-            $lfs_result->{status} == 0 or die "git lfs fetch failed for branch $branch: $lfs_result->{output}\n";
-        }
-        for my $tag ( @{ $selected->{tags} || [] } ) {
-            my $lfs_result = _run_command(
-                [ "git", "-C", $repo_dir, "lfs", "fetch", "source", "refs/tags/$tag" ],
-                _git_command_options( $entry->{policy}, JSON::PP::true )
-            );
-            $lfs_result->{status} == 0 or die "git lfs fetch failed for tag $tag: $lfs_result->{output}\n";
-        }
-        my $lfs_result = _run_command(
-            [ "git", "-C", $repo_dir, "lfs", "push", "--all", "target" ],
-            _git_command_options( $entry->{policy}, JSON::PP::true )
-        );
-        $lfs_result->{status} == 0 or die "git lfs push failed: $lfs_result->{output}\n";
+        _sync_lfs_objects( $repo_dir, $selected, $entry->{policy} );
+        $prepared->{lfs_synced} = JSON::PP::true;
+    };
+    if ($needs_lfs) {
+        $sync_lfs_objects->();
     }
 
-    _push_selected_refs( $repo_dir, $selected, $entry->{policy}, $default_branch );
+    _push_selected_refs(
+        $repo_dir,
+        $selected,
+        $entry->{policy},
+        $default_branch,
+        {
+            on_missing_lfs => $sync_lfs_objects,
+        },
+    );
     if ( _prepared_requires_finalize( $prepared, $entry ) ) {
         _finalize_target_project( $target_client, $prepared->{project_id}, $default_branch, $entry );
     }
     my $verified = {
         skipped => JSON::PP::true,
         reason => "Skipped target verification to avoid redundant target API reads.",
-        target_full_path => $entry->{target_full_path},
+        target_full_path => $resolved_target_full_path,
     };
 
     return {
-        target_full_path => $entry->{target_full_path},
+        target_full_path => $resolved_target_full_path,
+        (
+            defined $requested_target_full_path
+            ? ( requested_target_full_path => $requested_target_full_path )
+            : ()
+        ),
         planned_action => $entry->{action},
         prepared_action => $prepared_action,
         prepared => $prepared,
@@ -2088,24 +2111,87 @@ sub _ensure_target_project {
     my $group_cache = $client->{group_path_cache} ||= {};
     my $namespace_state_cache = $client->{namespace_state_cache} ||= {};
     my $namespace_state;
-    my $name = basename( $entry->{target_full_path} );
+    my $requested_target_full_path = _required_string(
+        $entry->{target_full_path},
+        "target_full_path",
+    );
+    my $target_full_path = $requested_target_full_path;
+    my $target_namespace_path = $entry->{target_namespace_path};
+    my $path_name = basename($target_full_path);
+    my $display_name =
+      defined $entry->{target_project_name}
+      ? _required_string( $entry->{target_project_name}, "target_project_name" )
+      : $path_name;
+    my $read_request_opt = _gitlab_read_request_opt( $entry->{policy} );
     my $lookup_existing_project = sub {
-        my ($group_id) = @_;
+        my ( $group_id, $project_full_path, $project_path_name ) = @_;
         my $project;
-        $project = _get_project( $client, $entry->{target_full_path} )
-          if defined $entry->{target_full_path};
-        if ( !$project && defined $group_id && defined $entry->{target_full_path} ) {
+        if (
+            !$project
+            && $namespace_state
+            && ref( $namespace_state->{projects} ) eq "HASH"
+            && defined $project_full_path
+          )
+        {
+            $project = $namespace_state->{projects}->{$project_full_path};
+        }
+        $project = _get_project( $client, $project_full_path )
+          if !$project && defined $project_full_path;
+        if ( !$project && defined $group_id && defined $project_full_path ) {
             $project = _find_project_by_namespace_and_path(
                 $client,
                 $group_id,
-                $entry->{target_full_path},
-                $name,
+                $project_full_path,
+                $project_path_name,
             );
         }
-	        return $project;
-	    };
-	    my $existing =
-	      defined $entry->{target_project_id}
+        return $project;
+    };
+    my $resolve_target_project_destination = sub {
+        my ( $current_full_path, $current_namespace_path, $current_group_id, $allow_live_group_lookup ) = @_;
+        my $hops = 0;
+        while ( defined $current_full_path ) {
+            my $project = $lookup_existing_project->(
+                $current_group_id,
+                $current_full_path,
+                basename($current_full_path),
+            );
+            return ( $current_full_path, $current_namespace_path, $current_group_id, $project )
+              if $project;
+
+            my $conflicting_group_id = $group_cache->{$current_full_path};
+            if (
+                !defined $conflicting_group_id
+                && $namespace_state
+                && ref( $namespace_state->{groups} ) eq "HASH"
+              )
+            {
+                $conflicting_group_id = $namespace_state->{groups}->{$current_full_path};
+            }
+            if ( !defined $conflicting_group_id && $allow_live_group_lookup ) {
+                my $conflicting_group = _get_group(
+                    $client,
+                    $current_full_path,
+                    $read_request_opt,
+                );
+                $conflicting_group_id = $conflicting_group->{id}
+                  if ref($conflicting_group) eq "HASH";
+            }
+            last unless defined $conflicting_group_id;
+
+            $current_namespace_path = $current_full_path;
+            $current_group_id = $conflicting_group_id;
+            $group_cache->{$current_namespace_path} = $current_group_id;
+            $current_full_path = _join_path( $current_namespace_path, $path_name );
+            $hops++;
+            die "target namespace nesting exceeded for $requested_target_full_path\n"
+              if $hops > 10;
+        }
+
+        return ( $current_full_path, $current_namespace_path, $current_group_id, undef );
+    };
+    my $existing =
+      defined $entry->{target_project_id}
       ? {
             description => $entry->{target_description},
             group_runners_enabled =>
@@ -2120,50 +2206,74 @@ sub _ensure_target_project {
 			              : undef,
 			        }
 			      : undef;
-	    if ( defined $entry->{target_namespace_path} ) {
-	        $namespace_state = _target_namespace_state(
-	            $client,
-	            $entry->{target_namespace_path},
-	            $entry->{policy},
-	        );
-	        if ( ref( $namespace_state->{groups} ) eq "HASH" ) {
-	            %{$group_cache} = ( %{ $namespace_state->{groups} }, %{$group_cache} );
-	        }
+    if ( defined $target_namespace_path ) {
+        $namespace_state = _target_namespace_state(
+            $client,
+            $target_namespace_path,
+            $entry->{policy},
+        );
+        if ( ref( $namespace_state->{groups} ) eq "HASH" ) {
+            %{$group_cache} = ( %{ $namespace_state->{groups} }, %{$group_cache} );
+        }
 	    }
 	    if (
-	        !$existing
-	        && $namespace_state
-	        && ref( $namespace_state->{projects} ) eq "HASH"
-	        && defined $entry->{target_full_path}
-	      )
-	    {
-	        $existing = $namespace_state->{projects}->{ $entry->{target_full_path} };
-	    }
-	    elsif ( !$existing && defined $entry->{target_full_path} ) {
-	        $existing = $lookup_existing_project->(undef);
-	    }
-	    my $target_group_id =
-	      defined $entry->{target_namespace_path}
-	      ? $group_cache->{ $entry->{target_namespace_path} }
-	      : undef;
-	    if ( !$existing && defined $entry->{target_namespace_path} ) {
-	        $target_group_id = _ensure_group_path(
-	            $client,
-	            $entry->{target_namespace_path},
-	            $group_cache,
-	        );
-	        if ( $namespace_state && ref( $namespace_state->{groups} ) eq "HASH" ) {
-	            $namespace_state->{groups}->{ $entry->{target_namespace_path} } = $target_group_id;
-	        }
-	        if (
-	            !$existing
-	            && !( $namespace_state && ref( $namespace_state->{projects} ) eq "HASH" )
-	          )
-	        {
-	            $existing = $lookup_existing_project->($target_group_id);
-	        }
-	    }
-	    my %payload;
+        !$existing
+        && $namespace_state
+        && ref( $namespace_state->{projects} ) eq "HASH"
+        && defined $target_full_path
+      )
+    {
+        $existing = $namespace_state->{projects}->{$target_full_path};
+    }
+    elsif ( !$existing && defined $target_full_path ) {
+        $existing = $lookup_existing_project->( undef, $target_full_path, $path_name );
+    }
+    my $target_group_id =
+      defined $target_namespace_path
+      ? $group_cache->{$target_namespace_path}
+      : undef;
+    if ( !$existing && defined $target_namespace_path ) {
+        $target_group_id = _ensure_group_path(
+            $client,
+            $target_namespace_path,
+            $group_cache,
+        );
+        if ( $namespace_state && ref( $namespace_state->{groups} ) eq "HASH" ) {
+            $namespace_state->{groups}->{$target_namespace_path} = $target_group_id;
+        }
+        if (
+            !$existing
+            && !( $namespace_state && ref( $namespace_state->{projects} ) eq "HASH" )
+          )
+        {
+            $existing = $lookup_existing_project->(
+                $target_group_id,
+                $target_full_path,
+                $path_name,
+            );
+        }
+    }
+    if ( !$existing && defined $target_namespace_path ) {
+        my $known_conflicting_group_id = $group_cache->{$target_full_path};
+        if (
+            !defined $known_conflicting_group_id
+            && $namespace_state
+            && ref( $namespace_state->{groups} ) eq "HASH"
+          )
+        {
+            $known_conflicting_group_id = $namespace_state->{groups}->{$target_full_path};
+        }
+        if ( defined $known_conflicting_group_id ) {
+            ( $target_full_path, $target_namespace_path, $target_group_id, $existing ) =
+              $resolve_target_project_destination->(
+                $target_full_path,
+                $target_namespace_path,
+                $target_group_id,
+                JSON::PP::false,
+              );
+        }
+    }
+    my %payload;
     if ( !exists( $entry->{source_description_known} ) || $entry->{source_description_known} ) {
         $payload{description} = $entry->{source_description};
     }
@@ -2192,9 +2302,9 @@ sub _ensure_target_project {
                 "/projects",
                 {
                     %payload,
-                    name => $name,
+                    name => $display_name,
                     namespace_id => $target_group_id,
-                    path => $name,
+                    path => basename($target_full_path),
                 }
             );
         };
@@ -2207,34 +2317,51 @@ sub _ensure_target_project {
         }
         else {
             my $create_error = $@ || "unknown project creation error\n";
-            $project = $lookup_existing_project->($target_group_id);
+            $project = $lookup_existing_project->(
+                $target_group_id,
+                $target_full_path,
+                basename($target_full_path),
+            );
             if ($project) {
                 $created = JSON::PP::false;
             }
             else {
-	                my $invalid_namespace_error = _is_gitlab_invalid_namespace_error($create_error);
-	                my $path_conflict_error = _is_gitlab_path_conflict_error($create_error);
-	                my $refreshed_namespace = 0;
-	                if ( ( $invalid_namespace_error || $path_conflict_error ) && defined $entry->{target_namespace_path} ) {
-	                    _clear_group_path_cache_tree( $group_cache, $entry->{target_namespace_path} );
-	                    _clear_namespace_state_cache_tree( $namespace_state_cache, $entry->{target_namespace_path} );
-	                    $namespace_state = _target_namespace_state(
-	                        $client,
-	                        $entry->{target_namespace_path},
-	                        $entry->{policy},
-	                    );
-	                    if ( ref( $namespace_state->{groups} ) eq "HASH" ) {
-	                        %{$group_cache} = ( %{ $namespace_state->{groups} }, %{$group_cache} );
-	                    }
-	                    $target_group_id = _ensure_group_path(
-	                        $client,
-	                        $entry->{target_namespace_path},
-	                        $group_cache,
-	                    );
+                my $invalid_namespace_error = _is_gitlab_invalid_namespace_error($create_error);
+                my $path_conflict_error = _is_gitlab_path_conflict_error($create_error);
+                my $refreshed_namespace = 0;
+                if ( ( $invalid_namespace_error || $path_conflict_error ) && defined $target_namespace_path ) {
+                    _clear_group_path_cache_tree( $group_cache, $target_namespace_path );
+                    _clear_namespace_state_cache_tree( $namespace_state_cache, $target_namespace_path );
+                    $namespace_state = _target_namespace_state(
+                        $client,
+                        $target_namespace_path,
+                        $entry->{policy},
+                    );
+                    if ( ref( $namespace_state->{groups} ) eq "HASH" ) {
+                        %{$group_cache} = ( %{ $namespace_state->{groups} }, %{$group_cache} );
+                    }
+                    $target_group_id = _ensure_group_path(
+                        $client,
+                        $target_namespace_path,
+                        $group_cache,
+                    );
                     $refreshed_namespace = 1;
+                    if ($path_conflict_error) {
+                        ( $target_full_path, $target_namespace_path, $target_group_id, $project ) =
+                          $resolve_target_project_destination->(
+                            $target_full_path,
+                            $target_namespace_path,
+                            $target_group_id,
+                            JSON::PP::true,
+                          );
+                    }
                 }
                 if ($path_conflict_error && $refreshed_namespace) {
-                    $project = $lookup_existing_project->($target_group_id);
+                    $project ||= $lookup_existing_project->(
+                        $target_group_id,
+                        $target_full_path,
+                        basename($target_full_path),
+                    );
                 }
                 if ($project) {
                     $created = JSON::PP::false;
@@ -2249,7 +2376,11 @@ sub _ensure_target_project {
                     }
                     else {
                         $create_error = $@ || "unknown project creation error\n";
-                        $project = $lookup_existing_project->($target_group_id);
+                        $project = $lookup_existing_project->(
+                            $target_group_id,
+                            $target_full_path,
+                            basename($target_full_path),
+                        );
                     }
                 }
                 elsif ($path_conflict_error) {
@@ -2262,18 +2393,29 @@ sub _ensure_target_project {
                     }
                     else {
                         $create_error = $@ || "unknown project creation error\n";
-                        $project = $lookup_existing_project->($target_group_id);
+                        ( $target_full_path, $target_namespace_path, $target_group_id, $project ) =
+                          $resolve_target_project_destination->(
+                            $target_full_path,
+                            $target_namespace_path,
+                            $target_group_id,
+                            JSON::PP::true,
+                          );
+                        $project ||= $lookup_existing_project->(
+                            $target_group_id,
+                            $target_full_path,
+                            basename($target_full_path),
+                        );
                     }
                 }
                 if ( !$created && !$project && $path_conflict_error ) {
-                    die "gitlab project path conflict for $entry->{target_full_path}: $create_error";
+                    die "gitlab project path conflict for $target_full_path: $create_error";
                 }
                 elsif ( !$created && !$project ) {
                     die $create_error;
                 }
             }
-	        }
-	    }
+        }
+    }
 	    if ( $project && !$created ) {
         my $needs_update = 0;
         if ( exists $payload{description} ) {
@@ -2298,16 +2440,19 @@ sub _ensure_target_project {
         }
 	    }
 
-	    if ( $project && $namespace_state && ref( $namespace_state->{projects} ) eq "HASH" ) {
-	        $namespace_state->{projects}->{ $entry->{target_full_path} } = $project;
-	    }
+    if ( $project && $namespace_state && ref( $namespace_state->{projects} ) eq "HASH" ) {
+        $namespace_state->{projects}->{$target_full_path} = $project;
+    }
 
-	    return {
-	        created => $created,
-	        default_branch => defined $project->{default_branch} ? $project->{default_branch} : q{},
-	        project_id => $project->{id},
-	        updated => $updated,
-	    };
+    return {
+        created => $created,
+        default_branch => defined $project->{default_branch} ? $project->{default_branch} : q{},
+        project_id => $project->{id},
+        requested_target_full_path => $requested_target_full_path,
+        resolved_target_full_path => $target_full_path,
+        resolved_target_namespace_path => $target_namespace_path,
+        updated => $updated,
+    };
 }
 
 sub _finalize_target_project {
@@ -2917,7 +3062,8 @@ sub _fetch_selected_refs {
 }
 
 sub _push_selected_refs {
-    my ( $repo_dir, $selected, $policy, $default_branch ) = @_;
+    my ( $repo_dir, $selected, $policy, $default_branch, $opt ) = @_;
+    $opt ||= {};
     my %additional_branch_names = map { $_->{name} => 1 } @{ $policy->{additional_branches} || [] };
     for my $branch ( @{ $selected->{branches} || [] } ) {
         next if $default_branch && $branch eq $default_branch && !$additional_branch_names{$branch};
@@ -2926,6 +3072,7 @@ sub _push_selected_refs {
             "refs/heads/$branch:refs/heads/$branch",
             "branch $branch",
             $policy,
+            $opt,
         );
     }
     if ($default_branch) {
@@ -2934,6 +3081,7 @@ sub _push_selected_refs {
             "refs/heads/$default_branch:refs/heads/$TARGET_SYNC_BRANCH",
             "managed sync branch $TARGET_SYNC_BRANCH",
             $policy,
+            $opt,
         );
     }
     for my $tag ( @{ $selected->{tags} || [] } ) {
@@ -2942,12 +3090,14 @@ sub _push_selected_refs {
             "refs/tags/$tag:refs/tags/$tag",
             "tag $tag",
             $policy,
+            $opt,
         );
     }
 }
 
 sub _push_target_refspec {
-    my ( $repo_dir, $refspec, $label, $policy ) = @_;
+    my ( $repo_dir, $refspec, $label, $policy, $opt ) = @_;
+    $opt ||= {};
     my $result = _run_command(
         [
             "git", "-C", $repo_dir, "push", "--force", "target",
@@ -2956,10 +3106,15 @@ sub _push_target_refspec {
         _git_command_options( $policy, JSON::PP::true )
     );
     if ( $result->{status} != 0 && $result->{output} =~ /LFS objects are missing/i ) {
-        _run_command(
-            [ "git", "-C", $repo_dir, "lfs", "push", "--all", "target" ],
-            _git_command_options( $policy, JSON::PP::true )
-        );
+        if ( ref( $opt->{on_missing_lfs} ) eq "CODE" ) {
+            $opt->{on_missing_lfs}->();
+        }
+        else {
+            _run_command(
+                [ "git", "-C", $repo_dir, "lfs", "push", "--all", "target" ],
+                _git_command_options( $policy, JSON::PP::true )
+            );
+        }
         $result = _run_command(
             [
                 "git", "-C", $repo_dir, "push", "--force", "target",
@@ -2974,6 +3129,31 @@ sub _push_target_refspec {
 sub _prepare_lfs {
     my ( $repo_dir, $policy ) = @_;
     _run_command( [ "git", "-C", $repo_dir, "lfs", "install", "--local" ], _git_command_options( $policy, JSON::PP::false ) );
+}
+
+sub _sync_lfs_objects {
+    my ( $repo_dir, $selected, $policy ) = @_;
+    _prepare_lfs( $repo_dir, $policy );
+    for my $branch ( @{ $selected->{branches} || [] } ) {
+        my $lfs_result = _run_command(
+            [ "git", "-C", $repo_dir, "lfs", "fetch", "source", "refs/heads/$branch" ],
+            _git_command_options( $policy, JSON::PP::true )
+        );
+        $lfs_result->{status} == 0 or die "git lfs fetch failed for branch $branch: $lfs_result->{output}\n";
+    }
+    for my $tag ( @{ $selected->{tags} || [] } ) {
+        my $lfs_result = _run_command(
+            [ "git", "-C", $repo_dir, "lfs", "fetch", "source", "refs/tags/$tag" ],
+            _git_command_options( $policy, JSON::PP::true )
+        );
+        $lfs_result->{status} == 0 or die "git lfs fetch failed for tag $tag: $lfs_result->{output}\n";
+    }
+    my $lfs_result = _run_command(
+        [ "git", "-C", $repo_dir, "lfs", "push", "--all", "target" ],
+        _git_command_options( $policy, JSON::PP::true )
+    );
+    $lfs_result->{status} == 0 or die "git lfs push failed: $lfs_result->{output}\n";
+    return 1;
 }
 
 sub _rewrite_large_blobs_to_lfs {
@@ -2994,7 +3174,7 @@ sub _rewrite_large_blobs_to_lfs {
 
 sub _repo_has_lfs_files {
     my ($repo_dir) = @_;
-    my $result = _run_command( [ "git", "-C", $repo_dir, "lfs", "ls-files" ], { timeout => 120 } );
+    my $result = _run_command( [ "git", "-C", $repo_dir, "lfs", "ls-files", "--all" ], { timeout => 120 } );
     return 0 if $result->{status} != 0;
     return $result->{output} =~ /\S/ ? 1 : 0;
 }
@@ -3426,13 +3606,37 @@ sub _config_authoritative_projects_by_target_full_path {
 }
 
 sub _config_exclusion_reason {
-    my ( $config, $target_relative_project_path, $target_full_path ) = @_;
+    my ( $config, $target_paths ) = @_;
     return undef unless ref( $config->{exclusions} ) eq "HASH";
-    return $config->{exclusions}->{$target_full_path}
-      if exists $config->{exclusions}->{$target_full_path};
-    return $config->{exclusions}->{$target_relative_project_path}
-      if exists $config->{exclusions}->{$target_relative_project_path};
+    my %seen;
+    for my $candidate (
+        $target_paths->{target_full_path},
+        $target_paths->{requested_target_full_path},
+        $target_paths->{target_relative_project_path},
+        $target_paths->{requested_target_relative_project_path},
+      )
+    {
+        next unless defined $candidate && length $candidate;
+        next if $seen{$candidate}++;
+        return $config->{exclusions}->{$candidate}
+          if exists $config->{exclusions}->{$candidate};
+    }
     return undef;
+}
+
+sub _gitlab_safe_relative_project_path {
+    my ($relative_path) = @_;
+    $relative_path = _required_string( $relative_path, "relative project path" );
+    my @segments = split m{/}, $relative_path;
+    @segments or die "relative project path must contain at least one path segment\n";
+    return join "/", map { _gitlab_safe_path_segment($_) } @segments;
+}
+
+sub _gitlab_safe_path_segment {
+    my ($segment) = @_;
+    $segment = _required_string( $segment, "target path segment" );
+    return $segment unless defined _gitlab_invalid_path_segment_reason($segment);
+    return "x-" . unpack( "H*", $segment );
 }
 
 sub _resolve_explicit_project_target_paths {
@@ -3441,9 +3645,10 @@ sub _resolve_explicit_project_target_paths {
         $project->{target_group_path},
         "target_group_path",
     );
+    my $target_project_name = _required_path_segment( $project->{name}, "project.name" );
     my $target_full_path = _join_path(
         $target_namespace_path,
-        _required_path_segment( $project->{name}, "project.name" ),
+        $target_project_name,
     );
     my $target_relative_project_path = $target_full_path;
 
@@ -3463,7 +3668,10 @@ sub _resolve_explicit_project_target_paths {
     }
 
     return {
+        requested_target_full_path => $target_full_path,
+        requested_target_relative_project_path => $target_relative_project_path,
         target_full_path => $target_full_path,
+        target_project_name => $target_project_name,
         target_relative_project_path => $target_relative_project_path,
         target_namespace_path => $target_namespace_path,
     };
@@ -3473,11 +3681,21 @@ sub _resolve_namespace_project_target_paths {
     my ( $namespace, $source_group_path, $source_full_path ) = @_;
     my $target_root_path = _resolve_target_root_group_path($namespace);
     my $relative_path = _relative_path( $source_group_path, $source_full_path );
-    my $target_relative_project_path =
+    my @source_segments = split m{/}, $relative_path;
+    my $target_project_name = $source_segments[-1];
+    my $requested_target_relative_project_path =
       _join_path( $namespace->{target_namespace_path}, $relative_path );
+    my $requested_target_full_path =
+      _join_path( $target_root_path, $requested_target_relative_project_path );
+    my $gitlab_safe_relative_path = _gitlab_safe_relative_project_path($relative_path);
+    my $target_relative_project_path =
+      _join_path( $namespace->{target_namespace_path}, $gitlab_safe_relative_path );
     my $target_full_path = _join_path( $target_root_path, $target_relative_project_path );
     return {
+        requested_target_full_path => $requested_target_full_path,
+        requested_target_relative_project_path => $requested_target_relative_project_path,
         target_full_path => $target_full_path,
+        target_project_name => $target_project_name,
         target_relative_project_path => $target_relative_project_path,
         target_namespace_path => dirname($target_full_path),
     };
@@ -3942,6 +4160,7 @@ sub _is_retryable_git_error {
     my ($text) = @_;
     return 1 if $text =~ /timed out/i;
     return 1 if $text =~ /connection reset/i;
+    return 1 if $text =~ /\bHTTP 5\d\d\b/i;
     return 1 if $text =~ /TLS/i;
     return 1 if $text =~ /temporarily unavailable/i;
     return 1 if $text =~ /internal server error/i;
