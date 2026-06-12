@@ -438,7 +438,14 @@ sub _cmd_plan {
             max_batches => $opt{max_batches},
         },
     );
+    if ( ref( $normalized->{missing_source_groups} ) eq "ARRAY" && @{ $normalized->{missing_source_groups} } ) {
+        $plan->{missing_source_groups} = [ @{ $normalized->{missing_source_groups} } ];
+    }
     $plan->{total_targets} > 0
+      || (
+        ref( $plan->{missing_source_groups} ) eq "ARRAY"
+        && @{ $plan->{missing_source_groups} }
+      )
       or die "discovery produced zero targets; refusing to continue with a no-op mirror plan\n";
     _write_json( $opt{output}, $plan );
     _write_text( $opt{summary}, _render_plan_summary($plan) );
@@ -808,17 +815,26 @@ sub _discover_inventory {
     my ($config) = @_;
     my $source_auth = _load_source_auth();
     my @inventory;
+    my @missing_source_groups;
     my $authoritative_projects = _config_authoritative_projects_by_target_full_path($config);
     my $has_authoritative_projects = scalar keys %{$authoritative_projects};
     my %authoritative_namespaces;
     for my $namespace ( @{ $config->{namespaces} } ) {
         my $policy = _merge_policy( $config->{defaults}, $namespace, {} );
         my $namespace_inventory = _discover_namespace_inventory( $namespace, $policy, $source_auth );
+        my $namespace_buckets =
+            ref($namespace_inventory) eq "HASH"
+          ? $namespace_inventory->{inventory}
+          : $namespace_inventory;
+        if ( ref($namespace_inventory) eq "HASH" ) {
+            push @missing_source_groups,
+              grep { ref($_) eq "HASH" } @{ $namespace_inventory->{missing_source_groups} || [] };
+        }
         if ( !$has_authoritative_projects ) {
-            push @inventory, @{$namespace_inventory};
+            push @inventory, @{$namespace_buckets};
             next;
         }
-        for my $bucket ( @{$namespace_inventory} ) {
+        for my $bucket ( @{$namespace_buckets} ) {
             my @projects;
             for my $source_project ( @{ $bucket->{projects} || [] } ) {
                 my $source_full_path = _required_string( $source_project->{path_with_namespace}, "path_with_namespace" );
@@ -867,6 +883,7 @@ sub _discover_inventory {
     return {
         discovered_at => _timestamp(),
         inventory => \@inventory,
+        missing_source_groups => \@missing_source_groups,
     };
 }
 
@@ -903,6 +920,7 @@ sub _discover_namespace_inventory {
     if ( $source->{kind} eq "gitlab_instance_root" ) {
         my $source_client = _make_gitlab_client( $source->{base_url}, undef, undef );
         my $groups = _list_gitlab_top_level_groups( $source_client, $policy );
+        my @missing_source_groups;
         if ( ref($source_group_paths) eq "ARRAY" && @{$source_group_paths} ) {
             my %groups_by_path;
             for my $group ( @{$groups} ) {
@@ -915,8 +933,17 @@ sub _discover_namespace_inventory {
             }
             my @selected_groups;
             for my $path ( @{$source_group_paths} ) {
-                exists $groups_by_path{$path}
-                  or die "configured source group path not found at GitLab instance root: $path\n";
+                if ( !exists $groups_by_path{$path} ) {
+                    warn "configured source group path not found at GitLab instance root: $path; skipping\n";
+                    push @missing_source_groups,
+                      {
+                        base_url => $source->{base_url},
+                        namespace_name => $namespace->{name},
+                        source_group_path => $path,
+                        target_namespace_path => _join_path( $namespace->{target_namespace_path}, $path ),
+                      };
+                    next;
+                }
                 push @selected_groups, $groups_by_path{$path};
             }
             $groups = \@selected_groups;
@@ -941,7 +968,10 @@ sub _discover_namespace_inventory {
                 projects => $projects,
               };
         }
-        return \@inventory;
+        return {
+            inventory => \@inventory,
+            missing_source_groups => \@missing_source_groups,
+        };
     }
 
     if ( $source->{kind} eq "github_org" ) {
@@ -1065,9 +1095,21 @@ sub _normalize_inventory {
             projects => \@projects,
           };
     }
+    my @missing_source_groups;
+    for my $item ( @{ $inventory->{missing_source_groups} || [] } ) {
+        next unless ref($item) eq "HASH";
+        push @missing_source_groups,
+          {
+            base_url => $item->{base_url},
+            namespace_name => $item->{namespace_name},
+            source_group_path => $item->{source_group_path},
+            target_namespace_path => $item->{target_namespace_path},
+          };
+    }
     return {
         discovered_at => $inventory->{discovered_at},
         inventory => \@normalized,
+        missing_source_groups => \@missing_source_groups,
     };
 }
 
@@ -1503,7 +1545,7 @@ sub _aggregate_results {
 
 sub _render_plan_summary {
     my ($plan) = @_;
-    return join(
+    my $text = join(
         "",
         "## Group mirror plan\n\n",
         "- generated at: $plan->{generated_at}\n",
@@ -1515,6 +1557,19 @@ sub _render_plan_summary {
         "- skip: $plan->{counts}->{skip}\n",
         "- fail: $plan->{counts}->{fail}\n",
     );
+    my @missing_source_groups =
+      grep { ref($_) eq "HASH" } @{ $plan->{missing_source_groups} || [] };
+    if (@missing_source_groups) {
+        $text .= "\n### Missing Source Groups\n\n";
+        for my $item (@missing_source_groups) {
+            my $label = $item->{namespace_name} ? "$item->{namespace_name}: " : q{};
+            my $path = $item->{source_group_path} || "<unknown>";
+            my $base_url = $item->{base_url} || "<unknown>";
+            my $target_path = $item->{target_namespace_path} || $path;
+            $text .= "- `$label$path` from `$base_url` skipped; target path `$target_path` will not be mirrored this run.\n";
+        }
+    }
+    return $text;
 }
 
 sub _render_report_summary {

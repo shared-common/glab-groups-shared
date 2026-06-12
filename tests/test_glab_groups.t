@@ -33,6 +33,20 @@ sub write_text_file {
     close $fh;
 }
 
+sub read_text_file {
+    my ($path) = @_;
+    open( my $fh, "<:encoding(UTF-8)", $path ) or die "unable to read $path";
+    local $/ = undef;
+    my $text = <$fh>;
+    close $fh;
+    return $text;
+}
+
+sub read_json_file {
+    my ($path) = @_;
+    return JSON::PP->new->utf8(1)->decode( read_text_file($path) );
+}
+
 sub run_cmd {
     my (@args) = @_;
     my $cmd = join q{ }, map { "'" . ( my $v = $_ ) =~ s/'/'"'"'/gr . "'" } @args;
@@ -913,6 +927,11 @@ JSONL
 
 {
     no warnings 'redefine';
+    my @warnings;
+
+    local $SIG{__WARN__} = sub {
+        push @warnings, @_;
+    };
 
     local *GlabGroups::_gitlab_request = sub {
         my ( $client, $method, $path, $payload, $opt ) = @_;
@@ -922,23 +941,38 @@ JSONL
         die "unexpected gitlab request: $method $path";
     };
 
-    my $error = eval {
-        GlabGroups::_discover_inventory(
+    my $inventory = GlabGroups::_discover_inventory(
+        {
+            defaults => { additional_branches => [], additional_tags => [] },
+            namespaces => [
+                {
+                    name => "kde-root",
+                    source_group_paths => [ "plasma" ],
+                    source_group_url => "https://invent.kde.org",
+                    target_namespace_path => "kde",
+                },
+            ],
+        }
+    );
+
+    is( scalar @{ $inventory->{inventory} }, 0, "GitLab instance-root allowlist skips a configured group that disappears upstream" );
+    is_deeply(
+        $inventory->{missing_source_groups},
+        [
             {
-                defaults => { additional_branches => [], additional_tags => [] },
-                namespaces => [
-                    {
-                        name => "kde-root",
-                        source_group_paths => [ "plasma" ],
-                        source_group_url => "https://invent.kde.org",
-                        target_namespace_path => "kde",
-                    },
-                ],
-            }
-        );
-        1;
-    } ? undef : $@;
-    like( $error, qr/configured source group path not found at GitLab instance root: plasma/, "GitLab instance-root allowlist fails closed when a configured group disappears" );
+                base_url => "https://invent.kde.org",
+                namespace_name => "kde-root",
+                source_group_path => "plasma",
+                target_namespace_path => "kde/plasma",
+            },
+        ],
+        "GitLab instance-root allowlist records missing configured groups in discovery output",
+    );
+    like(
+        $warnings[0] || q{},
+        qr/configured source group path not found at GitLab instance root: plasma; skipping/,
+        "GitLab instance-root allowlist warns when a configured group disappears",
+    );
 }
 
 {
@@ -1204,6 +1238,78 @@ HTML
     } or $error = $@;
 
     like( $error, qr/discovery produced zero targets; refusing to continue with a no-op mirror plan/, "plan fails closed when discovery yields zero mirror targets" );
+}
+
+{
+    no warnings 'redefine';
+    my $dir = tempdir( CLEANUP => 1 );
+    my $plan_path = File::Spec->catfile( $dir, "plan.json" );
+    my $discover_path = File::Spec->catfile( $dir, "discover.json" );
+    my $summary_path = File::Spec->catfile( $dir, "plan.md" );
+
+    write_json_file(
+        File::Spec->catfile( $dir, "defaults.json" ),
+        {
+            kind => "glab-groups/defaults",
+            version => 1,
+            defaults => {},
+        }
+    );
+    write_json_file(
+        File::Spec->catfile( $dir, "namespaces.json" ),
+        {
+            kind => "glab-groups/namespaces",
+            version => 1,
+            namespaces => [
+                {
+                    name => "debian",
+                    source_group_url => "https://salsa.debian.org",
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "debian",
+                },
+            ],
+        }
+    );
+
+    local *GlabGroups::_discover_inventory = sub {
+        return {
+            discovered_at => GlabGroups::_timestamp(),
+            inventory => [],
+            missing_source_groups => [
+                {
+                    base_url => "https://salsa.debian.org",
+                    namespace_name => "debian",
+                    source_group_path => "edd",
+                    target_namespace_path => "debian/edd",
+                },
+            ],
+        };
+    };
+
+    GlabGroups::_cmd_plan(
+        "--config-dir",      $dir,
+        "--discover-output", $discover_path,
+        "--output",          $plan_path,
+        "--summary",         $summary_path,
+    );
+
+    my $plan = read_json_file($plan_path);
+    is( $plan->{total_targets}, 0, "plan allows zero targets when discovery only reports missing configured source groups" );
+    is_deeply(
+        $plan->{missing_source_groups},
+        [
+            {
+                base_url => "https://salsa.debian.org",
+                namespace_name => "debian",
+                source_group_path => "edd",
+                target_namespace_path => "debian/edd",
+            },
+        ],
+        "plan output preserves missing configured source group warnings",
+    );
+    my $summary = read_text_file($summary_path);
+    like( $summary, qr/### Missing Source Groups/, "plan summary includes a missing configured source group section" );
+    like( $summary, qr/debian\/edd/, "plan summary names the skipped target path for a missing source group" );
 }
 
 {

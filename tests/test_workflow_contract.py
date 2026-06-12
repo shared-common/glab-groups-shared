@@ -93,9 +93,12 @@ class SharedWorkflowContractTests(unittest.TestCase):
     def test_step_summary_is_bounded(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("MAX_SUMMARY_CHARS = 900_000", text)
+        self.assertIn("MAX_MISSING_SOURCE_GROUPS = 50", text)
         self.assertIn("MAX_SKIPPED_ITEMS = 50", text)
         self.assertIn("MAX_FAILED_ITEMS = 50", text)
         self.assertIn('append_line(parts, "## Plan")', text)
+        self.assertIn('append_line(parts, "### Missing Source Groups")', text)
+        self.assertIn('append_line(parts, f"- missing source groups: {len(missing_source_groups)}")', text)
         self.assertIn('append_line(parts, "## Report")', text)
         self.assertIn("see workflow artifacts for full JSON outputs", text)
         self.assertNotIn("plan.md\n            report.json", text)

@@ -32,7 +32,10 @@ namespace-discovered copy and the explicit project entry becomes the source of
 truth for source URL and per-project policy. The dedicated
 `groups.jsonl` allowlist is only for single-namespace GitLab instance-root
 wrappers; it accepts one JSON string path per line and limits discovery to the
-checked-in top-level source groups instead of expanding the whole instance.
+checked-in top-level source groups instead of expanding the whole instance. If
+one of those configured top-level groups disappears upstream, discovery records
+the missing group as a warning, skips that target path for the current run, and
+continues planning the remaining mirror work.
 
 Mirroring runs through deterministic prepare and mirror batch shards with the
 checked-in `max-parallel: 5` cap. Small plans still create one job per batch.

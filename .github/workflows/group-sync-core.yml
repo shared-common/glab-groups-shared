@@ -469,6 +469,7 @@ jobs:
           MAX_SUMMARY_CHARS = 900_000
           import os
 
+          MAX_MISSING_SOURCE_GROUPS = 50
           MAX_SKIPPED_ITEMS = 50
           MAX_FAILED_ITEMS = 50
 
@@ -492,6 +493,9 @@ jobs:
           report = json.loads(Path("report.json").read_text(encoding="utf-8"))
 
           plan_counts = plan.get("counts") or {}
+          missing_source_groups = [
+              item for item in (plan.get("missing_source_groups") or []) if isinstance(item, dict)
+          ]
           result_counts = report.get("result_counts") or {}
           results = report.get("results") or []
           skipped = [item for item in results if isinstance(item, dict) and (item.get("status") or "") == "skipped"]
@@ -508,6 +512,26 @@ jobs:
           append_line(parts, f"- sync: {plan_counts.get('sync', 0)}")
           append_line(parts, f"- skip: {plan_counts.get('skip', 0)}")
           append_line(parts, f"- fail: {plan_counts.get('fail', 0)}")
+          append_line(parts, f"- missing source groups: {len(missing_source_groups)}")
+
+          if missing_source_groups:
+              append_line(parts, "")
+              append_line(parts, "### Missing Source Groups")
+              for item in missing_source_groups[:MAX_MISSING_SOURCE_GROUPS]:
+                  namespace_name = item.get("namespace_name") or ""
+                  source_group_path = item.get("source_group_path") or "<unknown>"
+                  base_url = item.get("base_url") or "<unknown>"
+                  target_namespace_path = item.get("target_namespace_path") or source_group_path
+                  label = f"{namespace_name}: " if namespace_name else ""
+                  append_line(
+                      parts,
+                      f"- `{label}{source_group_path}` from `{base_url}` skipped; target path `{target_namespace_path}` will not be mirrored this run.",
+                  )
+              if len(missing_source_groups) > MAX_MISSING_SOURCE_GROUPS:
+                  append_line(
+                      parts,
+                      f"- _... {len(missing_source_groups) - MAX_MISSING_SOURCE_GROUPS} additional entries omitted; see workflow artifacts for full JSON outputs._",
+                  )
 
           append_line(parts, "")
           append_line(parts, "## Report")
