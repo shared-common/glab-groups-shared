@@ -544,6 +544,91 @@ JSONL
 }
 
 {
+    my $config = {
+        defaults => {
+            additional_branches => [],
+            additional_tags => [],
+            allow_blob_rewrite => JSON::PP::true,
+            force_lfs => JSON::PP::false,
+            git_timeout_seconds => 1800,
+            max_blob_bytes => 100 * 1024 * 1024,
+            mirror_pristine_tar => JSON::PP::true,
+            read_retry_attempts => 2,
+            read_retry_backoff_seconds => 2,
+            retry_attempts => 2,
+            retry_backoff_seconds => 2,
+            size_limit_bytes => 9 * 1024 * 1024 * 1024,
+        },
+        exclusions => {},
+    };
+
+    my $inventory = {
+        inventory => [
+            {
+                group_path => "big-team",
+                namespace => {
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "mirror",
+                },
+                projects => [
+                    map {
+                        {
+                            archived => JSON::PP::false,
+                            default_branch => "main",
+                            description => "source",
+                            empty_repo => JSON::PP::false,
+                            http_url_to_repo => "https://example.invalid/big-team/project-$_->{id}.git",
+                            id => $_->{id},
+                            lfs_enabled => JSON::PP::false,
+                            path_with_namespace => "big-team/project-$_->{id}",
+                            ssh_url_to_repo => "git\@example.invalid:big-team/project-$_->{id}.git",
+                            visibility => "public",
+                        }
+                    } (
+                        { id => 1 },
+                        { id => 2 },
+                        { id => 3 },
+                    ),
+                ],
+            },
+            {
+                group_path => "small-team",
+                namespace => {
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "mirror",
+                },
+                projects => [
+                    {
+                        archived => JSON::PP::false,
+                        default_branch => "main",
+                        description => "source",
+                        empty_repo => JSON::PP::false,
+                        http_url_to_repo => "https://example.invalid/small-team/project-9.git",
+                        id => 9,
+                        lfs_enabled => JSON::PP::false,
+                        path_with_namespace => "small-team/project-9",
+                        ssh_url_to_repo => "git\@example.invalid:small-team/project-9.git",
+                        visibility => "public",
+                    },
+                ],
+            },
+        ],
+    };
+
+    my $plan = GlabGroups::_build_plan( $config, $inventory, 1 );
+    is(
+        $plan->{plan}->[0]->{source_group_path},
+        "small-team",
+        "planning schedules smaller source groups before the largest source group",
+    );
+    is(
+        $plan->{plan}->[-1]->{source_group_path},
+        "big-team",
+        "planning leaves the largest source group for later mirror batches",
+    );
+}
+
+{
     no warnings 'redefine';
     my @seen_source_urls;
     my @seen_github_auth_requests;
@@ -2191,6 +2276,18 @@ YAML
         {
             results => [
                 {
+                    target_full_path => "owner/archived/demo",
+                    planned_action => "mirror_only",
+                    reason => "Archived source repository is excluded from mirroring.",
+                    status => "skipped",
+                },
+                {
+                    target_full_path => "owner/matched/demo",
+                    planned_action => "mirror_only",
+                    reason => "Selected source refs already match the target repository.",
+                    status => "skipped",
+                },
+                {
                     target_full_path => "owner/kali/demo",
                     planned_action => "mirror_only",
                     reason => "Repository above permitted size limit.",
@@ -2213,9 +2310,16 @@ YAML
         "report merges multiple batch result files",
     );
     my $report = JSON::PP->new->decode( do { open( my $fh, "<:encoding(UTF-8)", $report_path ) or die $!; local $/; <$fh> } );
-    is( scalar @{ $report->{results} }, 2, "merged report preserves all batch rows" );
+    is( scalar @{ $report->{results} }, 4, "merged report preserves all batch rows" );
     is( $report->{result_counts}->{mirrored}, 1, "merged report counts mirrored rows" );
-    is( $report->{result_counts}->{skipped}, 1, "merged report counts skipped rows" );
+    is( $report->{result_counts}->{skipped}, 3, "merged report counts skipped rows" );
+    my $summary = do { open( my $fh, "<:encoding(UTF-8)", $summary_path ) or die $!; local $/; <$fh> };
+    like( $summary, qr/archived_skipped: 1/, "report summary collapses archived-source skips into one counter" );
+    like( $summary, qr/refs_matched_skipped: 1/, "report summary collapses ref-matched skips into one counter" );
+    like( $summary, qr/other_skipped: 1/, "report summary counts remaining skipped repositories separately" );
+    unlike( $summary, qr/\Qowner\/archived\/demo\E/, "report summary omits per-repo archived skip lines after collapsing them" );
+    unlike( $summary, qr/\Qowner\/matched\/demo\E/, "report summary omits per-repo ref-match skip lines after collapsing them" );
+    like( $summary, qr/\Qowner\/kali\/demo\E.*Repository above permitted size limit\./s, "report summary still shows full detail for other skipped repositories" );
 }
 
 {
@@ -3577,6 +3681,123 @@ YAML
 
 {
     no warnings 'redefine';
+
+    local *GlabGroups::_discover_remote_refs_from_urls = sub {
+        die "git ls-remote failed: fatal: could not read Username for 'https://gitlab.freedesktop.org': No such device or address\n";
+    };
+
+    my $result = GlabGroups::_mirror_entry(
+        {},
+        {},
+        {
+            action => "sync",
+            policy => {
+                additional_branches => [],
+                additional_tags => [],
+                allow_blob_rewrite => JSON::PP::true,
+                force_lfs => JSON::PP::false,
+                git_timeout_seconds => 1800,
+                max_blob_bytes => 100 * 1024 * 1024,
+                mirror_pristine_tar => JSON::PP::true,
+                read_retry_attempts => 2,
+                read_retry_backoff_seconds => 2,
+                retry_attempts => 2,
+                retry_backoff_seconds => 2,
+                size_limit_bytes => 9 * 1024 * 1024 * 1024,
+                target_branches_protect => [],
+            },
+            source_empty_repo => JSON::PP::false,
+            source_full_path => "libfprint/wiki",
+            source_group_path => "freedesktop",
+            source_http_url => "https://gitlab.freedesktop.org/libfprint/wiki.git",
+            source_lfs_enabled => JSON::PP::false,
+            target_full_path => "glab-forks/freedesktop/libfprint/wiki",
+            target_namespace_path => "glab-forks/freedesktop/libfprint",
+        },
+    );
+
+    is( $result->{status}, "skipped", "mirror skips sources that reject anonymous git ls-remote access" );
+    is( $result->{failure_context}, "source-ls-remote", "source auth skips record the source ls-remote failure context" );
+}
+
+{
+    no warnings 'redefine';
+
+    local *GlabGroups::_discover_remote_refs_from_urls = sub {
+        return {
+            branches => { main => "abc123" },
+            default_branch => "main",
+            tags => {},
+        };
+    };
+    local *GlabGroups::_discover_remote_refs_if_exists = sub { return undef; };
+    local *GlabGroups::_ensure_target_project = sub {
+        return {
+            created => JSON::PP::false,
+            project_id => 77,
+            requested_target_full_path => "glab-forks/microsoft/demo",
+            resolved_target_full_path => "glab-forks/microsoft/demo",
+            resolved_target_namespace_path => "glab-forks/microsoft",
+            updated => JSON::PP::false,
+        };
+    };
+    local *GlabGroups::_repo_has_lfs_files = sub { return 0; };
+    local *GlabGroups::analyze_selected_refs = sub {
+        return { oversized_blobs => [], total_bytes => 1 };
+    };
+    local *GlabGroups::_push_selected_refs = sub {
+        die "git push failed for managed sync branch managed/sync: remote: batch response: Your push to this repository cannot be completed as it would exceed the allocated storage for your project. Contact your GitLab administrator for more information.\n";
+    };
+    local *GlabGroups::_run_command = sub {
+        my ( $cmd, $opt ) = @_;
+        return { output => q{}, status => 0 };
+    };
+
+    my $result = GlabGroups::_mirror_entry(
+        {
+            base_url => "https://gitlab.com",
+            read_token => "unused",
+            read_username => "oauth2",
+            sync_branch => "managed/sync",
+            token => "unused",
+            username => "oauth2",
+        },
+        {},
+        {
+            action => "sync",
+            policy => {
+                additional_branches => [],
+                additional_tags => [],
+                allow_blob_rewrite => JSON::PP::true,
+                force_lfs => JSON::PP::false,
+                git_timeout_seconds => 1800,
+                max_blob_bytes => 100 * 1024 * 1024,
+                mirror_pristine_tar => JSON::PP::true,
+                read_retry_attempts => 2,
+                read_retry_backoff_seconds => 2,
+                retry_attempts => 2,
+                retry_backoff_seconds => 2,
+                size_limit_bytes => 9 * 1024 * 1024 * 1024,
+                target_branches_protect => [],
+            },
+            source_default_branch => "main",
+            source_auth_mode => "none",
+            source_empty_repo => JSON::PP::false,
+            source_full_path => "microsoft/demo",
+            source_group_path => "microsoft",
+            source_http_url => "https://github.com/microsoft/demo.git",
+            source_lfs_enabled => JSON::PP::false,
+            target_full_path => "glab-forks/microsoft/demo",
+            target_namespace_path => "glab-forks/microsoft",
+        },
+    );
+
+    is( $result->{status}, "skipped", "mirror treats target LFS storage quota exhaustion as a policy skip" );
+    like( $result->{reason}, qr/storage quota/i, "storage quota skip keeps a clear operator-facing reason" );
+}
+
+{
+    no warnings 'redefine';
     my @requests;
     my %branches = (
         main => { name => "main", protected => JSON::PP::false },
@@ -3896,6 +4117,68 @@ YAML
     GlabGroups::_ensure_target_lfs_enabled( {}, 99 );
     is( $requests[0]->{path}, "/projects/99", "enables target project LFS by project id" );
     ok( $requests[0]->{payload}->{lfs_enabled}, "sets lfs_enabled true for discovered LFS repositories" );
+}
+
+{
+    no warnings 'redefine';
+    my @commands;
+    my $push_attempts = 0;
+
+    local *GlabGroups::_run_command = sub {
+        my ( $cmd, $opt ) = @_;
+        push @commands, [ @{$cmd} ];
+        if ( $cmd->[3] eq "lfs" && $cmd->[4] eq "push" ) {
+            $push_attempts++;
+            return {
+                output => <<'OUT',
+Locking support detected on remote "target". Consider enabling it with:
+$ git config lfs.https://@gitlab.com/glab-forks/freedesktop/traces-db.git/info/lfs.locksverify true
+Git LFS upload failed:
+(missing) 0ad/0ad.trace (400df59598e3b3ebe0aff13bc19c572fbd71f3c8ec8a257904d6c0a712b568af)
+hint: Your push was rejected due to missing or corrupt local objects.
+hint: You can disable this check with: git config lfs.allowincompletepush true
+OUT
+                status => 1,
+            } if $push_attempts == 1;
+            return { output => q{}, status => 0 };
+        }
+        return { output => q{}, status => 0 };
+    };
+
+    GlabGroups::_sync_lfs_objects(
+        "/tmp/repo",
+        {
+            branches => ["main"],
+            tags => [],
+        },
+        {
+            git_timeout_seconds => 60,
+            retry_attempts => 1,
+            retry_backoff_seconds => 1,
+        },
+    );
+
+    ok(
+        grep(
+            {
+                $_->[3] eq "config"
+                  && $_->[5] eq 'lfs.https://@gitlab.com/glab-forks/freedesktop/traces-db.git/info/lfs.locksverify'
+                  && $_->[6] eq "true"
+            } @commands
+        ),
+        "LFS sync enables repo-local locksverify when Git LFS reports target locking support",
+    );
+    ok(
+        grep(
+            {
+                $_->[3] eq "config"
+                  && $_->[5] eq "lfs.allowincompletepush"
+                  && $_->[6] eq "true"
+            } @commands
+        ),
+        "LFS sync enables repo-local allowincompletepush when Git LFS reports missing local objects",
+    );
+    is( $push_attempts, 2, "LFS sync retries the full lfs push after applying local remediations" );
 }
 
 {

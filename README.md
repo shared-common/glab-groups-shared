@@ -22,7 +22,12 @@ Wrapper repositories call `.github/workflows/group-sync-core.yml` and pass:
 The shared workflow uploads discovery, plan, result, report, CSV, JSON, and
 optional Parquet artifacts on every run. Source inventory is rebuilt live on
 each run through sharded discovery jobs; target GitLab group resolution stays
-path-based and in-memory for the lifetime of each mirror job.
+path-based and in-memory for the lifetime of each mirror job. GitLab-source
+wrappers can also fetch optional source-read credentials through the shared
+workflow when the upstream host refuses anonymous `git ls-remote`. The shared
+workflow now also propagates a 5h50m run deadline and wraps the long-running
+discover/plan/mirror/report commands with `timeout` so runs stop before the
+hosted 6h ceiling.
 
 Config directories can use `.json`, `.jsonl`, `.yml`, or `.yaml` files.
 `projects.yml` is the authoritative explicit-project config for a wrapper. In
@@ -41,7 +46,8 @@ Mirroring runs through deterministic discovery and mirror shards with the
 checked-in `max-parallel: 5` cap. Discovery fans out across up to 250 matrix
 jobs, the final plan is built from the merged discovery shards, and mirror
 batches are rebalanced so the final plan stays within 250 jobs with a much more
-even per-shard target count.
+even per-shard target count while still pushing the largest source groups later
+in the run.
 
 ## Supported source roots
 
@@ -126,7 +132,8 @@ The planning phase does not pre-create missing target groups or recursively
 inventory the full target namespace tree. It builds target-aware batches from
 the merged discovery output so mirror work is spread more evenly across shards.
 Target group IDs are resolved live from the configured path and cached only
-inside the current job.
+inside the current job, and missing-project repair paths avoid eager target
+subtree crawls so the mirror stage uses fewer GitLab API reads.
 
 ## Ref selection
 
@@ -164,7 +171,12 @@ reuses a persisted source inventory cache between runs, and it no longer
 serializes all discovery into one job. Target preparation is best-effort per
 repository: the mirror stage compares source and target refs with `git
 ls-remote`, skips already-synced repositories before any target API work, and
-uses the `glab-forks` deploy token for target-side read checks.
+uses the `glab-forks` deploy token for target-side read checks. When Git LFS
+reports remote locking support or incomplete local LFS objects, the runtime now
+applies repo-local `locksverify` and `lfs.allowincompletepush` remediation
+before retrying the LFS upload. When a source host refuses anonymous Git
+reads, the runtime records a clear per-repository skip unless optional source
+credentials were available.
 
 ## Validation
 

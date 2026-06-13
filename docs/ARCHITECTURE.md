@@ -36,13 +36,17 @@ out across a dynamic matrix capped at 250 jobs, merges those discovery shards
 into one deterministic plan, and finally fans mirror execution out again across
 up to 250 jobs. GitHub Actions still runs at most five mirror jobs concurrently.
 Batch construction now rebalances targets across the final mirror shards instead
-of letting a large tail accumulate in the last job. The mirror stage skips
+of letting a large tail accumulate in the last job, while also leaving the
+largest source groups for the later shards. The mirror stage skips
 already-synced repositories with `git ls-remote`, retries target
 creation/update only when the target repo is missing or later write steps need
 API-backed reconciliation, and records final per-project outcomes. The final
 report job downloads all batch artifacts, aggregates them into one report, CSV,
 JSON analytics file, and optional Parquet file, then publishes those artifacts
-back to the workflow run.
+back to the workflow run. The reusable workflow now also computes a shared
+epoch deadline at bootstrap and wraps the long-running discover, plan, mirror,
+report, analytics, and summary commands with `timeout` so the overall run
+stops before 5h50m instead of dying at the hosted 6h ceiling.
 
 ## Planning model
 
@@ -84,12 +88,16 @@ The mirror stage:
   discovery when the config enables `gitlab_source_include_subgroups`
 - resolves target groups by full path and caches the resulting GitLab IDs only
   in memory for the lifetime of each mirror job
+- avoids eager target-namespace subtree crawls during missing-project repair so
+  target-side GitLab API reads stay bounded on large namespaces
 - authenticates GitHub-source discovery and Git-over-HTTPS mirroring with the
   shared GitHub App by generating a JWT, resolving the source-account
   installation, and minting short-lived installation access tokens
 - keeps non-GitHub explicit public project URLs on plain HTTPS git without
   source-auth injection, while explicit GitHub project URLs reuse the shared
   GitHub App auth flow during discovery and mirror execution
+- can also consume optional GitLab-source read credentials from BWS for hosts
+  that refuse anonymous `git ls-remote`
 - retries repo-shaped root-discovered clone URLs with an appended `.git` suffix
   before failing when the human-facing URL does not expose refs over Git
 - uses longer bounded retries for GitLab read requests during discovery to ride
@@ -115,13 +123,19 @@ The mirror stage:
   repository storage behavior than an uncompressed object-size sum
 - attempts LFS migration for blobs larger than 100 MiB before falling back to
   per-repository skip
+- applies repo-local `locksverify` and `lfs.allowincompletepush` remediations
+  before retrying a Git LFS upload
 - retries retryable Git and GitLab operations with bounded backoff
 - skips redundant target verification reads after push
 
 ## Failure model
 
 Expected policy skips, such as repositories above the selected-ref size budget,
-are captured as skipped result rows. Unexpected per-repository exceptions are
-captured as failed rows with error details so artifacts and summaries are still
-produced and the rest of the run keeps going. Fatal
-configuration or credential failures still stop the workflow before mirroring.
+are captured as skipped result rows. Source repositories that deny anonymous
+Git reads without optional source credentials, and target repositories that
+reject LFS uploads because their storage quota is exhausted, are also reported
+as clear per-repository skips instead of opaque transport failures. Unexpected
+per-repository exceptions are captured as failed rows with error details so
+artifacts and summaries are still produced and the rest of the run keeps going.
+Fatal configuration or credential failures still stop the workflow before
+mirroring.

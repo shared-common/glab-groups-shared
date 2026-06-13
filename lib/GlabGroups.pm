@@ -539,6 +539,18 @@ sub _build_group_batches {
     return ( \@batches, scalar keys %seen_groups );
 }
 
+sub _plan_group_priority_key {
+    my ($entry) = @_;
+    return q{} unless ref($entry) eq "HASH";
+    return $entry->{source_group_path}
+      if defined $entry->{source_group_path} && !ref( $entry->{source_group_path} ) && length $entry->{source_group_path};
+    return $entry->{target_namespace_path}
+      if defined $entry->{target_namespace_path} && !ref( $entry->{target_namespace_path} ) && length $entry->{target_namespace_path};
+    return $entry->{target_full_path}
+      if defined $entry->{target_full_path} && !ref( $entry->{target_full_path} ) && length $entry->{target_full_path};
+    return q{};
+}
+
 sub _select_effective_batch_size {
     my ( $plan, $batch_size, $max_batches ) = @_;
     $batch_size > 0 or die "batch-size must be greater than zero\n";
@@ -1386,8 +1398,17 @@ sub _build_plan {
         }
     }
 
+    my %group_target_counts;
+    for my $entry (@plan) {
+        my $group_key = _plan_group_priority_key($entry);
+        $group_target_counts{$group_key}++;
+    }
     @plan = sort {
-        ( $a->{target_namespace_path} || q{} ) cmp ( $b->{target_namespace_path} || q{} )
+        $group_target_counts{ _plan_group_priority_key($a) }
+          <=>
+          $group_target_counts{ _plan_group_priority_key($b) }
+          || _plan_group_priority_key($a) cmp _plan_group_priority_key($b)
+          || ( $a->{target_namespace_path} || q{} ) cmp ( $b->{target_namespace_path} || q{} )
           || $a->{target_full_path} cmp $b->{target_full_path}
     } @plan;
     my ( $effective_batch_size, $batches, $total_groups ) =
@@ -1460,20 +1481,41 @@ sub _mirror_entry {
         };
     }
 
+    my $requested_target_full_path = $entry->{requested_target_full_path};
     my $entry_source_auth = _resolve_source_auth_for_entry( $source_auth, $entry );
     my $source_url = _maybe_auth_url( $entry->{source_http_url}, $entry_source_auth->{username}, $entry_source_auth->{token} );
     my $chosen_source_url = $source_url;
-    my $available = _discover_remote_refs_from_urls(
-        [ $source_url, _fallback_clone_url($source_url) ],
-        $entry->{policy},
-        \$chosen_source_url,
-    );
+    my $available = eval {
+        _discover_remote_refs_from_urls(
+            [ $source_url, _fallback_clone_url($source_url) ],
+            $entry->{policy},
+            \$chosen_source_url,
+        );
+    };
+    if ( !$available ) {
+        my $source_error = _trim_error($@);
+        if ( _git_output_reports_missing_source_credentials($source_error) ) {
+            return {
+                target_full_path => $entry->{target_full_path},
+                (
+                    defined $requested_target_full_path
+                    ? ( requested_target_full_path => $requested_target_full_path )
+                    : ()
+                ),
+                planned_action => $entry->{action},
+                status => "skipped",
+                reason => "Source repository refused anonymous Git reads and no usable source credentials were available.",
+                error => $source_error,
+                failure_context => "source-ls-remote",
+            };
+        }
+        die $source_error =~ /\n\z/ ? $source_error : $source_error . "\n";
+    }
     my $default_branch = $entry->{source_default_branch} || $available->{default_branch} || "";
     my $selected = resolve_selected_refs( $default_branch, $entry->{policy}, $available );
     @{ $selected->{branches} } || $entry->{source_empty_repo}
       or die "no source branches resolved for $entry->{source_full_path}\n";
 
-    my $requested_target_full_path = $entry->{requested_target_full_path};
     my $prepared_from_override = ref($prepared_override) eq "HASH";
     my $target_remote_refs =
       $prepared_from_override
@@ -1671,16 +1713,43 @@ sub _mirror_entry {
         $sync_lfs_objects->();
     }
 
-    _push_selected_refs(
-        $repo_dir,
-        $selected,
-        $entry->{policy},
-        $default_branch,
-        $target_client->{sync_branch},
-        {
-            on_missing_lfs => $sync_lfs_objects,
-        },
-    );
+    my $push_ok = eval {
+        _push_selected_refs(
+            $repo_dir,
+            $selected,
+            $entry->{policy},
+            $default_branch,
+            $target_client->{sync_branch},
+            {
+                on_missing_lfs => $sync_lfs_objects,
+            },
+        );
+        1;
+    };
+    if ( !$push_ok ) {
+        my $push_error = _trim_error($@);
+        if ( _git_output_reports_lfs_storage_quota_exceeded($push_error) ) {
+            return {
+                target_full_path => $resolved_target_full_path,
+                (
+                    defined $requested_target_full_path
+                    ? ( requested_target_full_path => $requested_target_full_path )
+                    : ()
+                ),
+                planned_action => $entry->{action},
+                prepared_action => $prepared_action,
+                prepared => $prepared,
+                selected_refs => $selected,
+                size => $size_after,
+                needs_lfs => $needs_lfs ? JSON::PP::true : JSON::PP::false,
+                lfs_rewrite_attempted => $lfs_rewrite_attempted,
+                status => "skipped",
+                reason => "Target GitLab project rejected the LFS upload because its storage quota is exhausted.",
+                error => $push_error,
+            };
+        }
+        die $push_error =~ /\n\z/ ? $push_error : $push_error . "\n";
+    }
     if ( _prepared_requires_finalize( $prepared, $entry ) ) {
         if ( !$prepared->{project_id} ) {
             my $ensured = _ensure_target_project( $target_client, $entry );
@@ -1791,41 +1860,96 @@ sub _render_plan_summary {
     return $text;
 }
 
+sub _summary_skip_breakdown {
+    my ($results) = @_;
+    my $archived_reason = "Archived source repository is excluded from mirroring.";
+    my $refs_matched_reason = "Selected source refs already match the target repository.";
+    my $archived_skipped = 0;
+    my $refs_matched_skipped = 0;
+    my @other_skipped;
+
+    for my $item ( @{$results || []} ) {
+        next unless ref($item) eq "HASH";
+        next unless ( $item->{status} || q{} ) eq "skipped";
+        my $reason = $item->{reason} || $item->{error} || "skipped";
+        if ( $reason eq $archived_reason ) {
+            $archived_skipped++;
+            next;
+        }
+        if ( $reason eq $refs_matched_reason ) {
+            $refs_matched_skipped++;
+            next;
+        }
+        push @other_skipped, $item;
+    }
+
+    return {
+        archived_skipped => $archived_skipped,
+        refs_matched_skipped => $refs_matched_skipped,
+        other_skipped => \@other_skipped,
+    };
+}
+
+sub _render_summary_item {
+    my ( $item, $field ) = @_;
+    return q{} unless ref($item) eq "HASH";
+    my $target = $item->{target_full_path} || $item->{file} || "<unknown>";
+    my $detail =
+         ( defined $field ? $item->{$field} : undef )
+      || $item->{error}
+      || $item->{reason}
+      || "unknown";
+    $detail = _trim_error($detail);
+    return "- `$target`: $detail\n" if $detail !~ /\n/;
+    return join(
+        "",
+        "- `$target`:\n\n",
+        "```text\n",
+        $detail, "\n",
+        "```\n",
+    );
+}
+
 sub _render_report_summary {
     my ($report) = @_;
     my $counts = $report->{result_counts} || {};
     my @input_failures = grep { ref($_) eq "HASH" } @{ $report->{input_failures} || [] };
     my @failed = grep { ( $_->{status} || "" ) eq "failed" } @{ $report->{results} || [] };
-    my @skipped = grep { ( $_->{status} || "" ) eq "skipped" } @{ $report->{results} || [] };
+    my $skip_breakdown = _summary_skip_breakdown( $report->{results} || [] );
+    my @other_skipped = @{ $skip_breakdown->{other_skipped} || [] };
 
     my $text = join(
         "",
-        "## Group mirror report\n\n",
+        "## Group Mirror Overview\n\n",
         "- generated at: $report->{generated_at}\n",
         "- mirrored: ", ( $counts->{mirrored} || 0 ), "\n",
         "- created empty: ", ( $counts->{created_empty} || 0 ), "\n",
-	        "- updated empty: ", ( $counts->{updated_empty} || 0 ), "\n",
-	        "- skipped: ", ( $counts->{skipped} || 0 ), "\n",
-	        "- failed: ", ( $counts->{failed} || 0 ), "\n\n",
-	    );
-	    if (@input_failures) {
-	        $text .= "### Result File Errors\n\n";
-	        for my $item (@input_failures) {
-	            $text .= "- `" . ( $item->{file} || "<unknown file>" ) . "`: " . ( $item->{error} || "failed to load result file" ) . "\n";
-	        }
-	        $text .= "\n";
-	    }
-	    if (@skipped) {
-	        $text .= "### Skipped\n\n";
-	        for my $item (@skipped) {
-	            $text .= "- `$item->{target_full_path}`: " . ( $item->{reason} || "skipped" ) . "\n";
-	        }
+        "- updated empty: ", ( $counts->{updated_empty} || 0 ), "\n",
+        "- skipped_total: ", ( $counts->{skipped} || 0 ), "\n",
+        "- archived_skipped: ", ( $skip_breakdown->{archived_skipped} || 0 ), "\n",
+        "- refs_matched_skipped: ", ( $skip_breakdown->{refs_matched_skipped} || 0 ), "\n",
+        "- other_skipped: ", scalar @other_skipped, "\n",
+        "- failed: ", ( $counts->{failed} || 0 ), "\n",
+        "- result_file_errors: ", scalar @input_failures, "\n\n",
+    );
+    if (@input_failures) {
+        $text .= "### Result File Errors\n\n";
+        for my $item (@input_failures) {
+            $text .= _render_summary_item( $item, "error" );
+        }
+        $text .= "\n";
+    }
+    if (@other_skipped) {
+        $text .= "### Other Skipped\n\n";
+        for my $item (@other_skipped) {
+            $text .= _render_summary_item( $item, "reason" );
+        }
         $text .= "\n";
     }
     if (@failed) {
         $text .= "### Failed\n\n";
         for my $item (@failed) {
-            $text .= "- `$item->{target_full_path}`: " . ( $item->{error} || "failed" ) . "\n";
+            $text .= _render_summary_item( $item, "error" );
         }
         $text .= "\n";
     }
@@ -1982,7 +2106,6 @@ sub _load_target_client {
         "oauth2",
         _required_env_file($token_secret_name),
     );
-    $client->{enable_namespace_state_cache} = JSON::PP::true;
     $client->{read_username} = _required_env_file("GL_USER_GLAB_FORKS_NAME");
     $client->{read_token} = _required_env_file("GL_USER_GLAB_FORKS_TOKEN");
     $client->{sync_branch} =
@@ -3392,7 +3515,7 @@ sub _push_target_refspec {
         ],
         _git_command_options( $policy, JSON::PP::true )
     );
-    if ( $result->{status} != 0 && $result->{output} =~ /LFS objects are missing/i ) {
+    if ( $result->{status} != 0 && _git_output_mentions_lfs($result->{output}) ) {
         if ( ref( $opt->{on_missing_lfs} ) eq "CODE" ) {
             $opt->{on_missing_lfs}->();
         }
@@ -3435,11 +3558,7 @@ sub _sync_lfs_objects {
         );
         $lfs_result->{status} == 0 or die "git lfs fetch failed for tag $tag: $lfs_result->{output}\n";
     }
-    my $lfs_result = _run_command(
-        [ "git", "-C", $repo_dir, "lfs", "push", "--all", "target" ],
-        _git_command_options( $policy, JSON::PP::true )
-    );
-    $lfs_result->{status} == 0 or die "git lfs push failed: $lfs_result->{output}\n";
+    _run_git_lfs_push_all( $repo_dir, $policy );
     return 1;
 }
 
@@ -4361,6 +4480,111 @@ sub _discover_remote_refs_from_urls {
 
     die $last_error if length $last_error;
     die "unable to discover source refs from the configured candidate URLs\n";
+}
+
+sub _git_output_mentions_lfs {
+    my ($output) = @_;
+    return 0 unless defined $output && !ref($output) && length $output;
+    return 1 if $output =~ /\bGit LFS\b/i;
+    return 1 if $output =~ /\bLFS objects are missing\b/i;
+    return 1 if $output =~ /\bLocking support detected on remote\b/i;
+    return 1 if $output =~ /\blfs\.allowincompletepush\b/i;
+    return 1 if $output =~ /\bmissing or corrupt local objects\b/i;
+    return 1 if $output =~ /\ballocated storage for your project\b/i;
+    return 0;
+}
+
+sub _git_output_reports_lfs_storage_quota_exceeded {
+    my ($output) = @_;
+    return 0 unless defined $output && !ref($output) && length $output;
+    return 1 if $output =~ /would exceed the allocated storage for your project/i;
+    return 1 if $output =~ /Contact your GitLab administrator for more information/i;
+    return 0;
+}
+
+sub _git_output_reports_missing_source_credentials {
+    my ($output) = @_;
+    return 0 unless defined $output && !ref($output) && length $output;
+    return 1 if $output =~ /could not read Username .* No such device or address/i;
+    return 1 if $output =~ /could not read Username/i;
+    return 0;
+}
+
+sub _git_output_reports_lfs_locking_support {
+    my ($output) = @_;
+    return 0 unless defined $output && !ref($output) && length $output;
+    return 1 if $output =~ /Locking support detected on remote/i;
+    return 0;
+}
+
+sub _git_output_reports_lfs_incomplete_push {
+    my ($output) = @_;
+    return 0 unless defined $output && !ref($output) && length $output;
+    return 1 if $output =~ /\blfs\.allowincompletepush\b/i;
+    return 1 if $output =~ /missing or corrupt local objects/i;
+    return 0;
+}
+
+sub _extract_lfs_locksverify_config_key {
+    my ($output) = @_;
+    return undef unless defined $output && !ref($output) && length $output;
+    return $1 if $output =~ /git config\s+([^\s]+\.locksverify)\s+true/i;
+    return undef;
+}
+
+sub _set_local_git_config {
+    my ( $repo_dir, $key, $value, $policy ) = @_;
+    my $result = _run_command(
+        [ "git", "-C", $repo_dir, "config", "--local", $key, $value ],
+        {
+            timeout => 60,
+        }
+    );
+    $result->{status} == 0 or die "git config failed for $key: $result->{output}\n";
+    return 1;
+}
+
+sub _apply_git_lfs_remediations {
+    my ( $repo_dir, $policy, $output, $state ) = @_;
+    $state ||= {};
+    my $applied = 0;
+    if ( _git_output_reports_lfs_locking_support($output) ) {
+        my $key = _extract_lfs_locksverify_config_key($output);
+        if ( defined $key && length $key && !( $state->{locksverify_keys} ||= {} )->{$key}++ ) {
+            _set_local_git_config( $repo_dir, $key, "true", $policy );
+            $applied = 1;
+        }
+    }
+    if ( _git_output_reports_lfs_incomplete_push($output) && !$state->{allowincompletepush}++ ) {
+        _set_local_git_config( $repo_dir, "lfs.allowincompletepush", "true", $policy );
+        $applied = 1;
+    }
+    return $applied;
+}
+
+sub _run_git_lfs_push_all {
+    my ( $repo_dir, $policy ) = @_;
+    my %remediation_state;
+    while (1) {
+        my $lfs_result = _run_command(
+            [ "git", "-C", $repo_dir, "lfs", "push", "--all", "target" ],
+            _git_command_options( $policy, JSON::PP::true )
+        );
+        return 1 if $lfs_result->{status} == 0;
+
+        my $applied = _apply_git_lfs_remediations(
+            $repo_dir,
+            $policy,
+            $lfs_result->{output},
+            \%remediation_state,
+        );
+        next if $applied;
+
+        if ( _git_output_reports_lfs_storage_quota_exceeded( $lfs_result->{output} ) ) {
+            die "git lfs push failed: target repository storage quota exceeded: $lfs_result->{output}\n";
+        }
+        die "git lfs push failed: $lfs_result->{output}\n";
+    }
 }
 
 sub _maybe_auth_url {
