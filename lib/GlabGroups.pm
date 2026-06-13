@@ -59,7 +59,6 @@ my %GITLAB_READ_DEFAULTS = (
 my $GROUP_PROJECT_CREATION_LEVEL = "maintainer";
 my $GROUP_SHARED_RUNNERS_SETTING = "disabled_and_unoverridable";
 my $GROUP_SUBGROUP_CREATION_LEVEL = "maintainer";
-my $TARGET_SYNC_BRANCH = "gitlab/mcr/main";
 
 sub run_cli {
     my (@argv) = @_;
@@ -109,7 +108,8 @@ USAGE
 }
 
 sub load_config_dir {
-    my ($config_dir) = @_;
+    my ( $config_dir, $opt ) = @_;
+    $opt ||= {};
     defined $config_dir && -d $config_dir or die "config dir not found: $config_dir\n";
 
     opendir( my $dh, $config_dir ) or die "unable to read config dir: $config_dir\n";
@@ -132,6 +132,7 @@ sub load_config_dir {
     for my $file (@files) {
         my $payload = _read_config_payload( File::Spec->catfile( $config_dir, $file ) );
         if ( $file eq "groups.jsonl" ) {
+            next if $opt->{projects_only};
             ref($payload) eq "ARRAY" or die "groups.jsonl must be a JSONL list\n";
             @{$payload} or die "groups.jsonl must not be empty\n";
             for my $index ( 0 .. $#{$payload} ) {
@@ -163,6 +164,7 @@ sub load_config_dir {
         }
 
         if ( $kind eq "glab-groups/namespaces" ) {
+            next if $opt->{projects_only};
             my $roots = $payload->{namespaces};
             ref($roots) eq "ARRAY" or die "$file.namespaces must be a list\n";
             for my $index ( 0 .. $#{$roots} ) {
@@ -198,7 +200,8 @@ sub load_config_dir {
         die "unsupported config kind in $file: $kind\n";
     }
 
-    @{ $config{namespaces} } || @{ $config{projects} }
+    ( $opt->{allow_empty} && $opt->{projects_only} )
+      || @{ $config{namespaces} } || @{ $config{projects} }
       or die "config dir must contain at least one namespace root or explicit project\n";
     if ( @{ $config{source_group_paths} } ) {
         @{ $config{namespaces} } == 1
@@ -383,9 +386,16 @@ sub _cmd_discover {
         \@argv,
         "config-dir=s" => \$opt{config_dir},
         "output=s" => \$opt{output},
+        "projects-only!" => \$opt{projects_only},
     ) or die _usage();
 
-    my $config = load_config_dir( $opt{config_dir} );
+    my $config = load_config_dir(
+        $opt{config_dir},
+        {
+            allow_empty => $opt{projects_only},
+            projects_only => $opt{projects_only},
+        }
+    );
     my $inventory = _discover_inventory($config);
     _write_json( $opt{output}, $inventory );
     return 0;
@@ -422,11 +432,18 @@ sub _cmd_plan {
         "max-batches=i" => \$opt{max_batches},
         "discover-output=s" => \$opt{discover_output},
         "output=s" => \$opt{output},
+        "projects-only!" => \$opt{projects_only},
         "summary=s" => \$opt{summary},
     ) or die _usage();
     $opt{max_batches} >= 0 or die "max-batches must be zero or greater\n";
 
-    my $config = load_config_dir( $opt{config_dir} );
+    my $config = load_config_dir(
+        $opt{config_dir},
+        {
+            allow_empty => $opt{projects_only},
+            projects_only => $opt{projects_only},
+        }
+    );
     warn "performing live inventory discovery\n";
     my $normalized = _normalize_inventory( _discover_inventory($config) );
     _write_json( $opt{discover_output}, $normalized ) if $opt{discover_output};
@@ -446,6 +463,7 @@ sub _cmd_plan {
         ref( $plan->{missing_source_groups} ) eq "ARRAY"
         && @{ $plan->{missing_source_groups} }
       )
+      || $opt{projects_only}
       or die "discovery produced zero targets; refusing to continue with a no-op mirror plan\n";
     _write_json( $opt{output}, $plan );
     _write_text( $opt{summary}, _render_plan_summary($plan) );
@@ -463,6 +481,7 @@ sub _build_group_batches {
         my $entry = $plan->[$index];
         my $group_path = $entry->{target_namespace_path} || q{};
         my $is_new_group = !defined $current_group || $group_path ne $current_group;
+        my $started_new_batch = 0;
 
         if ( !$current_batch ) {
             $current_batch = {
@@ -471,8 +490,9 @@ sub _build_group_batches {
                 start_index => $index,
                 target_count => 0,
             };
+            $started_new_batch = 1;
         }
-        elsif ( $is_new_group && $current_batch->{target_count} >= $batch_size ) {
+        elsif ( $current_batch->{target_count} >= $batch_size ) {
             push @batches, $current_batch;
             $current_batch = {
                 end_index => $index,
@@ -480,9 +500,10 @@ sub _build_group_batches {
                 start_index => $index,
                 target_count => 0,
             };
+            $started_new_batch = 1;
         }
 
-        if ($is_new_group) {
+        if ( $is_new_group || $started_new_batch ) {
             push @{ $current_batch->{group_paths} }, $group_path;
             $seen_groups{$group_path} = 1;
         }
@@ -733,9 +754,10 @@ sub _cmd_verify {
 
     my $plan = _read_json( $opt{plan} );
     my $client = _load_target_client();
+    my $target_sync_branch = $client->{sync_branch};
     my @results;
     for my $entry ( @{ $plan->{plan} || [] } ) {
-        push @results, _verify_entry( $client, $entry );
+        push @results, _verify_entry( $client, $entry, undef, undef, $target_sync_branch );
     }
     _write_json( $opt{output}, { results => \@results } );
     return 0;
@@ -1313,16 +1335,138 @@ sub _mirror_entry {
         };
     }
 
+    if ( $entry->{source_empty_repo} && ref($prepared_override) eq "HASH" ) {
+        my $resolved_target_full_path =
+          $prepared_override->{resolved_target_full_path}
+          || $entry->{target_full_path};
+        my $requested_target_full_path =
+             $prepared_override->{requested_target_full_path}
+          || $entry->{requested_target_full_path}
+          || (
+            $resolved_target_full_path ne $entry->{target_full_path}
+            ? $entry->{target_full_path}
+            : undef
+          );
+        my $prepared_action =
+            $prepared_override->{created} ? "create_project"
+          : $prepared_override->{updated} ? "update_project"
+          : "mirror_only";
+        return {
+            target_full_path => $resolved_target_full_path,
+            (
+                defined $requested_target_full_path
+                ? ( requested_target_full_path => $requested_target_full_path )
+                : ()
+            ),
+            planned_action => $entry->{action},
+            prepared_action => $prepared_action,
+            status => $prepared_override->{created} ? "created_empty" : "updated_empty",
+            prepared => $prepared_override,
+            verify => {
+                skipped => JSON::PP::true,
+                reason => "Skipped target verification for empty source repository.",
+                target_full_path => $resolved_target_full_path,
+            },
+        };
+    }
+
+    my $entry_source_auth = _resolve_source_auth_for_entry( $source_auth, $entry );
+    my $source_url = _maybe_auth_url( $entry->{source_http_url}, $entry_source_auth->{username}, $entry_source_auth->{token} );
+    my $chosen_source_url = $source_url;
+    my $available = _discover_remote_refs_from_urls(
+        [ $source_url, _fallback_clone_url($source_url) ],
+        $entry->{policy},
+        \$chosen_source_url,
+    );
+    my $default_branch = $entry->{source_default_branch} || $available->{default_branch} || "";
+    my $selected = resolve_selected_refs( $default_branch, $entry->{policy}, $available );
+    @{ $selected->{branches} } || $entry->{source_empty_repo}
+      or die "no source branches resolved for $entry->{source_full_path}\n";
+
+    my $requested_target_full_path = $entry->{requested_target_full_path};
+    my $prepared_from_override = ref($prepared_override) eq "HASH";
+    my $target_remote_refs =
+      $prepared_from_override
+      ? undef
+      : _discover_remote_refs_if_exists(
+            _maybe_auth_url(
+                _project_git_url( $target_client->{base_url}, $entry->{target_full_path} ),
+                $target_client->{read_username},
+                $target_client->{read_token},
+            ),
+            $entry->{policy},
+        );
+
+    if ( $entry->{source_empty_repo} && $target_remote_refs ) {
+        return {
+            target_full_path => $entry->{target_full_path},
+            (
+                defined $requested_target_full_path
+                ? ( requested_target_full_path => $requested_target_full_path )
+                : ()
+            ),
+            planned_action => $entry->{action},
+            prepared_action => "mirror_only",
+            status => "skipped",
+            reason => "Source repository is empty and the target repository already exists.",
+            verify => {
+                skipped => JSON::PP::true,
+                reason => "Skipped target verification for empty source repository.",
+                target_full_path => $entry->{target_full_path},
+            },
+        };
+    }
+
+    if (
+        $target_remote_refs
+        && _selected_refs_already_synced(
+            $selected,
+            $available,
+            $target_remote_refs,
+            $default_branch,
+            $target_client->{sync_branch},
+            $entry->{policy},
+        )
+      )
+    {
+        return {
+            target_full_path => $entry->{target_full_path},
+            (
+                defined $requested_target_full_path
+                ? ( requested_target_full_path => $requested_target_full_path )
+                : ()
+            ),
+            planned_action => $entry->{action},
+            prepared_action => "mirror_only",
+            selected_refs => $selected,
+            status => "skipped",
+            reason => "Selected source refs already match the target repository.",
+            verify => {
+                skipped => JSON::PP::true,
+                reason => "Skipped target verification because selected refs already match the target repository.",
+                target_full_path => $entry->{target_full_path},
+            },
+        };
+    }
+
     my $prepared =
-      ref($prepared_override) eq "HASH"
+      $prepared_from_override
       ? $prepared_override
+      : $target_remote_refs
+      ? {
+            created => JSON::PP::false,
+            requested_target_full_path => $entry->{requested_target_full_path},
+            resolved_target_full_path => $entry->{target_full_path},
+            resolved_target_namespace_path => $entry->{target_namespace_path},
+            updated => JSON::PP::false,
+        }
       : _ensure_target_project( $target_client, $entry );
     my $resolved_target_full_path =
       $prepared->{resolved_target_full_path}
       || $entry->{target_full_path};
-    my $requested_target_full_path =
+    $requested_target_full_path =
          $prepared->{requested_target_full_path}
-      || $entry->{requested_target_full_path}
+      || $requested_target_full_path
       || (
         $resolved_target_full_path ne $entry->{target_full_path}
         ? $entry->{target_full_path}
@@ -1357,40 +1501,15 @@ sub _mirror_entry {
     my $init_result = _run_command( [ "git", "init", $repo_dir ], { timeout => 120 } );
     $init_result->{status} == 0 or die "git init failed: $init_result->{output}\n";
 
-    my $entry_source_auth = _resolve_source_auth_for_entry( $source_auth, $entry );
-    my $source_url = _maybe_auth_url( $entry->{source_http_url}, $entry_source_auth->{username}, $entry_source_auth->{token} );
-    my $chosen_source_url = $source_url;
-    my $available;
-    if (
-        ref( $entry->{source_available_branches} ) eq "ARRAY"
-        || ref( $entry->{source_available_tags} ) eq "ARRAY"
-      )
-    {
-        my %branches = map { $_ => 1 } @{ $entry->{source_available_branches} || [] };
-        my %tags = map { $_ => 1 } @{ $entry->{source_available_tags} || [] };
-        $available = {
-            branches => \%branches,
-            default_branch => $entry->{source_default_branch} || "",
-            tags => \%tags,
-        };
-    }
-    else {
-        $available = _discover_remote_refs_from_urls(
-            [ $source_url, _fallback_clone_url($source_url) ],
-            $entry->{policy},
-            \$chosen_source_url,
-        );
-    }
-    my $target_url = _maybe_auth_url( _project_git_url( $target_client->{base_url}, $resolved_target_full_path ), $target_client->{username}, $target_client->{token} );
-
+    my $target_url = _maybe_auth_url(
+        _project_git_url( $target_client->{base_url}, $resolved_target_full_path ),
+        $target_client->{username},
+        $target_client->{token},
+    );
     my $remote_result = _run_command( [ "git", "-C", $repo_dir, "remote", "add", "source", $chosen_source_url ], { timeout => 60 } );
     $remote_result->{status} == 0 or die "git remote add source failed: $remote_result->{output}\n";
     $remote_result = _run_command( [ "git", "-C", $repo_dir, "remote", "add", "target", $target_url ], { timeout => 60 } );
     $remote_result->{status} == 0 or die "git remote add target failed: $remote_result->{output}\n";
-
-    my $default_branch = $entry->{source_default_branch} || $available->{default_branch} || "";
-    my $selected = resolve_selected_refs( $default_branch, $entry->{policy}, $available );
-    @{ $selected->{branches} } or die "no source branches resolved for $entry->{source_full_path}\n";
 
     _fetch_selected_refs( $repo_dir, $selected, $entry->{policy} );
     my $checkout_result = _run_command( [ "git", "-C", $repo_dir, "checkout", "-f", $selected->{branches}->[0] ], { timeout => 300 } );
@@ -1450,6 +1569,10 @@ sub _mirror_entry {
     my $needs_lfs = $entry->{policy}->{force_lfs} || $entry->{source_lfs_enabled} || _repo_has_lfs_files($repo_dir);
     my $sync_lfs_objects = sub {
         return if $prepared->{lfs_synced};
+        if ( !$prepared->{project_id} ) {
+            my $ensured = _ensure_target_project( $target_client, $entry );
+            %{$prepared} = ( %{$prepared}, %{$ensured} );
+        }
         _ensure_target_lfs_enabled( $target_client, $prepared->{project_id} );
         _sync_lfs_objects( $repo_dir, $selected, $entry->{policy} );
         $prepared->{lfs_synced} = JSON::PP::true;
@@ -1463,11 +1586,16 @@ sub _mirror_entry {
         $selected,
         $entry->{policy},
         $default_branch,
+        $target_client->{sync_branch},
         {
             on_missing_lfs => $sync_lfs_objects,
         },
     );
     if ( _prepared_requires_finalize( $prepared, $entry ) ) {
+        if ( !$prepared->{project_id} ) {
+            my $ensured = _ensure_target_project( $target_client, $entry );
+            %{$prepared} = ( %{$prepared}, %{$ensured} );
+        }
         _finalize_target_project( $target_client, $prepared->{project_id}, $default_branch, $entry );
     }
     my $verified = {
@@ -1496,7 +1624,8 @@ sub _mirror_entry {
 }
 
 sub _verify_entry {
-    my ( $target_client, $entry, $selected, $source_default_branch ) = @_;
+    my ( $target_client, $entry, $selected, $source_default_branch, $target_sync_branch ) = @_;
+    $target_sync_branch = _required_git_ref_name( $target_sync_branch, "target sync branch" );
     my $project = _get_project( $target_client, $entry->{target_full_path} );
     return {
         target_full_path => $entry->{target_full_path},
@@ -1509,7 +1638,7 @@ sub _verify_entry {
         for my $branch ( @{ $selected->{branches} || [] } ) {
             my $target_branch_name =
               ( $source_default_branch && $branch eq $source_default_branch )
-              ? $TARGET_SYNC_BRANCH
+              ? $target_sync_branch
               : $branch;
             $branches{$target_branch_name} = _get_branch( $target_client, $project->{id}, $target_branch_name ) ? JSON::PP::true : JSON::PP::false;
         }
@@ -1764,6 +1893,13 @@ sub _load_target_client {
         _required_env_file($token_secret_name),
     );
     $client->{enable_namespace_state_cache} = JSON::PP::true;
+    $client->{read_username} = _required_env_file("GL_USER_GLAB_FORKS_NAME");
+    $client->{read_token} = _required_env_file("GL_USER_GLAB_FORKS_TOKEN");
+    $client->{sync_branch} =
+      _required_git_ref_name(
+        _required_env_file("GIT_BRANCH_GLAB_FORKS"),
+        "GIT_BRANCH_GLAB_FORKS",
+      );
     return $client;
 }
 
@@ -2590,17 +2726,12 @@ sub _configured_target_branches_to_protect {
 
 sub _ensure_target_branch_protected {
     my ( $client, $project_id, $branch_name ) = @_;
-    my $protected = _get_protected_branch( $client, $project_id, $branch_name );
-    return _ensure_target_branch_force_push_allowed( $client, $project_id, $branch_name, $protected )
-      if $protected;
-
     my $protect_ok = eval {
         _gitlab_request(
             $client,
             "POST",
             "/projects/$project_id/protected_branches",
             {
-                allow_force_push => JSON::PP::true,
                 name => $branch_name,
             }
         );
@@ -2609,27 +2740,8 @@ sub _ensure_target_branch_protected {
     return 1 if $protect_ok;
 
     my $protect_error = $@ || "unknown protected branch error\n";
-    if ( _is_gitlab_already_exists_error($protect_error) ) {
-        my $existing = _get_protected_branch( $client, $project_id, $branch_name );
-        return _ensure_target_branch_force_push_allowed( $client, $project_id, $branch_name, $existing )
-          if $existing;
-        die "protected branch missing after already-exists response: $branch_name\n";
-    }
+    return 1 if _is_gitlab_already_exists_error($protect_error);
     die $protect_error;
-}
-
-sub _ensure_target_branch_force_push_allowed {
-    my ( $client, $project_id, $branch_name, $protected ) = @_;
-    return 1
-      if ref($protected) eq "HASH"
-      && $protected->{allow_force_push};
-
-    _gitlab_request(
-        $client,
-        "PATCH",
-        "/projects/$project_id/protected_branches/" . _encode_path($branch_name) . "?allow_force_push=true",
-    );
-    return 1;
 }
 
 sub _list_gitlab_top_level_groups {
@@ -3045,22 +3157,27 @@ sub _discover_remote_refs {
         _git_command_options( $policy, JSON::PP::true )
     );
     $result->{status} == 0 or die "git ls-remote failed: $result->{output}\n";
+    return _parse_remote_refs_output( $result->{output} );
+}
 
+sub _parse_remote_refs_output {
+    my ($output) = @_;
     my %branches;
     my %tags;
     my $default_branch = "";
-    for my $line ( split /\n/, $result->{output} ) {
+    for my $line ( split /\n/, $output || q{} ) {
         next unless $line;
         if ( $line =~ /\Aref:\s+refs\/heads\/([^\s]+)\s+HEAD\z/ ) {
             $default_branch = $1;
             next;
         }
-        if ( $line =~ /\A[0-9a-f]{40}\s+refs\/heads\/(.+)\z/ ) {
-            $branches{$1} = 1;
+        if ( $line =~ /\A([0-9a-f]{40})\s+refs\/heads\/(.+)\z/ ) {
+            $branches{$2} = $1;
             next;
         }
-        if ( $line =~ /\A[0-9a-f]{40}\s+refs\/tags\/(.+?)(?:\^\{\})?\z/ ) {
-            $tags{$1} = 1;
+        if ( $line =~ /\A([0-9a-f]{40})\s+refs\/tags\/(.+?)(\^\{\})?\z/ ) {
+            my ( $oid, $name, $peeled ) = ( $1, $2, $3 );
+            $tags{$name} = $oid if !exists $tags{$name} || defined $peeled;
             next;
         }
     }
@@ -3072,6 +3189,30 @@ sub _discover_remote_refs {
         default_branch => $default_branch,
         tags => \%tags,
     };
+}
+
+sub _discover_remote_refs_if_exists {
+    my ( $source_url, $policy ) = @_;
+    my $result = _run_command(
+        [ "git", "ls-remote", "--heads", "--tags", "--symref", $source_url ],
+        _git_command_options( $policy, JSON::PP::true )
+    );
+    return _parse_remote_refs_output( $result->{output} ) if $result->{status} == 0;
+    return undef if _ls_remote_reports_missing_repo( $result->{output} );
+    die "git ls-remote failed: $result->{output}\n";
+}
+
+sub _ls_remote_reports_missing_repo {
+    my ($output) = @_;
+    return 0 unless defined $output && !ref($output) && length $output;
+    return 0 if $output =~ /Authentication failed/i;
+    return 0 if $output =~ /Access denied/i;
+    return 0 if $output =~ /could not read Username/i;
+    return 0 if $output =~ /forbidden/i;
+    return 1 if $output =~ /not found/i;
+    return 1 if $output =~ /does not appear to be a git repository/i;
+    return 1 if $output =~ /could not be found/i;
+    return 0;
 }
 
 sub _infer_default_branch_from_heads {
@@ -3117,8 +3258,9 @@ sub _fetch_selected_refs {
 }
 
 sub _push_selected_refs {
-    my ( $repo_dir, $selected, $policy, $default_branch, $opt ) = @_;
+    my ( $repo_dir, $selected, $policy, $default_branch, $target_sync_branch, $opt ) = @_;
     $opt ||= {};
+    $target_sync_branch = _required_git_ref_name( $target_sync_branch, "target sync branch" );
     my %additional_branch_names = map { $_->{name} => 1 } @{ $policy->{additional_branches} || [] };
     for my $branch ( @{ $selected->{branches} || [] } ) {
         next if $default_branch && $branch eq $default_branch && !$additional_branch_names{$branch};
@@ -3133,8 +3275,8 @@ sub _push_selected_refs {
     if ($default_branch) {
         _push_target_refspec(
             $repo_dir,
-            "refs/heads/$default_branch:refs/heads/$TARGET_SYNC_BRANCH",
-            "managed sync branch $TARGET_SYNC_BRANCH",
+            "refs/heads/$default_branch:refs/heads/$target_sync_branch",
+            "managed sync branch $target_sync_branch",
             $policy,
             $opt,
         );
@@ -3232,6 +3374,39 @@ sub _repo_has_lfs_files {
     my $result = _run_command( [ "git", "-C", $repo_dir, "lfs", "ls-files", "--all" ], { timeout => 120 } );
     return 0 if $result->{status} != 0;
     return $result->{output} =~ /\S/ ? 1 : 0;
+}
+
+sub _selected_refs_already_synced {
+    my ( $selected, $source_available, $target_available, $default_branch, $target_sync_branch, $policy ) = @_;
+    return 0 unless ref($selected) eq "HASH";
+    return 0 unless ref($source_available) eq "HASH";
+    return 0 unless ref($target_available) eq "HASH";
+    $target_sync_branch = _required_git_ref_name( $target_sync_branch, "target sync branch" );
+
+    my %additional_branch_names = map { $_->{name} => 1 } @{ $policy->{additional_branches} || [] };
+
+    for my $branch ( @{ $selected->{branches} || [] } ) {
+        my $source_oid = $source_available->{branches}->{$branch};
+        return 0 unless defined $source_oid && length $source_oid;
+        if ( $default_branch && $branch eq $default_branch ) {
+            my $target_sync_oid = $target_available->{branches}->{$target_sync_branch};
+            return 0
+              unless defined $target_sync_oid
+              && $target_sync_oid eq $source_oid;
+            next unless $additional_branch_names{$branch};
+        }
+        my $target_oid = $target_available->{branches}->{$branch};
+        return 0 unless defined $target_oid && $target_oid eq $source_oid;
+    }
+
+    for my $tag ( @{ $selected->{tags} || [] } ) {
+        my $source_oid = $source_available->{tags}->{$tag};
+        return 0 unless defined $source_oid && length $source_oid;
+        my $target_oid = $target_available->{tags}->{$tag};
+        return 0 unless defined $target_oid && $target_oid eq $source_oid;
+    }
+
+    return 1;
 }
 
 sub _gitlab_request {
@@ -3846,6 +4021,14 @@ sub _required_secret_name {
     $value = _required_string( $value, $label );
     $value =~ /\AGL_PAT_GROUP_[A-Z0-9_]+_SVC\z/
       or die "$label must name a GL_PAT_GROUP_*_SVC secret\n";
+    return $value;
+}
+
+sub _required_git_ref_name {
+    my ( $value, $label ) = @_;
+    $value = _required_string( $value, $label );
+    $value =~ /\A[0-9A-Za-z._-]+(?:\/[0-9A-Za-z._-]+)*\z/
+      or die "$label must be a Git ref name\n";
     return $value;
 }
 

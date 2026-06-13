@@ -282,6 +282,49 @@ YAML
             version => 1,
             namespaces => [
                 {
+                    name => "labwc",
+                    source_group_url => "https://github.com/labwc",
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "labwc",
+                },
+            ],
+        }
+    );
+    write_text_file(
+        File::Spec->catfile( $dir, "projects.yml" ),
+        <<'YAML'
+[]
+YAML
+    );
+
+    my $config = load_config_dir(
+        $dir,
+        {
+            allow_empty => 1,
+            projects_only => 1,
+        }
+    );
+    is( scalar @{ $config->{projects} }, 0, "projects-only mode accepts an empty projects.yml list" );
+    is( scalar @{ $config->{namespaces} }, 0, "projects-only mode ignores namespace discovery roots" );
+}
+
+{
+    my $dir = tempdir( CLEANUP => 1 );
+    write_json_file(
+        File::Spec->catfile( $dir, "defaults.json" ),
+        {
+            kind => "glab-groups/defaults",
+            version => 1,
+            defaults => {},
+        }
+    );
+    write_json_file(
+        File::Spec->catfile( $dir, "namespaces.json" ),
+        {
+            kind => "glab-groups/namespaces",
+            version => 1,
+            namespaces => [
+                {
                     name => "kde-root",
                     source_group_url => "https://invent.kde.org",
                     target_owner_path => "glab-forks",
@@ -353,7 +396,7 @@ JSONL
         {
             additional_branches => [],
             additional_tags => [],
-            target_branches_protect => [ { name => "gitlab/mcr/main" } ],
+            target_branches_protect => [ { name => "managed/sync" } ],
         },
         {
             target_branches_protect => [ { name => "mcr/feature/init" } ],
@@ -1701,7 +1744,7 @@ HTML
         2,
     );
     is( $plan->{total_groups}, 2, "planning counts unique target namespace groups" );
-    is( $plan->{total_batches}, 2, "group-aware batching splits only at target group boundaries" );
+    is( $plan->{total_batches}, 2, "planning keeps contiguous subgroup ranges while honoring the batch-size limit" );
     is_deeply(
         $plan->{batches}->[0]->{group_paths},
         ["glab-forks/mirror/sub1"],
@@ -1712,6 +1755,129 @@ HTML
         ["glab-forks/mirror/sub2"],
         "second batch carries the remaining subgroup",
     );
+}
+
+{
+    my $plan = GlabGroups::_build_plan(
+        {
+            defaults => {
+                additional_branches => [],
+                additional_tags => [],
+                allow_blob_rewrite => JSON::PP::true,
+                force_lfs => JSON::PP::false,
+                git_timeout_seconds => 1800,
+                max_blob_bytes => 100 * 1024 * 1024,
+                mirror_pristine_tar => JSON::PP::true,
+                read_retry_attempts => 2,
+                read_retry_backoff_seconds => 2,
+                retry_attempts => 2,
+                retry_backoff_seconds => 2,
+                size_limit_bytes => 9 * 1024 * 1024 * 1024,
+                target_branches_protect => [],
+            },
+            exclusions => {},
+        },
+        {
+            inventory => [
+                {
+                    namespace => {
+                        name => "root",
+                        source_group_url => "https://example.invalid/root",
+                        target_namespace_path => "mirror",
+                        target_owner_path => "glab-forks",
+                    },
+                    group_path => "root",
+                    projects => [
+                        {
+                            archived => JSON::PP::false,
+                            default_branch => "main",
+                            description => "source",
+                            empty_repo => JSON::PP::false,
+                            http_url_to_repo => "https://example.invalid/root/project-a.git",
+                            id => 20,
+                            lfs_enabled => JSON::PP::false,
+                            path_with_namespace => "root/project-a",
+                            ssh_url_to_repo => 'git@example.invalid:root/project-a.git',
+                            visibility => "public",
+                        },
+                        {
+                            archived => JSON::PP::false,
+                            default_branch => "main",
+                            description => "source",
+                            empty_repo => JSON::PP::false,
+                            http_url_to_repo => "https://example.invalid/root/project-b.git",
+                            id => 21,
+                            lfs_enabled => JSON::PP::false,
+                            path_with_namespace => "root/project-b",
+                            ssh_url_to_repo => 'git@example.invalid:root/project-b.git',
+                            visibility => "public",
+                        },
+                        {
+                            archived => JSON::PP::false,
+                            default_branch => "main",
+                            description => "source",
+                            empty_repo => JSON::PP::false,
+                            http_url_to_repo => "https://example.invalid/root/project-c.git",
+                            id => 22,
+                            lfs_enabled => JSON::PP::false,
+                            path_with_namespace => "root/project-c",
+                            ssh_url_to_repo => 'git@example.invalid:root/project-c.git',
+                            visibility => "public",
+                        },
+                    ],
+                },
+            ],
+        },
+        2,
+    );
+    is( $plan->{total_batches}, 2, "planning can split one large target namespace across multiple batches" );
+    is_deeply(
+        $plan->{batches}->[0]->{group_paths},
+        ["glab-forks/mirror"],
+        "first batch records the shared target namespace once",
+    );
+    is_deeply(
+        $plan->{batches}->[1]->{group_paths},
+        ["glab-forks/mirror"],
+        "later batches keep the same target namespace label when a large group is split",
+    );
+}
+
+{
+    my $dir = tempdir( CLEANUP => 1 );
+    write_json_file(
+        File::Spec->catfile( $dir, "defaults.json" ),
+        {
+            kind => "glab-groups/defaults",
+            version => 1,
+            defaults => {},
+        }
+    );
+    write_text_file(
+        File::Spec->catfile( $dir, "projects.yml" ),
+        <<'YAML'
+[]
+YAML
+    );
+    my $output_path = File::Spec->catfile( $dir, "plan.json" );
+    my $discover_path = File::Spec->catfile( $dir, "discover.json" );
+    my $summary_path = File::Spec->catfile( $dir, "plan.md" );
+
+    is(
+        GlabGroups::run_cli(
+            "plan",
+            "--config-dir", $dir,
+            "--projects-only",
+            "--discover-output", $discover_path,
+            "--output", $output_path,
+            "--summary", $summary_path,
+        ),
+        0,
+        "projects-only plan accepts an empty projects.yml list as a no-op",
+    );
+    my $plan = JSON::PP->new->decode( do { open( my $fh, "<:encoding(UTF-8)", $output_path ) or die $!; local $/; <$fh> } );
+    is( $plan->{total_targets}, 0, "projects-only empty plan records zero targets" );
+    is( $plan->{total_batches}, 0, "projects-only empty plan records zero batches" );
 }
 
 {
@@ -1984,6 +2150,73 @@ HTML
     );
     is( $results->{results}->[0]->{prepared}->{project_id}, 99, "mirror carries forward prepared project identifiers" );
     ok( $results->{results}->[0]->{verify}->{skipped}, "mirror skips redundant target verification when prepared state is already aligned" );
+}
+
+{
+    no warnings 'redefine';
+
+    local *GlabGroups::_discover_remote_refs_from_urls = sub {
+        return {
+            branches => {
+                main => "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                release => "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            },
+            default_branch => "main",
+            tags => {
+                "v1.0.0" => "cccccccccccccccccccccccccccccccccccccccc",
+            },
+        };
+    };
+    local *GlabGroups::_discover_remote_refs_if_exists = sub {
+        return {
+            branches => {
+                "managed/sync" => "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                release => "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            },
+            default_branch => "managed/sync",
+            tags => {
+                "v1.0.0" => "cccccccccccccccccccccccccccccccccccccccc",
+            },
+        };
+    };
+    local *GlabGroups::_ensure_target_project = sub {
+        die "_ensure_target_project should not run when the target refs already match\n";
+    };
+    local *GlabGroups::_resolve_source_auth_for_entry = sub {
+        return {
+            token => undef,
+            username => undef,
+        };
+    };
+
+    my $result = GlabGroups::_mirror_entry(
+        {
+            base_url => "https://gitlab.example.invalid",
+            read_token => "deploy-token",
+            read_username => "glab-forks-read",
+            sync_branch => "managed/sync",
+            token => "service-token",
+            username => "oauth2",
+        },
+        {},
+        {
+            action => "sync",
+            policy => {
+                additional_branches => [ { name => "release" } ],
+                additional_tags => [ { name => "v1.0.0" } ],
+            },
+            source_default_branch => "main",
+            source_empty_repo => JSON::PP::false,
+            source_full_path => "source/project",
+            source_http_url => "https://source.example.invalid/source/project.git",
+            target_full_path => "glab-forks/demo/project",
+            target_namespace_path => "glab-forks/demo",
+        },
+    );
+
+    is( $result->{status}, "skipped", "mirror skips repositories whose selected refs already match the target" );
+    is( $result->{reason}, "Selected source refs already match the target repository.", "mirror reports the ref-compare skip reason" );
+    ok( $result->{verify}->{skipped}, "mirror skip result still records the verification short-circuit" );
 }
 
 {
@@ -3239,7 +3472,7 @@ HTML
         [ "release" ],
         "finalize protects only the explicitly configured target branches",
     );
-    ok( $protect_requests[0]->{payload}->{allow_force_push}, "protected branch creation enables force push for managed protected branches" );
+    ok( !exists $protect_requests[0]->{payload}->{allow_force_push}, "protected branch creation does not issue an explicit allow_force_push override" );
     my @project_put_requests = grep { $_->{method} eq "PUT" && $_->{path} eq "/projects/99" } @requests;
     is( scalar @project_put_requests, 1, "finalize does not emit extra project update calls when only branch protection is needed" );
     ok( !exists $project_put_requests[-1]->{payload}->{visibility}, "project update payload does not set visibility" );
@@ -3351,12 +3584,11 @@ HTML
 
 {
     no warnings 'redefine';
+    my @requests;
 
     local *GlabGroups::_gitlab_request = sub {
         my ( $client, $method, $path, $payload, $opt ) = @_;
-        return undef
-          if $method eq "GET"
-          && $path eq "/projects/99/protected_branches/gitlab%2Fmcr%2Fmain";
+        push @requests, { method => $method, path => $path, payload => $payload };
         die "already exists\n"
           if $method eq "POST"
           && $path eq "/projects/99/protected_branches";
@@ -3364,12 +3596,16 @@ HTML
     };
 
     my $ok = eval {
-        GlabGroups::_ensure_target_branch_protected( {}, 99, "gitlab/mcr/main" );
+        GlabGroups::_ensure_target_branch_protected( {}, 99, "managed/sync" );
         1;
     };
 
-    ok( !$ok, "protect branch fails when GitLab reports already exists but the exact protected branch is still missing" );
-    like( $@, qr/protected branch missing after already-exists response: gitlab\/mcr\/main/, "protect branch reports the missing exact protected branch" );
+    ok( $ok, "protect branch treats an already-existing protected branch as success" );
+    is_deeply(
+        [ map { $_->{method} } @requests ],
+        ["POST"],
+        "protect branch no longer issues follow-up read or patch calls",
+    );
 }
 
 {
@@ -3379,24 +3615,23 @@ HTML
     local *GlabGroups::_gitlab_request = sub {
         my ( $client, $method, $path, $payload, $opt ) = @_;
         push @requests, { method => $method, path => $path, payload => $payload };
-        return {
-            allow_force_push => JSON::PP::false,
-            name => "gitlab/mcr/main",
-        } if $method eq "GET"
-          && $path eq "/projects/99/protected_branches/gitlab%2Fmcr%2Fmain";
-        return {
-            allow_force_push => JSON::PP::true,
-            name => "gitlab/mcr/main",
-        } if $method eq "PATCH"
-          && $path eq "/projects/99/protected_branches/gitlab%2Fmcr%2Fmain?allow_force_push=true";
+        return { name => "managed/sync" }
+          if $method eq "POST"
+          && $path eq "/projects/99/protected_branches";
         die "unexpected request: $method $path";
     };
 
-    GlabGroups::_ensure_target_branch_protected( {}, 99, "gitlab/mcr/main" );
+    GlabGroups::_ensure_target_branch_protected( {}, 99, "managed/sync" );
     is_deeply(
-        [ map { $_->{method} } @requests ],
-        [ "GET", "PATCH" ],
-        "protect branch upgrades existing protected branches to allow force push",
+        \@requests,
+        [
+            {
+                method => "POST",
+                path => "/projects/99/protected_branches",
+                payload => { name => "managed/sync" },
+            },
+        ],
+        "protect branch performs a single create call with only the branch name payload",
     );
 }
 
@@ -3561,16 +3796,17 @@ HTML
             retry_backoff_seconds => 1,
         },
         "main",
+        "managed/sync",
     );
 
     is_deeply(
         \@refspecs,
         [
             "refs/heads/release:refs/heads/release",
-            "refs/heads/main:refs/heads/gitlab/mcr/main",
+            "refs/heads/main:refs/heads/managed/sync",
             "refs/tags/v1.0.0:refs/tags/v1.0.0",
         ],
-        "push_selected_refs mirrors the source default branch only to gitlab/mcr/main",
+        "push_selected_refs mirrors the source default branch only to the configured managed sync branch",
     );
 }
 
@@ -3597,6 +3833,7 @@ HTML
             retry_backoff_seconds => 1,
         },
         "main",
+        "managed/sync",
     );
 
     is_deeply(
@@ -3604,7 +3841,7 @@ HTML
         [
             "refs/heads/main:refs/heads/main",
             "refs/heads/release:refs/heads/release",
-            "refs/heads/main:refs/heads/gitlab/mcr/main",
+            "refs/heads/main:refs/heads/managed/sync",
             "refs/tags/v1.0.0:refs/tags/v1.0.0",
         ],
         "push_selected_refs also mirrors the source default branch by name when it is explicitly listed in additional_branches",
@@ -3621,7 +3858,7 @@ HTML
 
     local *GlabGroups::_get_branch = sub {
         my ( $client, $project_id, $branch_name ) = @_;
-        return { name => $branch_name } if $branch_name eq "gitlab/mcr/main" || $branch_name eq "release";
+        return { name => $branch_name } if $branch_name eq "managed/sync" || $branch_name eq "release";
         return undef;
     };
 
@@ -3640,12 +3877,13 @@ HTML
             tags => [],
         },
         "main",
+        "managed/sync",
     );
 
     is_deeply(
         $verify->{branches},
         {
-            "gitlab/mcr/main" => JSON::PP::true,
+            "managed/sync" => JSON::PP::true,
             "release" => JSON::PP::true,
         },
         "verify_entry checks the managed sync branch instead of target main",

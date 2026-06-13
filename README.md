@@ -146,10 +146,10 @@ Each config directory exposes these defaults:
 
 Configured additional branches are force-synced to same-name target branches.
 Configured additional tags are force-synced to same-name target tags. The
-source default branch is always mirrored to the managed target branch
-`gitlab/mcr/main`; if that same source branch is also listed in
-`additional_branches`, it is mirrored both to `gitlab/mcr/main` and to its
-same-name target branch.
+source default branch is always mirrored to the managed target branch named by
+the BWS secret `GIT_BRANCH_GLAB_FORKS`; if that same source branch is also
+listed in `additional_branches`, it is mirrored both to the managed target
+branch and to its same-name target branch.
 
 The shared runtime no longer creates extra target-only `mcr/*` branches, no
 longer resets the project default branch during mirror runs, and no longer
@@ -161,9 +161,9 @@ not be implied by mirrored source branches.
 
 Plan runs always perform live source discovery. The workflow no longer restores
 or reuses a persisted source inventory cache between runs. Target preparation is
-best-effort per repository: it records entry failures and keeps the matrix
-moving so the mirror stage can retry the same targets and emit the final
-per-project result rows.
+best-effort per repository: the mirror stage compares source and target refs
+with `git ls-remote`, skips already-synced repositories before any target API
+work, and uses the `glab-forks` deploy token for target-side read checks.
 
 ## Validation
 

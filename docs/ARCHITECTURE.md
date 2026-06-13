@@ -25,22 +25,22 @@ entry instead.
 ## Execution order
 
 1. `plan`
-2. `prepare-target` in batch jobs capped at ten concurrent jobs
-3. `mirror` in matching batch jobs capped at ten concurrent jobs
-4. `report`
-5. `post_run_analytics.py`
+2. `mirror`
+3. `report`
+4. `post_run_analytics.py`
 
 The shared workflow creates one deterministic plan, uploads it as a run
-artifact, and then builds a dynamic matrix capped at 250 prepare and mirror
-jobs. Small plans still use one job per batch. Larger plans raise the effective
-batch size until the plan fits within that cap, while GitHub Actions runs at
-most ten jobs concurrently. Batch construction never splits one target subgroup
-across multiple jobs. The prepare stage is best-effort per entry so one target
-path failure does not block unrelated shards; the mirror stage retries target
-creation/update during the real sync path and records final per-project
-outcomes. The final report job downloads all batch artifacts, aggregates them
-into one report, CSV, JSON analytics file, and optional Parquet file, then
-publishes those artifacts back to the workflow run.
+artifact, and then builds a dynamic matrix capped at 250 mirror jobs. Small
+plans still use one job per batch. Larger plans raise the effective batch size
+until the plan fits within that cap, while GitHub Actions runs at most five
+jobs concurrently. Batch construction keeps contiguous namespace ranges but can
+split a very large target subgroup across multiple jobs so one namespace does
+not serialize an entire run. The mirror stage skips already-synced repositories
+with `git ls-remote`, retries target creation/update only when the target repo
+is missing or later write steps need API-backed reconciliation, and records
+final per-project outcomes. The final report job downloads all batch artifacts,
+aggregates them into one report, CSV, JSON analytics file, and optional Parquet
+file, then publishes those artifacts back to the workflow run.
 
 ## Planning model
 
@@ -49,8 +49,8 @@ The plan includes:
 - source project id and full path
 - target full path and target namespace path
 - source inventory fields required for mirroring and verification
-- target-group-aware batches built from contiguous namespace ranges so each
-  subgroup is created and mirrored in one job
+- target-aware batches built from contiguous namespace ranges, with large
+  namespaces split across multiple jobs when needed
 - deterministic action selection:
   - `sync`
   - `skip`
@@ -58,8 +58,8 @@ The plan includes:
 
 Planning no longer crawls the entire target namespace tree to precompute
 project state. It keeps the target path only and defers live target group
-resolution and missing subgroup creation to the target-preparation gate before
-mirror fanout.
+resolution, missing subgroup creation, and ref-by-ref target checks to the
+mirror jobs.
 
 The plan job always performs live source discovery. The workflow does not
 restore or reuse a persisted source inventory cache between runs.
@@ -93,26 +93,27 @@ The mirror stage:
   out transient 5xx and timeout failures from upstream GitLab/Varnish
 - lets each config directory tune discovery/read retry counts separately from
   retryable git mirror operations
+- reads target repository refs with `git ls-remote` over the `glab-forks`
+  deploy token instead of GitLab project-read API calls
 - fetches only the selected branches and tags
 - always includes the source default branch in source-side selection
-- mirrors the source default branch into target `gitlab/mcr/main`
+- mirrors the source default branch into the managed target branch named by the
+  BWS secret `GIT_BRANCH_GLAB_FORKS`
 - force-syncs configured additional branches to same-name target branches
 - force-syncs configured additional tags to same-name target tags
 - also force-syncs the source default branch by name when that branch is
   explicitly listed in `additional_branches`
 - auto-detects `pristine-tar`
 - applies configured additional branches and tags
-- bootstraps target-only `mcr/main`, `mcr/feature/init`, `mcr/staging`, and
-  `mcr/release` branches when missing
-- sets target `mcr/main` as the default branch when bootstrap succeeds
-- reconciles managed branch protection so only the branches configured by
-  `target_branches_protect` remain protected
+- skips mirror execution entirely when all selected source refs already match
+  the target repository
+- reconciles only the explicitly configured target branch protections
 - enforces a 9 GiB packed selected-ref storage budget that better matches GitLab
   repository storage behavior than an uncompressed object-size sum
 - attempts LFS migration for blobs larger than 100 MiB before falling back to
   per-repository skip
 - retries retryable Git and GitLab operations with bounded backoff
-- verifies the resulting target project and refs
+- skips redundant target verification reads after push
 
 ## Failure model
 

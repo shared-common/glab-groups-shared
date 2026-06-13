@@ -40,6 +40,7 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("batch-size: ${{ steps.config_meta.outputs.batch-size }}", text)
         self.assertIn("max-parallel: ${{ steps.config_meta.outputs.max-parallel }}", text)
         self.assertIn("target-token-secret:", text)
+        self.assertIn("projects-only:", text)
         self.assertIn("GL_PAT_GROUP_ANDROID_SVC", text)
         self.assertIn("GL_PAT_GROUP_CHROMIUM_SVC", text)
         self.assertIn("GL_PAT_GROUP_KALI_SVC", text)
@@ -66,10 +67,17 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("GH_ORG_READ_APP_ID", text)
         self.assertIn("GH_ORG_READ_APP_INSTALL_ID", text)
         self.assertIn("GH_ORG_READ_APP_PEM", text)
+        self.assertIn("GL_USER_GLAB_FORKS_NAME", text)
+        self.assertIn("GL_USER_GLAB_FORKS_TOKEN", text)
+        self.assertIn("GIT_BRANCH_GLAB_FORKS", text)
+        self.assertIn('PROJECTS_ONLY: ${{ inputs.projects-only }}', text)
+        self.assertIn('"${PROJECTS_ONLY}"', text)
+        self.assertIn("plan_args=()", text)
+        self.assertIn("plan_args+=(--projects-only)", text)
         self.assertNotIn("GL_GROUP_TOP_GLAB_OWNER", text)
         self.assertNotIn("GL_BRIDGE_FORK_USER_GLAB", text)
         self.assertIn(
-            'perl -I shared/lib -MGlabGroups=load_config_dir - "${CONFIG_DIR}" "${TARGET_TOKEN_SECRET}" "${GITHUB_OUTPUT}" <<\'PERL\'',
+            'perl -I shared/lib -MGlabGroups=load_config_dir - "${CONFIG_DIR}" "${TARGET_TOKEN_SECRET}" "${PROJECTS_ONLY}" "${GITHUB_OUTPUT}" <<\'PERL\'',
             text,
         )
         self.assertIn("$config->{projects}", text)
