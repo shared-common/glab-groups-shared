@@ -441,6 +441,60 @@ YAML
 }
 
 {
+    no warnings 'redefine';
+    my @seen_units;
+
+    local *GlabGroups::_load_source_auth = sub { return {}; };
+    local *GlabGroups::_discover_namespace_inventory = sub {
+        my ( $namespace, $policy, $source_auth ) = @_;
+        my $paths = $namespace->{source_group_paths} || [];
+        push @seen_units, "namespace:$namespace->{name}:" . join( ",", @{$paths} );
+        return [];
+    };
+    local *GlabGroups::_discover_project_inventory = sub {
+        my ( $project, $policy, $source_auth, $opt ) = @_;
+        push @seen_units, "project:$project->{name}";
+        return [];
+    };
+
+    GlabGroups::_discover_inventory(
+        {
+            defaults => {
+                additional_branches => [],
+                additional_tags => [],
+            },
+            exclusions => {},
+            namespaces => [
+                {
+                    name => "debian-root",
+                    source_group_paths => [ "alpha", "beta", "gamma" ],
+                    source_group_url => "https://salsa.debian.org",
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "debian",
+                },
+            ],
+            projects => [
+                {
+                    name => "project-one",
+                    source_project_url => "https://gitlab.com/example/project-one",
+                    target_group_path => "glab-forks/example",
+                },
+            ],
+        },
+        {
+            unit_start => 1,
+            unit_stride => 2,
+        }
+    );
+
+    is_deeply(
+        \@seen_units,
+        [ "namespace:debian-root:beta", "project:project-one" ],
+        "discovery sharding splits configured groups.jsonl source paths into independent units",
+    );
+}
+
+{
     my $dir = tempdir( CLEANUP => 1 );
     write_json_file(
         File::Spec->catfile( $dir, "defaults.json" ),
@@ -1196,9 +1250,11 @@ JSONL
 
     local *GlabGroups::_gitlab_request = sub {
         my ( $client, $method, $path, $payload, $opt ) = @_;
-        return [ { id => 1, full_path => "frameworks" } ]
+        return []
           if $method eq "GET"
           && $path =~ m{\A/groups\?top_level_only=true};
+        return undef
+          if $method eq "GET" && $path eq "/groups/plasma";
         die "unexpected gitlab request: $method $path";
     };
 

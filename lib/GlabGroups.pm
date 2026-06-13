@@ -890,8 +890,20 @@ sub _discover_inventory {
         last if ( $opt->{unit_limit} || 0 ) > 0 && $processed_units >= $opt->{unit_limit};
         my $unit = $units[$unit_index];
         next unless ref($unit) eq "HASH";
-        if ( $unit->{type} eq "namespace" ) {
+        if ( $unit->{type} eq "namespace" || $unit->{type} eq "namespace_source_group_path" ) {
             my $namespace = $config->{namespaces}->[ $unit->{index} ];
+            if ( $unit->{type} eq "namespace_source_group_path" ) {
+                my $source_group_paths = $namespace->{source_group_paths};
+                ref($source_group_paths) eq "ARRAY"
+                  or die "namespace_source_group_path discovery unit requires source_group_paths\n";
+                my $source_group_path = $source_group_paths->[ $unit->{source_group_path_index} ];
+                defined $source_group_path
+                  or die "namespace_source_group_path discovery unit index is out of range\n";
+                $namespace = {
+                    %{$namespace},
+                    source_group_paths => [$source_group_path],
+                };
+            }
             my $policy = _merge_policy( $config->{defaults}, $namespace, {} );
             my $namespace_inventory =
               _discover_namespace_inventory( $namespace, $policy, $source_auth );
@@ -955,6 +967,19 @@ sub _discover_inventory_units {
     my ($config) = @_;
     my @units;
     for my $index ( 0 .. $#{ $config->{namespaces} || [] } ) {
+        my $namespace = $config->{namespaces}->[$index];
+        my $source_group_paths = ref($namespace) eq "HASH" ? $namespace->{source_group_paths} : undef;
+        if ( ref($source_group_paths) eq "ARRAY" && @{$source_group_paths} ) {
+            for my $source_group_path_index ( 0 .. $#{$source_group_paths} ) {
+                push @units,
+                  {
+                    index => $index,
+                    source_group_path_index => $source_group_path_index,
+                    type => "namespace_source_group_path",
+                  };
+            }
+            next;
+        }
         push @units, { index => $index, type => "namespace" };
     }
     for my $index ( 0 .. $#{ $config->{projects} || [] } ) {
@@ -1044,21 +1069,13 @@ sub _discover_namespace_inventory {
 
     if ( $source->{kind} eq "gitlab_instance_root" ) {
         my $source_client = _make_gitlab_client( $source->{base_url}, undef, undef );
-        my $groups = _list_gitlab_top_level_groups( $source_client, $policy );
+        my $groups;
         my @missing_source_groups;
         if ( ref($source_group_paths) eq "ARRAY" && @{$source_group_paths} ) {
-            my %groups_by_path;
-            for my $group ( @{$groups} ) {
-                next unless ref($group) eq "HASH";
-                my $group_path = _required_relative_namespace_path(
-                    $group->{full_path} || $group->{path},
-                    "gitlab top-level group path",
-                );
-                $groups_by_path{$group_path} = $group;
-            }
             my @selected_groups;
             for my $path ( @{$source_group_paths} ) {
-                if ( !exists $groups_by_path{$path} ) {
+                my $group = _get_group( $source_client, $path, _gitlab_read_request_opt($policy) );
+                if ( !$group ) {
                     warn "configured source group path not found at GitLab instance root: $path; skipping\n";
                     push @missing_source_groups,
                       {
@@ -1069,9 +1086,12 @@ sub _discover_namespace_inventory {
                       };
                     next;
                 }
-                push @selected_groups, $groups_by_path{$path};
+                push @selected_groups, $group;
             }
             $groups = \@selected_groups;
+        }
+        else {
+            $groups = _list_gitlab_top_level_groups( $source_client, $policy );
         }
         my @inventory;
         for my $group ( @{$groups} ) {

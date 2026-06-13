@@ -86,6 +86,10 @@ The mirror stage:
   group expansion, GitHub organization repository pagination, direct repository
   inspection for explicit project URLs, and cgit or Gitiles root scraping
   instead of relying on one source-specific integration path
+- fans source discovery across at least 10 and at most 250 matrix jobs for
+  non-empty configs, with discovery concurrency capped at 10 jobs
+- splits configured `groups.jsonl` source group paths into independent discovery
+  units so large GitLab instance-root wrappers do not serialize through one job
 - can use GitLab `include_subgroups=true` project enumeration for source group
   discovery when the config enables `gitlab_source_include_subgroups`
 - resolves target groups by full path and caches the resulting GitLab IDs only

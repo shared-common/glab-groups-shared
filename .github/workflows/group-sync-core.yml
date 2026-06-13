@@ -230,9 +230,13 @@ jobs:
           }
           my $batch_size = $config->{defaults}->{batch_size};
           my $max_parallel = $config->{defaults}->{max_parallel};
-          my $discovery_units =
-              scalar( @{ $config->{namespaces} || [] } )
-            + scalar( @{ $config->{projects} || [] } );
+          my $discovery_units = scalar( @{ $config->{projects} || [] } );
+          for my $namespace ( @{ $config->{namespaces} || [] } ) {
+              my $source_group_paths = $namespace->{source_group_paths};
+              $discovery_units += ref($source_group_paths) eq "ARRAY" && @{$source_group_paths}
+                ? scalar @{$source_group_paths}
+                : 1;
+          }
           defined $batch_size or die "config defaults.batch_size is required\n";
           defined $max_parallel or die "config defaults.max_parallel is required\n";
 
@@ -261,7 +265,11 @@ jobs:
           if total_units < 0:
               raise SystemExit("discover unit count must not be negative")
           max_matrix_jobs = 250
-          job_count = min(max(total_units, 1), max_matrix_jobs)
+          min_discovery_jobs = 10
+          if total_units == 0:
+              job_count = 1
+          else:
+              job_count = min(max(total_units, min_discovery_jobs), max_matrix_jobs)
           include = [
               {
                   "shard_index": index,
@@ -283,6 +291,7 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
+      max-parallel: 10
       matrix: ${{ fromJSON(needs.bootstrap.outputs.discover-matrix) }}
     steps:
       - name: Checkout shared workflow repository

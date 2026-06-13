@@ -182,6 +182,12 @@ applies repo-local `locksverify` and `lfs.allowincompletepush` remediation
 before retrying the LFS upload. When a source host refuses anonymous public Git
 reads, the runtime records a clear per-repository skip.
 
+Discovery matrix fan-out uses up to 250 jobs and runs at most 10 discovery jobs
+at the same time. Non-empty configs get at least 10 discovery matrix jobs, and
+GitLab instance-root configs with `groups.jsonl` split each configured source
+group path into its own discovery unit so large wrappers such as Debian do not
+serialize all discovery through a single job.
+
 ## Validation
 
 Repo-native CI in `validate-shared.yml` validates both this shared runtime and
