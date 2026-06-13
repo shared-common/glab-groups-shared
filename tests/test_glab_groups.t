@@ -64,7 +64,6 @@ sub run_cmd {
             version => 1,
             defaults => {
                 additional_branches => ["release"],
-                mirror_pristine_tar => JSON::PP::true,
             },
         }
     );
@@ -153,6 +152,69 @@ sub run_cmd {
 
 {
     my $dir = tempdir( CLEANUP => 1 );
+    write_json_file(
+        File::Spec->catfile( $dir, "defaults.json" ),
+        {
+            kind => "glab-groups/defaults",
+            version => 1,
+            defaults => {
+                mirror_pristine_tar => JSON::PP::true,
+            },
+        }
+    );
+    write_json_file(
+        File::Spec->catfile( $dir, "namespaces.json" ),
+        {
+            kind => "glab-groups/namespaces",
+            version => 1,
+            namespaces => [
+                {
+                    name => "kali",
+                    source_group_url => "https://gitlab.com/kalilinux",
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "kalilinux",
+                },
+            ],
+        }
+    );
+
+    my $error = eval { load_config_dir($dir); 1 } ? undef : $@;
+    like( $error, qr/defaults\.json\.defaults\.mirror_pristine_tar is supported only in projects\.yml explicit project entries/, "rejects mirror_pristine_tar in defaults" );
+}
+
+{
+    my $dir = tempdir( CLEANUP => 1 );
+    write_json_file(
+        File::Spec->catfile( $dir, "defaults.json" ),
+        {
+            kind => "glab-groups/defaults",
+            version => 1,
+            defaults => {},
+        }
+    );
+    write_json_file(
+        File::Spec->catfile( $dir, "namespaces.json" ),
+        {
+            kind => "glab-groups/namespaces",
+            version => 1,
+            namespaces => [
+                {
+                    mirror_pristine_tar => JSON::PP::true,
+                    name => "kali",
+                    source_group_url => "https://gitlab.com/kalilinux",
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "kalilinux",
+                },
+            ],
+        }
+    );
+
+    my $error = eval { load_config_dir($dir); 1 } ? undef : $@;
+    like( $error, qr/namespaces\.json\.namespaces\[0\]\.mirror_pristine_tar is supported only in projects\.yml explicit project entries/, "rejects mirror_pristine_tar in namespace entries" );
+}
+
+{
+    my $dir = tempdir( CLEANUP => 1 );
     write_text_file(
         File::Spec->catfile( $dir, "defaults.yml" ),
         <<'YAML'
@@ -163,7 +225,6 @@ defaults:
     - release
   additional_tags:
     - v1.0.0
-  mirror_pristine_tar: true
 YAML
     );
     write_text_file(
@@ -175,6 +236,7 @@ projects:
   - name: darkman
     source_project_url: https://gitlab.com/WhyNotHugo/darkman
     target_group_path: glab-forks/labwc
+    mirror_pristine_tar: true
     additional_branches:
       - stable
     additional_tags:
@@ -186,6 +248,7 @@ YAML
     is( scalar @{ $config->{projects} }, 1, "loads explicit projects from YAML config" );
     is( $config->{projects}->[0]->{target_group_path}, "glab-forks/labwc", "keeps the full explicit target group path" );
     is( $config->{defaults}->{additional_branches}->[0]->{name}, "release", "loads default branches from YAML config" );
+    ok( $config->{projects}->[0]->{mirror_pristine_tar}, "loads explicit project pristine-tar mirroring flag from YAML config" );
     is( $config->{projects}->[0]->{additional_branches}->[0]->{name}, "stable", "loads per-project branch overrides from YAML config" );
     is( scalar @{ $config->{projects}->[0]->{target_branches_protect} }, 0, "raw config loading keeps protected target branches empty until runtime policy merge" );
 }
@@ -472,14 +535,15 @@ JSONL
         },
         {
             additional_branches => [ { name => "release" } ],
+            mirror_pristine_tar => JSON::PP::true,
             target_branches_protect => [ { name => "mcr/feature/init" } ],
         },
     );
 
     is_deeply(
         [ map { $_->{name} } @{ $policy->{target_branches_protect} } ],
-        [ "mcr/feature/init", "release" ],
-        "merge policy only protects explicit project branches and auto-protects explicit project additional_branches",
+        [ "mcr/feature/init", "release", "pristine-tar" ],
+        "merge policy keeps project-only protected branches and auto-protects explicit project additional_branches plus pristine-tar",
     );
 }
 
@@ -1533,6 +1597,47 @@ HTML
 }
 
 {
+    my $pending = GlabGroups::_selected_refs_requiring_sync(
+        {
+            branches => [ "main", "release" ],
+            tags => [ "v1.0.0", "v2.0.0" ],
+        },
+        {
+            branches => {
+                main => "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                release => "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            },
+            tags => {
+                "v1.0.0" => "cccccccccccccccccccccccccccccccccccccccc",
+                "v2.0.0" => "dddddddddddddddddddddddddddddddddddddddd",
+            },
+        },
+        {
+            branches => {
+                "managed/sync" => "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                release => "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            },
+            tags => {
+                "v1.0.0" => "cccccccccccccccccccccccccccccccccccccccc",
+            },
+        },
+        "main",
+        "managed/sync",
+        {
+            additional_branches => [ { name => "release" } ],
+        },
+    );
+    is_deeply(
+        $pending,
+        {
+            branches => ["release"],
+            tags => ["v2.0.0"],
+        },
+        "ref reconciliation keeps already-matched refs out of the pending sync set",
+    );
+}
+
+{
     my $inferred = GlabGroups::_infer_default_branch_from_heads(
         {
             main => 1,
@@ -2481,11 +2586,11 @@ YAML
     my $result = GlabGroups::_mirror_entry(
         {
             base_url => "https://gitlab.example.invalid",
-            read_token => "deploy-token",
-            read_username => "glab-forks-read",
+            read_token => "service-token",
+            read_username => "0auth",
             sync_branch => "managed/sync",
             token => "service-token",
-            username => "oauth2",
+            username => "0auth",
         },
         {},
         {
@@ -2730,14 +2835,14 @@ YAML
 
 {
     no warnings 'redefine';
-    my %cache = ( owner => 7 );
+    my %cache = ( "owner/precreated" => 7 );
 
     local *GlabGroups::_ensure_main_user_group_membership_owner = sub { return 1; };
     local *GlabGroups::_ensure_service_user_group_membership_owner = sub { return 1; };
 
     local *GlabGroups::_get_group = sub {
         my ( $client, $group_path ) = @_;
-        return undef if $group_path eq "owner/MixedCase-team";
+        return undef if $group_path eq "owner/precreated/MixedCase-team";
         die "unexpected group lookup: $group_path";
     };
 
@@ -2750,14 +2855,14 @@ YAML
             return [
                 {
                     id => 42,
-                    full_path => "owner/MixedCase-team",
+                    full_path => "owner/precreated/MixedCase-team",
                     path => "MixedCase-team",
                 },
             ];
         }
         return {
             id => 42,
-            full_path => "owner/MixedCase-team",
+            full_path => "owner/precreated/MixedCase-team",
             path => "MixedCase-team",
             project_creation_level => $payload->{project_creation_level},
             shared_runners_setting => $payload->{shared_runners_setting},
@@ -2772,21 +2877,21 @@ YAML
         die "unexpected gitlab request: $method $path";
     };
 
-    my $group_id = GlabGroups::_ensure_group_path( {}, "owner/MixedCase-team", \%cache );
+    my $group_id = GlabGroups::_ensure_group_path( {}, "owner/precreated/MixedCase-team", \%cache );
     is( $group_id, 42, "reuses existing group after path conflict" );
-    is( $cache{"owner/MixedCase-team"}, 42, "caches resolved group id after conflict lookup" );
+    is( $cache{"owner/precreated/MixedCase-team"}, 42, "caches resolved group id after conflict lookup" );
 }
 
 {
     no warnings 'redefine';
-    my %cache = ( owner => 7 );
+    my %cache = ( "owner/precreated" => 7 );
 
     local *GlabGroups::_ensure_main_user_group_membership_owner = sub { return 1; };
     local *GlabGroups::_ensure_service_user_group_membership_owner = sub { return 1; };
 
     local *GlabGroups::_get_group = sub {
         my ( $client, $group_path ) = @_;
-        return undef if $group_path eq "owner/freedesktop";
+        return undef if $group_path eq "owner/precreated/freedesktop";
         die "unexpected group lookup: $group_path";
     };
 
@@ -2799,14 +2904,14 @@ YAML
             return [
                 {
                     id => 84,
-                    full_path => "owner/freedesktop",
+                    full_path => "owner/precreated/freedesktop",
                     path => "freedesktop",
                 },
             ];
         }
         return {
             id => 84,
-            full_path => "owner/freedesktop",
+            full_path => "owner/precreated/freedesktop",
             path => "freedesktop",
             project_creation_level => $payload->{project_creation_level},
             shared_runners_setting => $payload->{shared_runners_setting},
@@ -2821,9 +2926,9 @@ YAML
         die "unexpected gitlab request: $method $path";
     };
 
-    my $group_id = GlabGroups::_ensure_group_path( {}, "owner/freedesktop", \%cache );
+    my $group_id = GlabGroups::_ensure_group_path( {}, "owner/precreated/freedesktop", \%cache );
     is( $group_id, 84, "reuses existing group after GitLab path array conflict payload" );
-    is( $cache{"owner/freedesktop"}, 84, "caches resolved group id after array-style conflict lookup" );
+    is( $cache{"owner/precreated/freedesktop"}, 84, "caches resolved group id after array-style conflict lookup" );
 }
 
 {
@@ -2883,14 +2988,14 @@ YAML
 
 {
     no warnings 'redefine';
-    my %cache = ( owner => 7 );
+    my %cache = ( "owner/precreated" => 7 );
 
     local *GlabGroups::_ensure_main_user_group_membership_owner = sub { return 1; };
     local *GlabGroups::_ensure_service_user_group_membership_owner = sub { return 1; };
 
     local *GlabGroups::_get_group = sub {
         my ( $client, $group_path ) = @_;
-        return undef if $group_path eq "owner/Missing-team";
+        return undef if $group_path eq "owner/precreated/Missing-team";
         die "unexpected group lookup: $group_path";
     };
 
@@ -2909,24 +3014,24 @@ YAML
     };
 
     my $error = eval {
-        GlabGroups::_ensure_group_path( {}, "owner/Missing-team", \%cache );
+        GlabGroups::_ensure_group_path( {}, "owner/precreated/Missing-team", \%cache );
         1;
     };
     ok( !$error, "conflict without resolvable group still fails" );
-    like( $@, qr/gitlab group path conflict for owner\/Missing-team:/, "reports the unresolved group path in the conflict error" );
+    like( $@, qr/gitlab group path conflict for owner\/precreated\/Missing-team:/, "reports the unresolved group path in the conflict error" );
     like( $@, qr/path has already been taken/i, "preserves the original GitLab path conflict detail" );
 }
 
 {
     no warnings 'redefine';
-    my %cache = ( "glab-forks" => 7 );
+    my %cache = ( "glab-forks/crowdsecurity" => 7 );
 
     local *GlabGroups::_ensure_main_user_group_membership_owner = sub { return 1; };
     local *GlabGroups::_ensure_service_user_group_membership_owner = sub { return 1; };
 
     local *GlabGroups::_get_group = sub {
         my ( $client, $group_path ) = @_;
-        return undef if $group_path eq "glab-forks/crowdsecurity";
+        return undef if $group_path eq "glab-forks/crowdsecurity/team";
         die "unexpected group lookup: $group_path";
     };
 
@@ -2939,12 +3044,12 @@ YAML
     };
 
     my $ok = eval {
-        GlabGroups::_ensure_group_path( {}, "glab-forks/crowdsecurity", \%cache );
+        GlabGroups::_ensure_group_path( {}, "glab-forks/crowdsecurity/team", \%cache );
         1;
     };
     ok( !$ok, "forbidden group creation still fails closed" );
-    like( $@, qr/unable to create required target group glab-forks\/crowdsecurity:/, "forbidden group creation reports the exact target namespace path" );
-    like( $@, qr/pre-create it or grant group creation rights/i, "forbidden group creation explains how to fix the permission boundary" );
+    like( $@, qr/unable to create required target group glab-forks\/crowdsecurity\/team:/, "forbidden nested group creation reports the exact target namespace path" );
+    like( $@, qr/pre-create it or grant subgroup creation rights/i, "forbidden nested group creation explains how to fix the permission boundary" );
 }
 
 {
@@ -3056,14 +3161,28 @@ YAML
 {
     no warnings 'redefine';
     my %cache;
-    my @payloads;
+    local *GlabGroups::_get_group = sub {
+        my ( $client, $group_path ) = @_;
+        return undef if $group_path eq "owner/team";
+        die "unexpected group lookup: $group_path";
+    };
 
-    local *GlabGroups::_ensure_main_user_group_membership_owner = sub { return 1; };
-    local *GlabGroups::_ensure_service_user_group_membership_owner = sub { return 1; };
+    my $ok = eval {
+        GlabGroups::_ensure_group_path( {}, "owner/team", \%cache );
+        1;
+    };
+    ok( !$ok, "missing pre-created immediate target group fails closed" );
+    like( $@, qr/required target group owner\/team must already exist before mirror runs/, "missing immediate target group keeps the pre-create contract explicit" );
+}
+
+{
+    no warnings 'redefine';
+    my %cache = ( "owner/team" => 7 );
+    my @payloads;
 
     local *GlabGroups::_get_group = sub {
         my ( $client, $group_path ) = @_;
-        return undef if $group_path eq "owner";
+        return undef if $group_path eq "owner/team/subteam";
         die "unexpected group lookup: $group_path";
     };
 
@@ -3071,17 +3190,17 @@ YAML
         my ( $client, $method, $path, $payload, $opt ) = @_;
         if ( $method eq "POST" && $path eq "/groups" ) {
             push @payloads, $payload;
-            return { id => 7 };
+            return { id => 9 };
         }
         die "unexpected gitlab request: $method $path";
     };
 
-    my $group_id = GlabGroups::_ensure_group_path( {}, "owner", \%cache );
-    is( $group_id, 7, "creates missing group" );
-    is( $payloads[0]->{project_creation_level}, "maintainer", "group creation sets maintainer project creation level" );
-    is( $payloads[0]->{shared_runners_setting}, "disabled_and_unoverridable", "group creation disables instance runners for descendants" );
-    is( $payloads[0]->{subgroup_creation_level}, "maintainer", "group creation allows maintainers to create subgroups" );
-    ok( !exists $payloads[0]->{visibility}, "group creation payload does not set visibility" );
+    my $group_id = GlabGroups::_ensure_group_path( {}, "owner/team/subteam", \%cache );
+    is( $group_id, 9, "creates missing nested subgroup beneath the pre-created immediate target group" );
+    is( $payloads[0]->{project_creation_level}, "maintainer", "nested group creation sets maintainer project creation level" );
+    is( $payloads[0]->{shared_runners_setting}, "disabled_and_unoverridable", "nested group creation disables instance runners for descendants" );
+    is( $payloads[0]->{subgroup_creation_level}, "maintainer", "nested group creation allows maintainers to create subgroups" );
+    is( $payloads[0]->{visibility}, "public", "nested group creation payload forces public visibility" );
 }
 
 {
@@ -3156,7 +3275,7 @@ YAML
     is( $create_request->{path}, "/projects", "creates project through the GitLab projects API" );
     ok( !$create_request->{payload}->{group_runners_enabled}, "project creation disables group runners" );
     ok( !$create_request->{payload}->{shared_runners_enabled}, "project creation disables instance runners" );
-    ok( !exists $create_request->{payload}->{visibility}, "project creation payload does not set visibility" );
+    is( $create_request->{payload}->{visibility}, "public", "project creation payload forces public visibility" );
 }
 
 {
@@ -3757,10 +3876,10 @@ YAML
         {
             base_url => "https://gitlab.com",
             read_token => "unused",
-            read_username => "oauth2",
+            read_username => "0auth",
             sync_branch => "managed/sync",
             token => "unused",
-            username => "oauth2",
+            username => "0auth",
         },
         {},
         {
@@ -4313,6 +4432,41 @@ OUT
             "refs/tags/v1.0.0:refs/tags/v1.0.0",
         ],
         "push_selected_refs also mirrors the source default branch by name when it is explicitly listed in additional_branches",
+    );
+}
+
+{
+    no warnings 'redefine';
+    my @refspecs;
+
+    local *GlabGroups::_run_command = sub {
+        my ( $cmd, $opt ) = @_;
+        push @refspecs, $cmd->[-1] if $cmd->[3] eq "push";
+        return { output => q{}, status => 0 };
+    };
+
+    GlabGroups::_push_selected_refs(
+        "/tmp/repo",
+        {
+            branches => [],
+            tags => ["v1.0.0"],
+        },
+        {
+            additional_branches => [],
+            git_timeout_seconds => 60,
+            retry_attempts => 1,
+            retry_backoff_seconds => 1,
+        },
+        "main",
+        "managed/sync",
+    );
+
+    is_deeply(
+        \@refspecs,
+        [
+            "refs/tags/v1.0.0:refs/tags/v1.0.0",
+        ],
+        "push_selected_refs does not re-push the managed sync branch when only tags still need syncing",
     );
 }
 

@@ -219,8 +219,6 @@ jobs:
           }
 
           my @secret_names = (
-              "GL_USER_GLAB_FORKS_NAME",
-              "GL_USER_GLAB_FORKS_TOKEN",
               "GIT_BRANCH_GLAB_FORKS",
               "GL_BASE_URL",
               $target_token_secret,

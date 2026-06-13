@@ -102,9 +102,10 @@ and authenticates with:
 - `GL_PAT_GROUP_GNOME_SVC` for `glab-groups-gnome`
 - `GL_PAT_GROUP_PROJ_SVC` for `glab-groups-projects`
 
-Target group and project visibility is not created, updated, or finalized by
-this workflow. Configure visibility directly on the target GitLab owner/group
-outside the mirror run to avoid denied admin writes and unnecessary API churn.
+When this workflow creates a missing target project or a deeper nested target
+subgroup, it sends `visibility=public` on that create request. It does not
+reconcile visibility on already-existing target groups or projects during later
+mirror runs.
 
 Explicit single-project configs instead provide a full `target_group_path`
 such as `glab-forks/labwc`; the runtime creates or updates the target project
@@ -137,7 +138,6 @@ subtree crawls so the mirror stage uses fewer GitLab API reads.
 
 Each config directory exposes these defaults:
 
-- `mirror_pristine_tar`: always mirror detected `pristine-tar` branch or tag
 - `gitlab_source_include_subgroups`: optional GitLab source discovery mode that
   uses `include_subgroups=true` instead of subgroup-by-subgroup traversal
 - `read_retry_attempts`: retry count for plan/discovery GitLab API reads
@@ -154,7 +154,10 @@ Configured additional tags are force-synced to same-name target tags. The
 source default branch is always mirrored to the managed target branch named by
 the BWS secret `GIT_BRANCH_GLAB_FORKS`; if that same source branch is also
 listed in `additional_branches`, it is mirrored both to the managed target
-branch and to its same-name target branch.
+branch and to its same-name target branch. `pristine-tar` mirroring is no
+longer a defaults or namespace policy: explicit `projects.yml` entries must set
+`mirror_pristine_tar: true` to mirror that branch or tag, and that same
+project-level opt-in also protects the target `pristine-tar` branch.
 
 The shared runtime no longer creates extra target-only `mcr/*` branches, no
 longer resets the project default branch during mirror runs, and no longer
@@ -169,7 +172,11 @@ reuses a persisted source inventory cache between runs, and it no longer
 serializes all discovery into one job. Target preparation is best-effort per
 repository: the mirror stage compares source and target refs with `git
 ls-remote`, skips already-synced repositories before any target API work, and
-uses the `glab-forks` deploy token for target-side read checks. When Git LFS
+uses the per-wrapper GitLab PAT for both target-side `git ls-remote` checks and
+force-push authentication. The top-level target owner group and each immediate
+wrapper subgroup such as `glab-forks/debian` must already exist before mirror
+runs; the shared runtime only creates deeper nested subgroups beneath those
+pre-created roots. When Git LFS
 reports remote locking support or incomplete local LFS objects, the runtime now
 applies repo-local `locksverify` and `lfs.allowincompletepush` remediation
 before retrying the LFS upload. When a source host refuses anonymous public Git

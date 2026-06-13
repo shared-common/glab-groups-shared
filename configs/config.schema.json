@@ -198,10 +198,6 @@
           "minimum": 1,
           "default": 10
         },
-        "mirror_pristine_tar": {
-          "type": "boolean",
-          "default": true
-        },
         "read_retry_attempts": {
           "type": "integer",
           "minimum": 1
@@ -273,6 +269,10 @@
             },
             "source_project_url": {
               "$ref": "#/$defs/httpsUrl"
+            },
+            "mirror_pristine_tar": {
+              "type": "boolean",
+              "default": false
             },
             "target_group_path": {
               "$ref": "#/$defs/namespacePath"

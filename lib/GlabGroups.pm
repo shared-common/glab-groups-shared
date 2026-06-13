@@ -34,6 +34,7 @@ our @EXPORT_OK = qw(
 );
 
 my $JSON = JSON::PP->new->canonical(1)->utf8(1);
+my $TARGET_GIT_HTTPS_USERNAME = "0auth";
 
 my %DEFAULTS = (
     allow_blob_rewrite => JSON::PP::true,
@@ -42,7 +43,7 @@ my %DEFAULTS = (
     git_timeout_seconds => 1800,
     max_blob_bytes => 100 * 1024 * 1024,
     max_parallel => 5,
-    mirror_pristine_tar => JSON::PP::true,
+    mirror_pristine_tar => JSON::PP::false,
     retry_attempts => 3,
     retry_backoff_seconds => 2,
     size_limit_bytes => 9 * 1024 * 1024 * 1024,
@@ -1581,6 +1582,18 @@ sub _mirror_entry {
         };
     }
 
+    my $refs_to_sync =
+      $target_remote_refs
+      ? _selected_refs_requiring_sync(
+            $selected,
+            $available,
+            $target_remote_refs,
+            $default_branch,
+            $target_client->{sync_branch},
+            $entry->{policy},
+        )
+      : $selected;
+
     my $prepared =
       $prepared_from_override
       ? $prepared_override
@@ -1643,11 +1656,10 @@ sub _mirror_entry {
     $remote_result = _run_command( [ "git", "-C", $repo_dir, "remote", "add", "target", $target_url ], { timeout => 60 } );
     $remote_result->{status} == 0 or die "git remote add target failed: $remote_result->{output}\n";
 
-    _fetch_selected_refs( $repo_dir, $selected, $entry->{policy} );
-    my $checkout_result = _run_command( [ "git", "-C", $repo_dir, "checkout", "-f", $selected->{branches}->[0] ], { timeout => 300 } );
-    $checkout_result->{status} == 0 or die "git checkout failed for branch $selected->{branches}->[0]: $checkout_result->{output}\n";
+    _fetch_selected_refs( $repo_dir, $refs_to_sync, $entry->{policy} );
+    _checkout_selected_ref( $repo_dir, $refs_to_sync );
 
-    my $size_before = analyze_selected_refs( $repo_dir, $selected, $entry->{policy}->{max_blob_bytes} );
+    my $size_before = analyze_selected_refs( $repo_dir, $refs_to_sync, $entry->{policy}->{max_blob_bytes} );
     if ( $size_before->{total_bytes} > $entry->{policy}->{size_limit_bytes} ) {
         return {
             target_full_path => $resolved_target_full_path,
@@ -1670,11 +1682,11 @@ sub _mirror_entry {
     if ( @{ $size_before->{oversized_blobs} } && $entry->{policy}->{allow_blob_rewrite} ) {
         $lfs_rewrite_attempted = JSON::PP::true;
         my $ok = eval {
-            _rewrite_large_blobs_to_lfs( $repo_dir, $selected, $entry->{policy}->{max_blob_bytes}, $entry->{policy} );
+            _rewrite_large_blobs_to_lfs( $repo_dir, $refs_to_sync, $entry->{policy}->{max_blob_bytes}, $entry->{policy} );
             1;
         };
         if ($ok) {
-            $size_after = analyze_selected_refs( $repo_dir, $selected, $entry->{policy}->{max_blob_bytes} );
+            $size_after = analyze_selected_refs( $repo_dir, $refs_to_sync, $entry->{policy}->{max_blob_bytes} );
         }
         else {
             $lfs_rewrite_error = _trim_error($@);
@@ -1706,7 +1718,7 @@ sub _mirror_entry {
             %{$prepared} = ( %{$prepared}, %{$ensured} );
         }
         _ensure_target_lfs_enabled( $target_client, $prepared->{project_id} );
-        _sync_lfs_objects( $repo_dir, $selected, $entry->{policy} );
+        _sync_lfs_objects( $repo_dir, $refs_to_sync, $entry->{policy} );
         $prepared->{lfs_synced} = JSON::PP::true;
     };
     if ($needs_lfs) {
@@ -1716,7 +1728,7 @@ sub _mirror_entry {
     my $push_ok = eval {
         _push_selected_refs(
             $repo_dir,
-            $selected,
+            $refs_to_sync,
             $entry->{policy},
             $default_branch,
             $target_client->{sync_branch},
@@ -1960,6 +1972,7 @@ sub _normalize_defaults_payload {
     my ( $payload, $label ) = @_;
     ref($payload) eq "HASH" or die "$label.defaults must be an object\n";
     _reject_visibility_key( $payload, "$label.defaults" );
+    _reject_project_only_key( $payload, "$label.defaults", "mirror_pristine_tar" );
     return {
         additional_branches => _normalize_ref_specs( $payload->{additional_branches}, "$label.defaults.additional_branches" ),
         additional_tags => _normalize_ref_specs( $payload->{additional_tags}, "$label.defaults.additional_tags" ),
@@ -1969,7 +1982,6 @@ sub _normalize_defaults_payload {
         git_timeout_seconds => _defaulted_positive_int( $payload->{git_timeout_seconds}, $DEFAULTS{git_timeout_seconds}, "$label.defaults.git_timeout_seconds" ),
         max_blob_bytes => _defaulted_bounded_positive_int( $payload->{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, $DEFAULTS{max_blob_bytes}, "$label.defaults.max_blob_bytes" ),
         max_parallel => _defaulted_bounded_positive_int( $payload->{max_parallel}, $DEFAULTS{max_parallel}, $DEFAULTS{max_parallel}, "$label.defaults.max_parallel" ),
-        mirror_pristine_tar => _bool_or_default( $payload->{mirror_pristine_tar}, 1 ),
         gitlab_source_include_subgroups => _bool_or_default( $payload->{gitlab_source_include_subgroups}, 0 ),
         read_retry_attempts => _defaulted_positive_int( $payload->{read_retry_attempts}, $GITLAB_READ_DEFAULTS{retry_attempts}, "$label.defaults.read_retry_attempts" ),
         read_retry_backoff_seconds => _defaulted_positive_int( $payload->{read_retry_backoff_seconds}, $GITLAB_READ_DEFAULTS{retry_backoff_seconds}, "$label.defaults.read_retry_backoff_seconds" ),
@@ -1983,6 +1995,7 @@ sub _normalize_namespace {
     my ( $payload, $label ) = @_;
     ref($payload) eq "HASH" or die "$label must be an object\n";
     _reject_visibility_key( $payload, $label );
+    _reject_project_only_key( $payload, $label, "mirror_pristine_tar" );
     return {
         additional_branches => _normalize_ref_specs( $payload->{additional_branches}, "$label.additional_branches" ),
         additional_tags => _normalize_ref_specs( $payload->{additional_tags}, "$label.additional_tags" ),
@@ -1990,7 +2003,6 @@ sub _normalize_namespace {
         force_lfs => _optional_bool( $payload->{force_lfs} ),
         git_timeout_seconds => $payload->{git_timeout_seconds},
         gitlab_source_include_subgroups => _optional_bool( $payload->{gitlab_source_include_subgroups} ),
-        mirror_pristine_tar => _optional_bool( $payload->{mirror_pristine_tar} ),
         name => _required_string( $payload->{name}, "$label.name" ),
         read_retry_attempts => _optional_positive_int( $payload->{read_retry_attempts}, "$label.read_retry_attempts" ),
         read_retry_backoff_seconds => _optional_positive_int( $payload->{read_retry_backoff_seconds}, "$label.read_retry_backoff_seconds" ),
@@ -2052,7 +2064,6 @@ sub _merge_policy {
           git_timeout_seconds
           gitlab_source_include_subgroups
           max_blob_bytes
-          mirror_pristine_tar
           read_retry_attempts
           read_retry_backoff_seconds
           retry_attempts
@@ -2063,6 +2074,9 @@ sub _merge_policy {
             next unless defined $overlay->{$key};
             $policy->{$key} = $overlay->{$key};
         }
+    }
+    if ( ref($override) eq "HASH" && exists $override->{mirror_pristine_tar} && defined $override->{mirror_pristine_tar} ) {
+        $policy->{mirror_pristine_tar} = $override->{mirror_pristine_tar};
     }
     $policy->{additional_branches} = [
         @{ $defaults->{additional_branches} || [] },
@@ -2088,6 +2102,9 @@ sub _merge_policy {
         next if $seen_target_branches{$name}++;
         push @target_branches_to_protect, { name => $name };
     }
+    if ( $policy->{mirror_pristine_tar} && !$seen_target_branches{"pristine-tar"}++ ) {
+        push @target_branches_to_protect, { name => "pristine-tar" };
+    }
     $policy->{target_branches_protect} = \@target_branches_to_protect;
     $policy->{git_timeout_seconds} ||= $DEFAULTS{git_timeout_seconds};
     $policy->{read_retry_attempts} ||= $GITLAB_READ_DEFAULTS{retry_attempts};
@@ -2101,13 +2118,14 @@ sub _merge_policy {
 
 sub _load_target_client {
     my $token_secret_name = _required_secret_name( $ENV{GL_TARGET_TOKEN_SECRET_NAME}, "GL_TARGET_TOKEN_SECRET_NAME" );
+    my $token = _required_env_file($token_secret_name);
     my $client = _make_gitlab_client(
         _required_https_url( _required_env_file("GL_BASE_URL"), "GL_BASE_URL" ),
-        "oauth2",
-        _required_env_file($token_secret_name),
+        $TARGET_GIT_HTTPS_USERNAME,
+        $token,
     );
-    $client->{read_username} = _required_env_file("GL_USER_GLAB_FORKS_NAME");
-    $client->{read_token} = _required_env_file("GL_USER_GLAB_FORKS_TOKEN");
+    $client->{read_username} = $TARGET_GIT_HTTPS_USERNAME;
+    $client->{read_token} = $token;
     $client->{sync_branch} =
       _required_git_ref_name(
         _required_env_file("GIT_BRANCH_GLAB_FORKS"),
@@ -2184,34 +2202,57 @@ sub _managed_group_settings_payload {
 sub _ensure_group_path {
     my ( $client, $group_path, $cache ) = @_;
     return $cache->{$group_path} if exists $cache->{$group_path};
+    my $group = _get_group( $client, $group_path );
+    if ( ref($group) eq "HASH" ) {
+        $cache->{$group_path} = $group->{id};
+        return $group->{id};
+    }
+
     my @parts = split m{/}, $group_path;
-    my $current = "";
-    my $parent_id;
-    for my $part (@parts) {
-        $current = $current ? "$current/$part" : $part;
+    @parts or die "group_path must contain at least one segment\n";
+
+    my $precreated_depth = @parts >= 2 ? 2 : 1;
+    my $precreated_path = join "/", @parts[ 0 .. $precreated_depth - 1 ];
+    my $parent_id = $cache->{$precreated_path};
+    if ( !defined $parent_id ) {
+        my $precreated_group = _get_group( $client, $precreated_path );
+        if ( ref($precreated_group) ne "HASH" ) {
+            die sprintf(
+                "required target group %s must already exist before mirror runs; only nested subgroups below it are created automatically\n",
+                $precreated_path,
+            );
+        }
+        $parent_id = $precreated_group->{id};
+        $cache->{$precreated_path} = $parent_id;
+    }
+    return $parent_id if $group_path eq $precreated_path;
+
+    my $current = $precreated_path;
+    for my $index ( $precreated_depth .. $#parts ) {
+        my $part = $parts[$index];
+        $current = "$current/$part";
         if ( exists $cache->{$current} ) {
             $parent_id = $cache->{$current};
             next;
         }
         my $group = _get_group( $client, $current );
-        my $created_group = 0;
         if ( !$group ) {
             my %payload = (
                 name => $part,
                 path => $part,
+                parent_id => $parent_id,
+                visibility => "public",
                 _managed_group_settings_payload(),
             );
-            $payload{parent_id} = $parent_id if defined $parent_id;
             my $create_ok = eval {
                 $group = _gitlab_request( $client, "POST", "/groups", \%payload );
                 1;
             };
-            $created_group = 1 if $create_ok;
             if ( !$create_ok ) {
                 my $create_error = $@ || "unknown group creation error\n";
                 if ( _is_gitlab_forbidden_error($create_error) ) {
                     die sprintf(
-                        "unable to create required target group %s: target token lacks permission to create this namespace or subgroup; pre-create it or grant group creation rights: %s",
+                        "unable to create required target group %s: target token lacks permission to create this nested subgroup; pre-create it or grant subgroup creation rights: %s",
                         $current,
                         $create_error,
                     );
@@ -2705,6 +2746,7 @@ sub _ensure_target_project {
                     name => $display_name,
                     namespace_id => $target_group_id,
                     path => basename($target_full_path),
+                    visibility => "public",
                 }
             );
         };
@@ -3466,11 +3508,34 @@ sub _fetch_selected_refs {
     }
 }
 
+sub _checkout_selected_ref {
+    my ( $repo_dir, $selected ) = @_;
+    if ( @{ $selected->{branches} || [] } ) {
+        my $branch = $selected->{branches}->[0];
+        my $result = _run_command(
+            [ "git", "-C", $repo_dir, "checkout", "-f", $branch ],
+            { timeout => 300 }
+        );
+        $result->{status} == 0 or die "git checkout failed for branch $branch: $result->{output}\n";
+        return 1;
+    }
+    if ( @{ $selected->{tags} || [] } ) {
+        my $tag = $selected->{tags}->[0];
+        my $result = _run_command(
+            [ "git", "-C", $repo_dir, "checkout", "--detach", "-f", sprintf( "refs/tags/%s^{commit}", $tag ) ],
+            { timeout => 300 }
+        );
+        $result->{status} == 0 or die "git checkout failed for tag $tag: $result->{output}\n";
+    }
+    return 1;
+}
+
 sub _push_selected_refs {
     my ( $repo_dir, $selected, $policy, $default_branch, $target_sync_branch, $opt ) = @_;
     $opt ||= {};
     $target_sync_branch = _required_git_ref_name( $target_sync_branch, "target sync branch" );
     my %additional_branch_names = map { $_->{name} => 1 } @{ $policy->{additional_branches} || [] };
+    my %selected_branch_names = map { $_ => 1 } @{ $selected->{branches} || [] };
     for my $branch ( @{ $selected->{branches} || [] } ) {
         next if $default_branch && $branch eq $default_branch && !$additional_branch_names{$branch};
         _push_target_refspec(
@@ -3481,7 +3546,7 @@ sub _push_selected_refs {
             $opt,
         );
     }
-    if ($default_branch) {
+    if ( $default_branch && $selected_branch_names{$default_branch} ) {
         _push_target_refspec(
             $repo_dir,
             "refs/heads/$default_branch:refs/heads/$target_sync_branch",
@@ -3581,37 +3646,61 @@ sub _repo_has_lfs_files {
     return $result->{output} =~ /\S/ ? 1 : 0;
 }
 
+sub _selected_refs_requiring_sync {
+    my ( $selected, $source_available, $target_available, $default_branch, $target_sync_branch, $policy ) = @_;
+    return { branches => [], tags => [] } unless ref($selected) eq "HASH";
+    return { branches => [], tags => [] } unless ref($source_available) eq "HASH";
+    return { branches => [], tags => [] } unless ref($target_available) eq "HASH";
+    $target_sync_branch = _required_git_ref_name( $target_sync_branch, "target sync branch" );
+
+    my @branches_to_sync;
+    my @tags_to_sync;
+    my %additional_branch_names = map { $_->{name} => 1 } @{ $policy->{additional_branches} || [] };
+
+    for my $branch ( @{ $selected->{branches} || [] } ) {
+        my $source_oid = $source_available->{branches}->{$branch};
+        next unless defined $source_oid && length $source_oid;
+        if ( $default_branch && $branch eq $default_branch ) {
+            my $target_sync_oid = $target_available->{branches}->{$target_sync_branch};
+            if ( !defined $target_sync_oid || $target_sync_oid ne $source_oid ) {
+                push @branches_to_sync, $branch;
+                next;
+            }
+            next unless $additional_branch_names{$branch};
+        }
+        my $target_oid = $target_available->{branches}->{$branch};
+        push @branches_to_sync, $branch
+          unless defined $target_oid && $target_oid eq $source_oid;
+    }
+
+    for my $tag ( @{ $selected->{tags} || [] } ) {
+        my $source_oid = $source_available->{tags}->{$tag};
+        next unless defined $source_oid && length $source_oid;
+        my $target_oid = $target_available->{tags}->{$tag};
+        push @tags_to_sync, $tag
+          unless defined $target_oid && $target_oid eq $source_oid;
+    }
+
+    return {
+        branches => \@branches_to_sync,
+        tags => \@tags_to_sync,
+    };
+}
+
 sub _selected_refs_already_synced {
     my ( $selected, $source_available, $target_available, $default_branch, $target_sync_branch, $policy ) = @_;
     return 0 unless ref($selected) eq "HASH";
     return 0 unless ref($source_available) eq "HASH";
     return 0 unless ref($target_available) eq "HASH";
-    $target_sync_branch = _required_git_ref_name( $target_sync_branch, "target sync branch" );
-
-    my %additional_branch_names = map { $_->{name} => 1 } @{ $policy->{additional_branches} || [] };
-
-    for my $branch ( @{ $selected->{branches} || [] } ) {
-        my $source_oid = $source_available->{branches}->{$branch};
-        return 0 unless defined $source_oid && length $source_oid;
-        if ( $default_branch && $branch eq $default_branch ) {
-            my $target_sync_oid = $target_available->{branches}->{$target_sync_branch};
-            return 0
-              unless defined $target_sync_oid
-              && $target_sync_oid eq $source_oid;
-            next unless $additional_branch_names{$branch};
-        }
-        my $target_oid = $target_available->{branches}->{$branch};
-        return 0 unless defined $target_oid && $target_oid eq $source_oid;
-    }
-
-    for my $tag ( @{ $selected->{tags} || [] } ) {
-        my $source_oid = $source_available->{tags}->{$tag};
-        return 0 unless defined $source_oid && length $source_oid;
-        my $target_oid = $target_available->{tags}->{$tag};
-        return 0 unless defined $target_oid && $target_oid eq $source_oid;
-    }
-
-    return 1;
+    my $pending = _selected_refs_requiring_sync(
+        $selected,
+        $source_available,
+        $target_available,
+        $default_branch,
+        $target_sync_branch,
+        $policy,
+    );
+    return !( @{ $pending->{branches} || [] } || @{ $pending->{tags} || [] } );
 }
 
 sub _gitlab_request {
@@ -4258,6 +4347,12 @@ sub _reject_visibility_key {
     my ( $payload, $label ) = @_;
     return unless exists $payload->{visibility};
     die "$label.visibility is no longer supported; manage target visibility outside this workflow\n";
+}
+
+sub _reject_project_only_key {
+    my ( $payload, $label, $key ) = @_;
+    return unless exists $payload->{$key};
+    die "$label.$key is supported only in projects.yml explicit project entries\n";
 }
 
 sub _positive_int {

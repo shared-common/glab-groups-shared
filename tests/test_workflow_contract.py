@@ -79,8 +79,6 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("GH_ORG_READ_APP_ID", text)
         self.assertIn("GH_ORG_READ_APP_INSTALL_ID", text)
         self.assertIn("GH_ORG_READ_APP_PEM", text)
-        self.assertIn("GL_USER_GLAB_FORKS_NAME", text)
-        self.assertIn("GL_USER_GLAB_FORKS_TOKEN", text)
         self.assertIn("GIT_BRANCH_GLAB_FORKS", text)
         self.assertIn('PROJECTS_ONLY: ${{ inputs.projects-only }}', text)
         self.assertIn('"${PROJECTS_ONLY}"', text)
@@ -88,6 +86,8 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("plan_args+=(--projects-only)", text)
         self.assertNotIn("GL_GROUP_TOP_GLAB_OWNER", text)
         self.assertNotIn("GL_BRIDGE_FORK_USER_GLAB", text)
+        self.assertNotIn("GL_USER_GLAB_FORKS_NAME", text)
+        self.assertNotIn("GL_USER_GLAB_FORKS_TOKEN", text)
         self.assertIn(
             'perl -I shared/lib -MGlabGroups=load_config_dir - "${CONFIG_DIR}" "${TARGET_TOKEN_SECRET}" "${PROJECTS_ONLY}" "${GITHUB_OUTPUT}" <<\'PERL\'',
             text,

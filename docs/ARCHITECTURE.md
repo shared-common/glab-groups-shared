@@ -79,7 +79,9 @@ The mirror stage:
   push
 - skips source repositories when the upstream API marks them as archived
 - does not mutate GitLab archive state as part of mirror execution
-- never sets target group or project visibility
+- creates missing target projects and auto-created nested target subgroups with
+  `visibility=public`, but does not reconcile visibility on already-existing
+  targets
 - discovers source inventory through GitLab group traversal, GitLab top-level
   group expansion, GitHub organization repository pagination, direct repository
   inspection for explicit project URLs, and cgit or Gitiles root scraping
@@ -102,8 +104,8 @@ The mirror stage:
   out transient 5xx and timeout failures from upstream GitLab/Varnish
 - lets each config directory tune discovery/read retry counts separately from
   retryable git mirror operations
-- reads target repository refs with `git ls-remote` over the `glab-forks`
-  deploy token instead of GitLab project-read API calls
+- reads target repository refs with `git ls-remote` over the per-wrapper GitLab
+  PAT instead of GitLab project-read API calls
 - fetches only the selected branches and tags
 - always includes the source default branch in source-side selection
 - mirrors the source default branch into the managed target branch named by the
@@ -112,11 +114,16 @@ The mirror stage:
 - force-syncs configured additional tags to same-name target tags
 - also force-syncs the source default branch by name when that branch is
   explicitly listed in `additional_branches`
-- auto-detects `pristine-tar`
+- mirrors `pristine-tar` only for explicit projects that opt in with
+  `mirror_pristine_tar: true`
 - applies configured additional branches and tags
 - skips mirror execution entirely when all selected source refs already match
   the target repository
 - reconciles only the explicitly configured target branch protections
+- auto-protects target `pristine-tar` when a project opts into
+  `mirror_pristine_tar: true`
+- requires the top-level target owner group and each immediate wrapper subgroup
+  to be pre-created, and only creates deeper nested subgroups automatically
 - enforces a 9 GiB packed selected-ref storage budget that better matches GitLab
   repository storage behavior than an uncompressed object-size sum
 - attempts LFS migration for blobs larger than 100 MiB before falling back to
