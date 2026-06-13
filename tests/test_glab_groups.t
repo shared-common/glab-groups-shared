@@ -309,6 +309,75 @@ YAML
 }
 
 {
+    no warnings 'redefine';
+    my @seen_units;
+
+    local *GlabGroups::_load_source_auth = sub { return {}; };
+    local *GlabGroups::_discover_namespace_inventory = sub {
+        my ( $namespace, $policy, $source_auth ) = @_;
+        push @seen_units, "namespace:$namespace->{name}";
+        return [];
+    };
+    local *GlabGroups::_discover_project_inventory = sub {
+        my ( $project, $policy, $source_auth, $opt ) = @_;
+        push @seen_units, "project:$project->{name}";
+        return [];
+    };
+
+    GlabGroups::_discover_inventory(
+        {
+            defaults => {
+                additional_branches => [],
+                additional_tags => [],
+            },
+            exclusions => {},
+            namespaces => [
+                {
+                    name => "alpha",
+                    source_group_url => "https://example.invalid/alpha",
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "alpha",
+                },
+                {
+                    name => "beta",
+                    source_group_url => "https://example.invalid/beta",
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "beta",
+                },
+                {
+                    name => "gamma",
+                    source_group_url => "https://example.invalid/gamma",
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "gamma",
+                },
+            ],
+            projects => [
+                {
+                    name => "project-one",
+                    source_project_url => "https://gitlab.com/example/project-one",
+                    target_group_path => "glab-forks/example",
+                },
+                {
+                    name => "project-two",
+                    source_project_url => "https://gitlab.com/example/project-two",
+                    target_group_path => "glab-forks/example",
+                },
+            ],
+        },
+        {
+            unit_start => 1,
+            unit_stride => 2,
+        }
+    );
+
+    is_deeply(
+        \@seen_units,
+        [ "namespace:beta", "project:project-one" ],
+        "discovery sharding walks only the selected namespace and project units",
+    );
+}
+
+{
     my $dir = tempdir( CLEANUP => 1 );
     write_json_file(
         File::Spec->catfile( $dir, "defaults.json" ),
@@ -1878,6 +1947,122 @@ YAML
     my $plan = JSON::PP->new->decode( do { open( my $fh, "<:encoding(UTF-8)", $output_path ) or die $!; local $/; <$fh> } );
     is( $plan->{total_targets}, 0, "projects-only empty plan records zero targets" );
     is( $plan->{total_batches}, 0, "projects-only empty plan records zero batches" );
+}
+
+{
+    no warnings 'redefine';
+    my $dir = tempdir( CLEANUP => 1 );
+    my $config_dir = File::Spec->catdir( $dir, "config" );
+    mkdir $config_dir or die "unable to create config dir: $!";
+    write_json_file(
+        File::Spec->catfile( $config_dir, "defaults.json" ),
+        {
+            kind => "glab-groups/defaults",
+            version => 1,
+            defaults => {},
+        }
+    );
+    write_json_file(
+        File::Spec->catfile( $config_dir, "namespaces.json" ),
+        {
+            kind => "glab-groups/namespaces",
+            version => 1,
+            namespaces => [
+                {
+                    name => "root",
+                    source_group_url => "https://gitlab.example.invalid/root",
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "mirror",
+                },
+            ],
+        }
+    );
+    my $discover_a = File::Spec->catfile( $dir, "discover-a.json" );
+    my $discover_b = File::Spec->catfile( $dir, "discover-b.json" );
+    my $discover_out = File::Spec->catfile( $dir, "discover.json" );
+    my $output_path = File::Spec->catfile( $dir, "plan.json" );
+    my $summary_path = File::Spec->catfile( $dir, "plan.md" );
+
+    write_json_file(
+        $discover_a,
+        {
+            inventory => [
+                {
+                    group_path => "root",
+                    namespace => {
+                        source_group_url => "https://gitlab.example.invalid/root",
+                        target_owner_path => "glab-forks",
+                        target_namespace_path => "mirror",
+                    },
+                    projects => [
+                        {
+                            archived => JSON::PP::false,
+                            default_branch => "main",
+                            description => "source-a",
+                            empty_repo => JSON::PP::false,
+                            http_url_to_repo => "https://example.invalid/root/project-a.git",
+                            id => 100,
+                            lfs_enabled => JSON::PP::false,
+                            path_with_namespace => "root/project-a",
+                            ssh_url_to_repo => "git\@example.invalid:root/project-a.git",
+                            visibility => "public",
+                        },
+                    ],
+                },
+            ],
+            missing_source_groups => [],
+        }
+    );
+    write_json_file(
+        $discover_b,
+        {
+            inventory => [
+                {
+                    group_path => "root",
+                    namespace => {
+                        source_group_url => "https://gitlab.example.invalid/root",
+                        target_owner_path => "glab-forks",
+                        target_namespace_path => "mirror",
+                    },
+                    projects => [
+                        {
+                            archived => JSON::PP::false,
+                            default_branch => "main",
+                            description => "source-b",
+                            empty_repo => JSON::PP::false,
+                            http_url_to_repo => "https://example.invalid/root/project-b.git",
+                            id => 101,
+                            lfs_enabled => JSON::PP::false,
+                            path_with_namespace => "root/project-b",
+                            ssh_url_to_repo => "git\@example.invalid:root/project-b.git",
+                            visibility => "public",
+                        },
+                    ],
+                },
+            ],
+            missing_source_groups => [],
+        }
+    );
+
+    local *GlabGroups::_discover_inventory = sub {
+        die "_discover_inventory should not run when plan receives discover-input shards\n";
+    };
+
+    is(
+        GlabGroups::run_cli(
+            "plan",
+            "--config-dir", $config_dir,
+            "--discover-input", $discover_a,
+            "--discover-input", $discover_b,
+            "--discover-output", $discover_out,
+            "--output", $output_path,
+            "--summary", $summary_path,
+        ),
+        0,
+        "plan merges pre-discovered inventory shards without rerunning live discovery",
+    );
+    my $plan = JSON::PP->new->decode( do { open( my $fh, "<:encoding(UTF-8)", $output_path ) or die $!; local $/; <$fh> } );
+    is( $plan->{total_targets}, 2, "merged discover shards contribute all targets to the plan" );
 }
 
 {

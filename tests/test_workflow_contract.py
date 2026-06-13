@@ -20,8 +20,17 @@ class SharedWorkflowContractTests(unittest.TestCase):
         )
         self.assertNotIn("actions/cache@", text)
 
-    def test_caps_mirror_matrix_with_batch_strides(self) -> None:
+    def test_uses_discovery_and_mirror_matrices(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("discover-matrix: ${{ steps.discovery_matrix.outputs.matrix }}", text)
+        self.assertIn("discover-secret-list: ${{ steps.config_meta.outputs.discover-secret-list }}", text)
+        self.assertIn("discover-units=", text)
+        self.assertIn('matrix: ${{ fromJSON(needs.bootstrap.outputs.discover-matrix) }}', text)
+        self.assertIn('"unit_start": index', text)
+        self.assertIn('"unit_stride": job_count', text)
+        self.assertIn("--unit-start \"${{ matrix.unit_start }}\"", text)
+        self.assertIn("--unit-stride \"${{ matrix.unit_stride }}\"", text)
+        self.assertIn("--unit-limit \"${{ matrix.unit_limit }}\"", text)
         self.assertIn('max-parallel: ${{ fromJSON(needs.plan.outputs.max-parallel) }}', text)
         self.assertIn("matrix: ${{ fromJSON(needs.plan.outputs.batch-matrix) }}", text)
         self.assertIn("batch-matrix: ${{ steps.batch_matrix.outputs.matrix }}", text)
@@ -36,7 +45,8 @@ class SharedWorkflowContractTests(unittest.TestCase):
 
     def test_uses_config_specific_target_pat_secret(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("mirror-secret-list: ${{ steps.config_meta.outputs.secret-list }}", text)
+        self.assertIn("mirror-secret-list: ${{ steps.config_meta.outputs.mirror-secret-list }}", text)
+        self.assertIn("discover-secret-list: ${{ steps.config_meta.outputs.discover-secret-list }}", text)
         self.assertIn("batch-size: ${{ steps.config_meta.outputs.batch-size }}", text)
         self.assertIn("max-parallel: ${{ steps.config_meta.outputs.max-parallel }}", text)
         self.assertIn("target-token-secret:", text)
@@ -61,8 +71,9 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("glab-groups-openai", text)
         self.assertIn("glab-groups-nvidia", text)
         self.assertIn("GL_TARGET_TOKEN_SECRET_NAME: ${{ inputs.target-token-secret }}", text)
-        self.assertIn("secret-list=", text)
-        self.assertIn("secrets: ${{ steps.config_meta.outputs.secret-list }}", text)
+        self.assertIn("mirror-secret-list=", text)
+        self.assertIn("discover-secret-list=", text)
+        self.assertIn("secrets: ${{ needs.bootstrap.outputs.discover-secret-list }}", text)
         self.assertIn("secrets: ${{ needs.plan.outputs.mirror-secret-list }}", text)
         self.assertIn("GH_ORG_READ_APP_ID", text)
         self.assertIn("GH_ORG_READ_APP_INSTALL_ID", text)
@@ -100,6 +111,11 @@ class SharedWorkflowContractTests(unittest.TestCase):
 
     def test_step_summary_is_bounded(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("Publish batch summary", text)
+        self.assertIn("MAX_BATCH_ITEMS = 20", text)
+        self.assertIn('append_line(parts, f"## Batch Shard {shard_index}")', text)
+        self.assertIn('append_line(parts, "### Skipped")', text)
+        self.assertIn('append_line(parts, "### Failed")', text)
         self.assertIn("MAX_SUMMARY_CHARS = 900_000", text)
         self.assertIn("MAX_MISSING_SOURCE_GROUPS = 50", text)
         self.assertIn("MAX_SKIPPED_ITEMS = 50", text)
@@ -116,8 +132,13 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("plan.md", text.split("Upload plan artifact", 1)[1].split("Cleanup secrets", 1)[0])
         self.assertNotIn("report.md", text.split("Upload run artifacts", 1)[1])
 
-    def test_plan_forces_live_discovery(self) -> None:
+    def test_plan_uses_discovery_shards_without_cache(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("discover-artifacts/discover-*.json", text)
+        self.assertIn("glab-discover-${{ matrix.shard_index }}-${{ github.run_id }}", text)
+        self.assertIn("merge-multiple: true", text)
+        self.assertIn("discover \\", text)
+        self.assertIn("--discover-input", text)
         self.assertIn("--discover-output discover.json", text)
         self.assertNotIn("force-refresh-discovery:", text)
         self.assertNotIn("Restore source inventory cache", text)
@@ -133,6 +154,8 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn('--batch-start "${{ matrix.batch_start }}"', text)
         self.assertIn('--batch-stride "${{ matrix.batch_stride }}"', text)
         self.assertIn('--batch-limit "${{ matrix.batch_limit }}"', text)
+        self.assertIn("discover:\n    needs: bootstrap", text)
+        self.assertIn("plan:\n    needs: [bootstrap, discover]", text)
         self.assertIn("mirror:\n    needs: plan", text)
         self.assertNotIn("prepare:\n    needs: plan", text)
         self.assertNotIn("Prepare target namespaces and projects", text)

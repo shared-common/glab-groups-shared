@@ -47,16 +47,17 @@ name: group-sync-core
 permissions: {}
 
 jobs:
-  plan:
+  bootstrap:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
       contents: read
     outputs:
-      batch-matrix: ${{ steps.batch_matrix.outputs.matrix }}
       batch-size: ${{ steps.config_meta.outputs.batch-size }}
+      discover-matrix: ${{ steps.discovery_matrix.outputs.matrix }}
+      discover-secret-list: ${{ steps.config_meta.outputs.discover-secret-list }}
       max-parallel: ${{ steps.config_meta.outputs.max-parallel }}
-      mirror-secret-list: ${{ steps.config_meta.outputs.secret-list }}
+      mirror-secret-list: ${{ steps.config_meta.outputs.mirror-secret-list }}
     steps:
       - name: Validate workflow inputs
         shell: bash
@@ -172,7 +173,7 @@ jobs:
           path: gh-actions-cfg
           persist-credentials: false
 
-      - name: Resolve BWS secret list
+      - name: Resolve config meta
         id: config_meta
         shell: bash
         env:
@@ -213,30 +214,95 @@ jobs:
           }
 
           my @secret_names = (
-              "GL_BASE_URL",
-              $target_token_secret,
               "GL_USER_GLAB_FORKS_NAME",
               "GL_USER_GLAB_FORKS_TOKEN",
               "GIT_BRANCH_GLAB_FORKS",
+              "GL_BASE_URL",
+              $target_token_secret,
           );
+          my @discover_secret_names;
           if ($needs_github_source_auth) {
               push @secret_names, "GH_ORG_READ_APP_ID", "GH_ORG_READ_APP_INSTALL_ID", "GH_ORG_READ_APP_PEM";
+              push @discover_secret_names, "GH_ORG_READ_APP_ID", "GH_ORG_READ_APP_INSTALL_ID", "GH_ORG_READ_APP_PEM";
           }
 
           my $batch_size = $config->{defaults}->{batch_size};
           my $max_parallel = $config->{defaults}->{max_parallel};
+          my $discovery_units =
+              scalar( @{ $config->{namespaces} || [] } )
+            + scalar( @{ $config->{projects} || [] } );
           defined $batch_size or die "config defaults.batch_size is required\n";
           defined $max_parallel or die "config defaults.max_parallel is required\n";
 
           open( my $fh, ">>:encoding(UTF-8)", $github_output )
             or die "unable to append to \$GITHUB_OUTPUT: $github_output\n";
-          print {$fh} "secret-list=", join( ",", @secret_names ), "\n";
+          print {$fh} "discover-secret-list=", join( ",", @discover_secret_names ), "\n";
+          print {$fh} "discover-units=$discovery_units\n";
           print {$fh} "batch-size=$batch_size\n";
           print {$fh} "max-parallel=$max_parallel\n";
+          print {$fh} "mirror-secret-list=", join( ",", @secret_names ), "\n";
           close $fh;
           PERL
 
-      - name: Fetch target secrets from BWS
+      - name: Build discovery matrix
+        id: discovery_matrix
+        shell: bash
+        env:
+          DISCOVER_UNITS: ${{ steps.config_meta.outputs.discover-units }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "${GITHUB_OUTPUT}"
+          import json
+          import os
+
+          total_units = int(os.environ["DISCOVER_UNITS"])
+          if total_units < 0:
+              raise SystemExit("discover unit count must not be negative")
+          max_matrix_jobs = 250
+          job_count = min(max(total_units, 1), max_matrix_jobs)
+          include = [
+              {
+                  "shard_index": index,
+                  "unit_limit": 0,
+                  "unit_start": index,
+                  "unit_stride": job_count,
+              }
+              for index in range(job_count)
+          ]
+          matrix = json.dumps({"include": include}, separators=(",", ":"))
+          print(f"matrix={matrix}")
+          PY
+
+  discover:
+    needs: bootstrap
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.bootstrap.outputs.discover-matrix) }}
+    steps:
+      - name: Checkout shared workflow repository
+        # actions/checkout v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: ${{ inputs.shared-repo }}
+          ref: ${{ inputs.shared-ref }}
+          path: shared
+          persist-credentials: false
+
+      - name: Checkout shared config repository
+        # actions/checkout v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: ${{ inputs.config-repo }}
+          ref: ${{ inputs.config-ref }}
+          path: gh-actions-cfg
+          persist-credentials: false
+
+      - name: Fetch discovery secrets from BWS
+        if: ${{ needs.bootstrap.outputs.discover-secret-list != '' }}
         uses: >-
           shared-common/gh-actions-shared/.github/actions/bws-fetch@v0.0.41
         with:
@@ -244,33 +310,115 @@ jobs:
           project-id: ${{ secrets.BWS_PROJECT_ID }}
           bws-version: ${{ inputs.bws-version }}
           bws-sha256: ${{ inputs.bws-sha256 }}
-          secrets: ${{ steps.config_meta.outputs.secret-list }}
+          secrets: ${{ needs.bootstrap.outputs.discover-secret-list }}
           output-dir: .secrets
 
-      - name: Mask fetched secrets
+      - name: Mask fetched discovery secrets
+        if: ${{ needs.bootstrap.outputs.discover-secret-list != '' }}
         shell: bash
         env:
-          SECRET_NAMES: ${{ steps.config_meta.outputs.secret-list }}
+          SECRET_NAMES: ${{ needs.bootstrap.outputs.discover-secret-list }}
         run: |
           set -euo pipefail
           python3 shared/.github/scripts/mask_secret_files.py
 
+      - name: Discover source inventory shard
+        shell: bash
+        run: |
+          set -euo pipefail
+          discover_args=()
+          if [ "${{ inputs.projects-only }}" = "true" ]; then
+            discover_args+=(--projects-only)
+          fi
+          perl shared/.github/scripts/glab_groups.pl \
+            discover \
+            --config-dir "gh-actions-cfg/${{ inputs.config-path }}" \
+            --output "discover-${{ matrix.shard_index }}.json" \
+            --unit-start "${{ matrix.unit_start }}" \
+            --unit-stride "${{ matrix.unit_stride }}" \
+            --unit-limit "${{ matrix.unit_limit }}" \
+            "${discover_args[@]}"
+
+      - name: Upload discovery artifact
+        # actions/upload-artifact v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: glab-discover-${{ matrix.shard_index }}-${{ github.run_id }}
+          if-no-files-found: error
+          path: |
+            discover-${{ matrix.shard_index }}.json
+
+      - name: Cleanup secrets
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .secrets
+
+  plan:
+    needs: [bootstrap, discover]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      batch-matrix: ${{ steps.batch_matrix.outputs.matrix }}
+      batch-size: ${{ steps.plan_meta.outputs.batch-size }}
+      max-parallel: ${{ needs.bootstrap.outputs.max-parallel }}
+      mirror-secret-list: ${{ needs.bootstrap.outputs.mirror-secret-list }}
+    steps:
+      - name: Checkout shared workflow repository
+        # actions/checkout v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: ${{ inputs.shared-repo }}
+          ref: ${{ inputs.shared-ref }}
+          path: shared
+          persist-credentials: false
+
+      - name: Checkout shared config repository
+        # actions/checkout v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: ${{ inputs.config-repo }}
+          ref: ${{ inputs.config-ref }}
+          path: gh-actions-cfg
+          persist-credentials: false
+
+      - name: Download discovery artifacts
+        # actions/download-artifact v8.0.1
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: glab-discover-*-${{ github.run_id }}
+          path: discover-artifacts
+          merge-multiple: true
+
       - name: Build deterministic plan
         shell: bash
         env:
-          GL_TARGET_TOKEN_SECRET_NAME: ${{ inputs.target-token-secret }}
+          BATCH_SIZE: ${{ needs.bootstrap.outputs.batch-size }}
         run: |
           set -euo pipefail
           plan_args=()
           if [ "${{ inputs.projects-only }}" = "true" ]; then
             plan_args+=(--projects-only)
           fi
+          discover_args=()
+          shopt -s nullglob
+          for file in discover-artifacts/discover-*.json; do
+            discover_args+=(--discover-input "${file}")
+          done
+          if [ "${#discover_args[@]}" -eq 0 ]; then
+            printf '%s\n' "no discovery JSON files found" >&2
+            exit 1
+          fi
           perl shared/.github/scripts/glab_groups.pl \
             plan \
             --config-dir "gh-actions-cfg/${{ inputs.config-path }}" \
-            --batch-size "${{ steps.config_meta.outputs.batch-size }}" \
+            --batch-size "${BATCH_SIZE}" \
             --max-batches 250 \
             --discover-output discover.json \
+            "${discover_args[@]}" \
             "${plan_args[@]}" \
             --output plan.json \
             --summary plan.md
@@ -286,9 +434,6 @@ jobs:
 
           plan = json.loads(Path("plan.json").read_text(encoding="utf-8"))
           total_batches = int(plan.get("total_batches", 0))
-          batch_size = int(plan.get("batch_size", 0))
-          if batch_size < 1:
-              raise SystemExit("plan batch_size must be greater than zero")
           if total_batches < 0:
               raise SystemExit("plan total_batches must not be negative")
           max_matrix_jobs = 250
@@ -296,14 +441,30 @@ jobs:
           include = [
               {
                   "shard_index": index,
+                  "batch_limit": 0,
                   "batch_start": index,
                   "batch_stride": job_count,
-                  "batch_limit": 0,
               }
               for index in range(job_count)
           ]
           matrix = json.dumps({"include": include}, separators=(",", ":"))
           print(f"matrix={matrix}")
+          PY
+
+      - name: Capture plan meta
+        id: plan_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "${GITHUB_OUTPUT}"
+          import json
+          from pathlib import Path
+
+          plan = json.loads(Path("plan.json").read_text(encoding="utf-8"))
+          batch_size = int(plan.get("batch_size", 0))
+          if batch_size < 1:
+              raise SystemExit("plan batch_size must be greater than zero")
+          print(f"batch-size={batch_size}")
           PY
 
       - name: Upload plan artifact
@@ -315,13 +476,6 @@ jobs:
           path: |
             discover.json
             plan.json
-
-      - name: Cleanup secrets
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf .secrets
 
   mirror:
     needs: plan
@@ -384,6 +538,71 @@ jobs:
             --batch-limit "${{ matrix.batch_limit }}" \
             --output "results-${{ matrix.shard_index }}.json" \
             --jsonl "results-${{ matrix.shard_index }}.jsonl"
+
+      - name: Publish batch summary
+        shell: bash
+        env:
+          RESULTS_JSON: results-${{ matrix.shard_index }}.json
+          SHARD_INDEX: ${{ matrix.shard_index }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          MAX_BATCH_ITEMS = 20
+
+          def append_line(parts: list[str], line: str) -> None:
+              parts.append(f"{line}\n")
+
+          result_path = Path(os.environ["RESULTS_JSON"])
+          shard_index = os.environ["SHARD_INDEX"]
+          payload = json.loads(result_path.read_text(encoding="utf-8"))
+          counts = payload.get("counts") or {}
+          results = payload.get("results") or []
+          skipped = [
+              item for item in results
+              if isinstance(item, dict) and (item.get("status") or "") == "skipped"
+          ]
+          failed = [
+              item for item in results
+              if isinstance(item, dict) and (item.get("status") or "") == "failed"
+          ]
+
+          parts: list[str] = []
+          append_line(parts, f"## Batch Shard {shard_index}")
+          append_line(parts, "")
+          append_line(parts, f"- processed batches: {payload.get('processed_batches', 0)}")
+          append_line(parts, f"- mirrored: {counts.get('mirrored', 0)}")
+          append_line(parts, f"- created empty: {counts.get('created_empty', 0)}")
+          append_line(parts, f"- updated empty: {counts.get('updated_empty', 0)}")
+          append_line(parts, f"- skipped: {counts.get('skipped', 0)}")
+          append_line(parts, f"- failed: {counts.get('failed', 0)}")
+
+          if skipped:
+              append_line(parts, "")
+              append_line(parts, "### Skipped")
+              for item in skipped[:MAX_BATCH_ITEMS]:
+                  target = item.get("target_full_path", "<unknown>")
+                  detail = item.get("reason") or item.get("error") or "skipped"
+                  append_line(parts, f"- `{target}`: {detail}")
+              if len(skipped) > MAX_BATCH_ITEMS:
+                  append_line(parts, f"- _... {len(skipped) - MAX_BATCH_ITEMS} additional skipped entries omitted._")
+
+          if failed:
+              append_line(parts, "")
+              append_line(parts, "### Failed")
+              for item in failed[:MAX_BATCH_ITEMS]:
+                  target = item.get("target_full_path", "<unknown>")
+                  detail = item.get("error") or item.get("reason") or "failed"
+                  append_line(parts, f"- `{target}`: {detail}")
+              if len(failed) > MAX_BATCH_ITEMS:
+                  append_line(parts, f"- _... {len(failed) - MAX_BATCH_ITEMS} additional failed entries omitted._")
+
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as handle:
+              handle.write("".join(parts))
+          PY
 
       - name: Upload batch result artifacts
         # actions/upload-artifact v7.0.1

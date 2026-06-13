@@ -24,23 +24,25 @@ entry instead.
 
 ## Execution order
 
-1. `plan`
-2. `mirror`
-3. `report`
-4. `post_run_analytics.py`
+1. `bootstrap`
+2. `discover` matrix
+3. `plan`
+4. `mirror`
+5. `report`
+6. `post_run_analytics.py`
 
-The shared workflow creates one deterministic plan, uploads it as a run
-artifact, and then builds a dynamic matrix capped at 250 mirror jobs. Small
-plans still use one job per batch. Larger plans raise the effective batch size
-until the plan fits within that cap, while GitHub Actions runs at most five
-jobs concurrently. Batch construction keeps contiguous namespace ranges but can
-split a very large target subgroup across multiple jobs so one namespace does
-not serialize an entire run. The mirror stage skips already-synced repositories
-with `git ls-remote`, retries target creation/update only when the target repo
-is missing or later write steps need API-backed reconciliation, and records
-final per-project outcomes. The final report job downloads all batch artifacts,
-aggregates them into one report, CSV, JSON analytics file, and optional Parquet
-file, then publishes those artifacts back to the workflow run.
+The shared workflow first resolves config metadata, then fans source discovery
+out across a dynamic matrix capped at 250 jobs, merges those discovery shards
+into one deterministic plan, and finally fans mirror execution out again across
+up to 250 jobs. GitHub Actions still runs at most five mirror jobs concurrently.
+Batch construction now rebalances targets across the final mirror shards instead
+of letting a large tail accumulate in the last job. The mirror stage skips
+already-synced repositories with `git ls-remote`, retries target
+creation/update only when the target repo is missing or later write steps need
+API-backed reconciliation, and records final per-project outcomes. The final
+report job downloads all batch artifacts, aggregates them into one report, CSV,
+JSON analytics file, and optional Parquet file, then publishes those artifacts
+back to the workflow run.
 
 ## Planning model
 
@@ -49,8 +51,8 @@ The plan includes:
 - source project id and full path
 - target full path and target namespace path
 - source inventory fields required for mirroring and verification
-- target-aware batches built from contiguous namespace ranges, with large
-  namespaces split across multiple jobs when needed
+- target-aware batches built from the merged discovery output and redistributed
+  to keep the final mirror shards close in size
 - deterministic action selection:
   - `sync`
   - `skip`
@@ -61,8 +63,9 @@ project state. It keeps the target path only and defers live target group
 resolution, missing subgroup creation, and ref-by-ref target checks to the
 mirror jobs.
 
-The plan job always performs live source discovery. The workflow does not
-restore or reuse a persisted source inventory cache between runs.
+The workflow always performs live source discovery. It does not restore or
+reuse a persisted source inventory cache between runs, but it now parallelizes
+discovery before building the final plan.
 
 ## Mirroring model
 

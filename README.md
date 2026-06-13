@@ -19,10 +19,10 @@ Wrapper repositories call `.github/workflows/group-sync-core.yml` and pass:
 - the config subdirectory to load
 - BWS access secrets for target GitLab credentials
 
-The shared workflow uploads plan, result, report, CSV, JSON, and optional
-Parquet artifacts on every run. Source inventory reuse is handled only through
-the GitHub Actions cache; target GitLab group resolution stays path-based and
-in-memory for the lifetime of each mirror job.
+The shared workflow uploads discovery, plan, result, report, CSV, JSON, and
+optional Parquet artifacts on every run. Source inventory is rebuilt live on
+each run through sharded discovery jobs; target GitLab group resolution stays
+path-based and in-memory for the lifetime of each mirror job.
 
 Config directories can use `.json`, `.jsonl`, `.yml`, or `.yaml` files.
 `projects.yml` is the authoritative explicit-project config for a wrapper. In
@@ -37,11 +37,11 @@ one of those configured top-level groups disappears upstream, discovery records
 the missing group as a warning, skips that target path for the current run, and
 continues planning the remaining mirror work.
 
-Mirroring runs through deterministic prepare and mirror batch shards with the
-checked-in `max-parallel: 5` cap. Small plans still create one job per batch.
-Larger plans raise the effective batch size when necessary so the final plan
-stays within 250 batches, and the matrix remains capped at 250 jobs without
-dropping any target repositories.
+Mirroring runs through deterministic discovery and mirror shards with the
+checked-in `max-parallel: 5` cap. Discovery fans out across up to 250 matrix
+jobs, the final plan is built from the merged discovery shards, and mirror
+batches are rebalanced so the final plan stays within 250 jobs with a much more
+even per-shard target count.
 
 ## Supported source roots
 
@@ -123,10 +123,10 @@ Managed projects are reconciled to:
 - `shared_runners_enabled=false`
 
 The planning phase does not pre-create missing target groups or recursively
-inventory the full target namespace tree. It builds subgroup-aware batches so
-the target preparation stage and the matching mirror shard operate on the same
-target subgroup slice. Target group IDs are resolved live from the configured
-path and cached only inside the current job.
+inventory the full target namespace tree. It builds target-aware batches from
+the merged discovery output so mirror work is spread more evenly across shards.
+Target group IDs are resolved live from the configured path and cached only
+inside the current job.
 
 ## Ref selection
 
@@ -159,11 +159,12 @@ target branches are protected after push. Explicit project entries may also set
 `target_branches_protect` for any extra protected target branches that should
 not be implied by mirrored source branches.
 
-Plan runs always perform live source discovery. The workflow no longer restores
-or reuses a persisted source inventory cache between runs. Target preparation is
-best-effort per repository: the mirror stage compares source and target refs
-with `git ls-remote`, skips already-synced repositories before any target API
-work, and uses the `glab-forks` deploy token for target-side read checks.
+Plan runs always use live source discovery. The workflow no longer restores or
+reuses a persisted source inventory cache between runs, and it no longer
+serializes all discovery into one job. Target preparation is best-effort per
+repository: the mirror stage compares source and target refs with `git
+ls-remote`, skips already-synced repositories before any target API work, and
+uses the `glab-forks` deploy token for target-side read checks.
 
 ## Validation
 

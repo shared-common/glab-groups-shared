@@ -381,13 +381,24 @@ sub analyze_selected_refs {
 
 sub _cmd_discover {
     my (@argv) = @_;
-    my %opt = ( output => "discover.json" );
+    my %opt = (
+        output => "discover.json",
+        unit_limit => 0,
+        unit_start => 0,
+        unit_stride => 1,
+    );
     GetOptionsFromArray(
         \@argv,
         "config-dir=s" => \$opt{config_dir},
         "output=s" => \$opt{output},
         "projects-only!" => \$opt{projects_only},
+        "unit-limit=i" => \$opt{unit_limit},
+        "unit-start=i" => \$opt{unit_start},
+        "unit-stride=i" => \$opt{unit_stride},
     ) or die _usage();
+    $opt{unit_limit} >= 0 or die "unit-limit must be zero or greater\n";
+    $opt{unit_start} >= 0 or die "unit-start must be zero or greater\n";
+    $opt{unit_stride} > 0 or die "unit-stride must be greater than zero\n";
 
     my $config = load_config_dir(
         $opt{config_dir},
@@ -396,7 +407,14 @@ sub _cmd_discover {
             projects_only => $opt{projects_only},
         }
     );
-    my $inventory = _discover_inventory($config);
+    my $inventory = _discover_inventory(
+        $config,
+        {
+            unit_limit => $opt{unit_limit},
+            unit_start => $opt{unit_start},
+            unit_stride => $opt{unit_stride},
+        }
+    );
     _write_json( $opt{output}, $inventory );
     return 0;
 }
@@ -421,6 +439,7 @@ sub _cmd_plan {
     my %opt = (
         discover_output => "discover.json",
         batch_size => 10,
+        discover_inputs => [],
         max_batches => 0,
         output => "plan.json",
         summary => "plan.md",
@@ -431,6 +450,7 @@ sub _cmd_plan {
         "batch-size=i" => \$opt{batch_size},
         "max-batches=i" => \$opt{max_batches},
         "discover-output=s" => \$opt{discover_output},
+        "discover-input=s@" => $opt{discover_inputs},
         "output=s" => \$opt{output},
         "projects-only!" => \$opt{projects_only},
         "summary=s" => \$opt{summary},
@@ -444,8 +464,18 @@ sub _cmd_plan {
             projects_only => $opt{projects_only},
         }
     );
-    warn "performing live inventory discovery\n";
-    my $normalized = _normalize_inventory( _discover_inventory($config) );
+    my $normalized;
+    if ( @{ $opt{discover_inputs} || [] } ) {
+        $normalized = _normalize_inventory(
+            _merge_discover_payloads(
+                [ map { _read_json($_) } @{ $opt{discover_inputs} } ]
+            )
+        );
+    }
+    else {
+        warn "performing live inventory discovery\n";
+        $normalized = _normalize_inventory( _discover_inventory($config) );
+    }
     _write_json( $opt{discover_output}, $normalized ) if $opt{discover_output};
     my $plan = _build_plan(
         $config,
@@ -471,49 +501,41 @@ sub _cmd_plan {
 }
 
 sub _build_group_batches {
-    my ( $plan, $batch_size ) = @_;
+    my ( $plan, $batch_count ) = @_;
+    $batch_count >= 0 or die "batch-count must be zero or greater\n";
+    my @entries = @{ $plan || [] };
+    my $total_targets = scalar @entries;
+    my %seen_groups = map { ( ( $_->{target_namespace_path} || q{} ) => 1 ) } @entries;
+    return ( [], scalar keys %seen_groups ) if !$total_targets;
+
+    $batch_count = 1 if $batch_count < 1;
+    $batch_count = $total_targets if $batch_count > $total_targets;
+
+    my $base_targets_per_batch = int( $total_targets / $batch_count );
+    my $extra_targets = $total_targets % $batch_count;
     my @batches;
-    my %seen_groups;
-    my $current_batch;
-    my $current_group = undef;
+    my $start_index = 0;
 
-    for my $index ( 0 .. $#{$plan} ) {
-        my $entry = $plan->[$index];
-        my $group_path = $entry->{target_namespace_path} || q{};
-        my $is_new_group = !defined $current_group || $group_path ne $current_group;
-        my $started_new_batch = 0;
-
-        if ( !$current_batch ) {
-            $current_batch = {
-                end_index => $index,
-                group_paths => [],
-                start_index => $index,
-                target_count => 0,
-            };
-            $started_new_batch = 1;
+    for my $batch_index ( 0 .. $batch_count - 1 ) {
+        my $target_count =
+          $base_targets_per_batch + ( $batch_index < $extra_targets ? 1 : 0 );
+        next if $target_count <= 0;
+        my $end_index = $start_index + $target_count - 1;
+        my %group_paths;
+        for my $entry_index ( $start_index .. $end_index ) {
+            my $group_path = $entries[$entry_index]->{target_namespace_path} || q{};
+            $group_paths{$group_path} = 1;
         }
-        elsif ( $current_batch->{target_count} >= $batch_size ) {
-            push @batches, $current_batch;
-            $current_batch = {
-                end_index => $index,
-                group_paths => [],
-                start_index => $index,
-                target_count => 0,
-            };
-            $started_new_batch = 1;
-        }
-
-        if ( $is_new_group || $started_new_batch ) {
-            push @{ $current_batch->{group_paths} }, $group_path;
-            $seen_groups{$group_path} = 1;
-        }
-
-        $current_batch->{end_index} = $index;
-        $current_batch->{target_count}++;
-        $current_group = $group_path;
+        push @batches,
+          {
+            end_index => $end_index,
+            group_paths => [ sort keys %group_paths ],
+            start_index => $start_index,
+            target_count => $target_count,
+          };
+        $start_index = $end_index + 1;
     }
 
-    push @batches, $current_batch if $current_batch;
     return ( \@batches, scalar keys %seen_groups );
 }
 
@@ -521,35 +543,36 @@ sub _select_effective_batch_size {
     my ( $plan, $batch_size, $max_batches ) = @_;
     $batch_size > 0 or die "batch-size must be greater than zero\n";
 
-    my ( $batches, $total_groups ) = _build_group_batches( $plan, $batch_size );
-    return ( $batch_size, $batches, $total_groups )
-      if !$max_batches || scalar(@{$batches}) <= $max_batches;
+    my $total_targets = scalar @{ $plan || [] };
+    my $total_groups = scalar keys %{
+        {
+            map { ( ( $_->{target_namespace_path} || q{} ) => 1 ) } @{ $plan || [] }
+        }
+    };
+    return ( $batch_size, [], $total_groups ) if !$total_targets;
 
-    my $total_targets = scalar @{$plan};
-    my $effective_batch_size = $batch_size;
-    my $minimum_batch_size =
-      int( ( $total_targets + $max_batches - 1 ) / $max_batches );
-    $effective_batch_size = $minimum_batch_size
-      if $effective_batch_size < $minimum_batch_size;
-
-    while (1) {
-        ( $batches, $total_groups ) =
-          _build_group_batches( $plan, $effective_batch_size );
-        last if scalar(@{$batches}) <= $max_batches;
-        last if $effective_batch_size >= $total_targets;
-
-        my $next_batch_size = int(
-            ( $effective_batch_size * scalar(@{$batches}) + $max_batches - 1 ) /
-              $max_batches
-        );
-        $next_batch_size = $effective_batch_size + 1
-          if $next_batch_size <= $effective_batch_size;
-        $next_batch_size = $total_targets
-          if $next_batch_size > $total_targets;
-        $effective_batch_size = $next_batch_size;
+    my $requested_batch_count =
+      int( ( $total_targets + $batch_size - 1 ) / $batch_size );
+    $requested_batch_count = 1 if $requested_batch_count < 1;
+    if ($max_batches) {
+        $requested_batch_count = $max_batches
+          if $requested_batch_count > $max_batches;
     }
+    $requested_batch_count = $total_targets
+      if $requested_batch_count > $total_targets;
 
-    return ( $effective_batch_size, $batches, $total_groups );
+    my ( $batches, $seen_groups ) =
+      _build_group_batches( $plan, $requested_batch_count );
+    my $effective_batch_size = 0;
+    for my $batch ( @{$batches} ) {
+        next unless ref($batch) eq "HASH";
+        my $target_count = $batch->{target_count} || 0;
+        $effective_batch_size = $target_count
+          if $target_count > $effective_batch_size;
+    }
+    $effective_batch_size ||= $batch_size;
+
+    return ( $effective_batch_size, $batches, $seen_groups );
 }
 
 sub _cmd_prepare_target {
@@ -834,73 +857,140 @@ sub _cmd_resume {
 }
 
 sub _discover_inventory {
-    my ($config) = @_;
+    my ( $config, $opt ) = @_;
+    $opt ||= {};
     my $source_auth = _load_source_auth();
     my @inventory;
     my @missing_source_groups;
     my $authoritative_projects = _config_authoritative_projects_by_target_full_path($config);
     my $has_authoritative_projects = scalar keys %{$authoritative_projects};
-    my %authoritative_namespaces;
-    for my $namespace ( @{ $config->{namespaces} } ) {
-        my $policy = _merge_policy( $config->{defaults}, $namespace, {} );
-        my $namespace_inventory = _discover_namespace_inventory( $namespace, $policy, $source_auth );
-        my $namespace_buckets =
-            ref($namespace_inventory) eq "HASH"
-          ? $namespace_inventory->{inventory}
-          : $namespace_inventory;
-        if ( ref($namespace_inventory) eq "HASH" ) {
-            push @missing_source_groups,
-              grep { ref($_) eq "HASH" } @{ $namespace_inventory->{missing_source_groups} || [] };
-        }
-        if ( !$has_authoritative_projects ) {
-            push @inventory, @{$namespace_buckets};
-            next;
-        }
-        for my $bucket ( @{$namespace_buckets} ) {
-            my @projects;
-            for my $source_project ( @{ $bucket->{projects} || [] } ) {
-                my $source_full_path = _required_string( $source_project->{path_with_namespace}, "path_with_namespace" );
-                my $target_paths = _resolve_namespace_project_target_paths(
-                    $bucket->{namespace},
-                    $bucket->{group_path},
-                    $source_full_path,
-                );
-                my $authoritative = $authoritative_projects->{ $target_paths->{target_full_path} };
-                if ($authoritative) {
-                    my $existing = $authoritative_namespaces{ $target_paths->{target_full_path} };
-                    if (
-                        $existing
-                        && (
-                            ( $existing->{target_owner_path} || q{} ) ne ( $bucket->{namespace}->{target_owner_path} || q{} )
-                            || ( $existing->{target_namespace_path} || q{} ) ne ( $bucket->{namespace}->{target_namespace_path} || q{} )
-                            || ( $existing->{source_group_url} || q{} ) ne ( $bucket->{namespace}->{source_group_url} || q{} )
-                        )
-                      )
-                    {
-                        die "authoritative projects.yml target maps to multiple namespace entries: $target_paths->{target_full_path}\n";
-                    }
-                    $authoritative_namespaces{ $target_paths->{target_full_path} } = $bucket->{namespace};
-                    next;
-                }
-                push @projects, $source_project;
+    my @units = @{ _discover_inventory_units($config) };
+    my $total_units = scalar @units;
+    my $processed_units = 0;
+
+    for (
+        my $unit_index = $opt->{unit_start} || 0;
+        $unit_index < $total_units;
+        $unit_index += ( $opt->{unit_stride} || 1 )
+      )
+    {
+        last if ( $opt->{unit_limit} || 0 ) > 0 && $processed_units >= $opt->{unit_limit};
+        my $unit = $units[$unit_index];
+        next unless ref($unit) eq "HASH";
+        if ( $unit->{type} eq "namespace" ) {
+            my $namespace = $config->{namespaces}->[ $unit->{index} ];
+            my $policy = _merge_policy( $config->{defaults}, $namespace, {} );
+            my $namespace_inventory =
+              _discover_namespace_inventory( $namespace, $policy, $source_auth );
+            my $namespace_buckets =
+                ref($namespace_inventory) eq "HASH"
+              ? $namespace_inventory->{inventory}
+              : $namespace_inventory;
+            if ( ref($namespace_inventory) eq "HASH" ) {
+                push @missing_source_groups,
+                  grep { ref($_) eq "HASH" } @{ $namespace_inventory->{missing_source_groups} || [] };
             }
-            next unless @projects;
-            push @inventory, { %{$bucket}, projects => \@projects };
+            if ( !$has_authoritative_projects ) {
+                push @inventory, @{$namespace_buckets};
+                $processed_units++;
+                next;
+            }
+            for my $bucket ( @{$namespace_buckets} ) {
+                my @projects;
+                for my $source_project ( @{ $bucket->{projects} || [] } ) {
+                    my $source_full_path = _required_string( $source_project->{path_with_namespace}, "path_with_namespace" );
+                    my $target_paths = _resolve_namespace_project_target_paths(
+                        $bucket->{namespace},
+                        $bucket->{group_path},
+                        $source_full_path,
+                    );
+                    my $authoritative = $authoritative_projects->{ $target_paths->{target_full_path} };
+                    next if $authoritative;
+                    push @projects, $source_project;
+                }
+                next unless @projects;
+                push @inventory, { %{$bucket}, projects => \@projects };
+            }
         }
+        elsif ( $unit->{type} eq "project" ) {
+            my $project = $config->{projects}->[ $unit->{index} ];
+            my $policy = _merge_policy( $config->{defaults}, {}, $project );
+            push @inventory, @{
+                _discover_project_inventory(
+                    $project,
+                    $policy,
+                    $source_auth,
+                    {
+                        namespace => _matching_namespace_for_explicit_project( $config, $project ),
+                    },
+                )
+            };
+        }
+        else {
+            die "unsupported discovery unit type: $unit->{type}\n";
+        }
+        $processed_units++;
     }
-    for my $project ( @{ $config->{projects} || [] } ) {
-        my $policy = _merge_policy( $config->{defaults}, {}, $project );
-        my $target_paths = _resolve_explicit_project_target_paths($project);
-        push @inventory, @{
-            _discover_project_inventory(
-                $project,
-                $policy,
-                $source_auth,
-                {
-                    namespace => $authoritative_namespaces{ $target_paths->{target_full_path} },
-                },
-            )
-        };
+    return {
+        discovered_at => _timestamp(),
+        inventory => \@inventory,
+        missing_source_groups => \@missing_source_groups,
+    };
+}
+
+sub _discover_inventory_units {
+    my ($config) = @_;
+    my @units;
+    for my $index ( 0 .. $#{ $config->{namespaces} || [] } ) {
+        push @units, { index => $index, type => "namespace" };
+    }
+    for my $index ( 0 .. $#{ $config->{projects} || [] } ) {
+        push @units, { index => $index, type => "project" };
+    }
+    return \@units;
+}
+
+sub _matching_namespace_for_explicit_project {
+    my ( $config, $project ) = @_;
+    return undef unless ref($config) eq "HASH";
+    return undef unless ref($project) eq "HASH";
+    my $target_paths = _resolve_explicit_project_target_paths($project);
+    my $target_full_path = $target_paths->{target_full_path};
+    my @matches;
+    for my $namespace ( @{ $config->{namespaces} || [] } ) {
+        next unless ref($namespace) eq "HASH";
+        my $root = _join_path(
+            _required_relative_namespace_path(
+                $namespace->{target_owner_path},
+                "target_owner_path",
+            ),
+            _required_relative_namespace_path(
+                $namespace->{target_namespace_path},
+                "target_namespace_path",
+            ),
+        );
+        next unless index( $target_full_path, $root . "/" ) == 0;
+        push @matches, [ length($root), $namespace ];
+    }
+    return undef unless @matches;
+    @matches = sort { $b->[0] <=> $a->[0] } @matches;
+    if ( @matches > 1 && $matches[0]->[0] == $matches[1]->[0] ) {
+        die "authoritative projects.yml target maps to multiple namespace entries: $target_full_path\n";
+    }
+    return $matches[0]->[1];
+}
+
+sub _merge_discover_payloads {
+    my ($payloads) = @_;
+    ref($payloads) eq "ARRAY" or die "discover payloads must be a list\n";
+    my @inventory;
+    my @missing_source_groups;
+    for my $payload ( @{$payloads} ) {
+        ref($payload) eq "HASH" or die "discover payload must be an object\n";
+        push @inventory,
+          grep { ref($_) eq "HASH" } @{ $payload->{inventory} || [] };
+        push @missing_source_groups,
+          grep { ref($_) eq "HASH" } @{ $payload->{missing_source_groups} || [] };
     }
     return {
         discovered_at => _timestamp(),
