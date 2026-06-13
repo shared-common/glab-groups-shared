@@ -96,8 +96,6 @@ The mirror stage:
 - keeps non-GitHub explicit public project URLs on plain HTTPS git without
   source-auth injection, while explicit GitHub project URLs reuse the shared
   GitHub App auth flow during discovery and mirror execution
-- can also consume optional GitLab-source read credentials from BWS for hosts
-  that refuse anonymous `git ls-remote`
 - retries repo-shaped root-discovered clone URLs with an appended `.git` suffix
   before failing when the human-facing URL does not expose refs over Git
 - uses longer bounded retries for GitLab read requests during discovery to ride
@@ -132,10 +130,9 @@ The mirror stage:
 
 Expected policy skips, such as repositories above the selected-ref size budget,
 are captured as skipped result rows. Source repositories that deny anonymous
-Git reads without optional source credentials, and target repositories that
-reject LFS uploads because their storage quota is exhausted, are also reported
-as clear per-repository skips instead of opaque transport failures. Unexpected
-per-repository exceptions are captured as failed rows with error details so
-artifacts and summaries are still produced and the rest of the run keeps going.
-Fatal configuration or credential failures still stop the workflow before
-mirroring.
+public Git reads, and target repositories that reject LFS uploads because
+their storage quota is exhausted, are also reported as clear per-repository
+skips instead of opaque transport failures. Unexpected per-repository
+exceptions are captured as failed rows with error details so artifacts and
+summaries are still produced and the rest of the run keeps going. Fatal
+configuration or credential failures still stop the workflow before mirroring.

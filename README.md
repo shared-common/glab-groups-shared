@@ -22,9 +22,7 @@ Wrapper repositories call `.github/workflows/group-sync-core.yml` and pass:
 The shared workflow uploads discovery, plan, result, report, CSV, JSON, and
 optional Parquet artifacts on every run. Source inventory is rebuilt live on
 each run through sharded discovery jobs; target GitLab group resolution stays
-path-based and in-memory for the lifetime of each mirror job. GitLab-source
-wrappers can also fetch optional source-read credentials through the shared
-workflow when the upstream host refuses anonymous `git ls-remote`. The shared
+path-based and in-memory for the lifetime of each mirror job. The shared
 workflow now also propagates a 5h50m run deadline and wraps the long-running
 discover/plan/mirror/report commands with `timeout` so runs stop before the
 hosted 6h ceiling.
@@ -174,9 +172,8 @@ ls-remote`, skips already-synced repositories before any target API work, and
 uses the `glab-forks` deploy token for target-side read checks. When Git LFS
 reports remote locking support or incomplete local LFS objects, the runtime now
 applies repo-local `locksverify` and `lfs.allowincompletepush` remediation
-before retrying the LFS upload. When a source host refuses anonymous Git
-reads, the runtime records a clear per-repository skip unless optional source
-credentials were available.
+before retrying the LFS upload. When a source host refuses anonymous public Git
+reads, the runtime records a clear per-repository skip.
 
 ## Validation
 

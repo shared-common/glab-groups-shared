@@ -58,7 +58,6 @@ jobs:
       discover-secret-list: ${{ steps.config_meta.outputs.discover-secret-list }}
       max-parallel: ${{ steps.config_meta.outputs.max-parallel }}
       mirror-secret-list: ${{ steps.config_meta.outputs.mirror-secret-list }}
-      optional-source-secret-list: ${{ steps.config_meta.outputs.optional-source-secret-list }}
       workflow-deadline-epoch: ${{ steps.workflow_deadline.outputs.workflow-deadline-epoch }}
     steps:
       - name: Validate workflow inputs
@@ -206,24 +205,16 @@ jobs:
           );
 
           my $needs_github_source_auth = 0;
-          my $needs_optional_gitlab_source_auth = 0;
-          my $gitlab_source_host_re = qr{\Ahttps://(?:gitlab\.com|salsa\.debian\.org|gitlab\.freedesktop\.org|gitlab\.gnome\.org|invent\.kde\.org)(?:/|$)}i;
           for my $namespace ( @{ $config->{namespaces} || [] } ) {
               my $source_url = $namespace->{source_group_url} || "";
               if ( $source_url =~ m{\Ahttps://github\.com/} ) {
                   $needs_github_source_auth = 1;
-              }
-              if ( $source_url =~ $gitlab_source_host_re ) {
-                  $needs_optional_gitlab_source_auth = 1;
               }
           }
           for my $project ( @{ $config->{projects} || [] } ) {
               my $source_url = $project->{source_project_url} || "";
               if ( $source_url =~ m{\Ahttps://github\.com/} ) {
                   $needs_github_source_auth = 1;
-              }
-              if ( $source_url =~ $gitlab_source_host_re ) {
-                  $needs_optional_gitlab_source_auth = 1;
               }
           }
 
@@ -239,14 +230,6 @@ jobs:
               push @secret_names, "GH_ORG_READ_APP_ID", "GH_ORG_READ_APP_INSTALL_ID", "GH_ORG_READ_APP_PEM";
               push @discover_secret_names, "GH_ORG_READ_APP_ID", "GH_ORG_READ_APP_INSTALL_ID", "GH_ORG_READ_APP_PEM";
           }
-          my @optional_source_secret_names;
-          if ($needs_optional_gitlab_source_auth) {
-              @optional_source_secret_names = (
-                  "GL_GROUPS_SOURCE_USERNAME",
-                  "GL_GROUPS_SOURCE_TOKEN",
-              );
-          }
-
           my $batch_size = $config->{defaults}->{batch_size};
           my $max_parallel = $config->{defaults}->{max_parallel};
           my $discovery_units =
@@ -262,7 +245,6 @@ jobs:
           print {$fh} "batch-size=$batch_size\n";
           print {$fh} "max-parallel=$max_parallel\n";
           print {$fh} "mirror-secret-list=", join( ",", @secret_names ), "\n";
-          print {$fh} "optional-source-secret-list=", join( ",", @optional_source_secret_names ), "\n";
           close $fh;
           PERL
 
@@ -335,34 +317,11 @@ jobs:
           secrets: ${{ needs.bootstrap.outputs.discover-secret-list }}
           output-dir: .secrets
 
-      - name: Fetch optional source Git credentials from BWS
-        id: fetch_optional_source_git_credentials
-        if: ${{ needs.bootstrap.outputs.optional-source-secret-list != '' }}
-        continue-on-error: true
-        uses: >-
-          shared-common/gh-actions-shared/.github/actions/bws-fetch@v0.0.41
-        with:
-          access-token: ${{ secrets.BWS_ACCESS_TOKEN }}
-          project-id: ${{ secrets.BWS_PROJECT_ID }}
-          bws-version: ${{ inputs.bws-version }}
-          bws-sha256: ${{ inputs.bws-sha256 }}
-          secrets: ${{ needs.bootstrap.outputs.optional-source-secret-list }}
-          output-dir: .secrets
-
       - name: Mask fetched discovery secrets
         if: ${{ needs.bootstrap.outputs.discover-secret-list != '' }}
         shell: bash
         env:
           SECRET_NAMES: ${{ needs.bootstrap.outputs.discover-secret-list }}
-        run: |
-          set -euo pipefail
-          python3 shared/.github/scripts/mask_secret_files.py
-
-      - name: Mask optional source Git credentials
-        if: ${{ needs.bootstrap.outputs.optional-source-secret-list != '' && steps.fetch_optional_source_git_credentials.outcome == 'success' }}
-        shell: bash
-        env:
-          SECRET_NAMES: ${{ needs.bootstrap.outputs.optional-source-secret-list }}
         run: |
           set -euo pipefail
           python3 shared/.github/scripts/mask_secret_files.py
@@ -418,7 +377,6 @@ jobs:
       batch-size: ${{ steps.plan_meta.outputs.batch-size }}
       max-parallel: ${{ needs.bootstrap.outputs.max-parallel }}
       mirror-secret-list: ${{ needs.bootstrap.outputs.mirror-secret-list }}
-      optional-source-secret-list: ${{ needs.bootstrap.outputs.optional-source-secret-list }}
       workflow-deadline-epoch: ${{ needs.bootstrap.outputs.workflow-deadline-epoch }}
     steps:
       - name: Checkout shared workflow repository
@@ -610,33 +568,10 @@ jobs:
           secrets: ${{ needs.plan.outputs.mirror-secret-list }}
           output-dir: .secrets
 
-      - name: Fetch optional source Git credentials from BWS
-        id: fetch_optional_source_git_credentials
-        if: ${{ needs.plan.outputs.optional-source-secret-list != '' }}
-        continue-on-error: true
-        uses: >-
-          shared-common/gh-actions-shared/.github/actions/bws-fetch@v0.0.41
-        with:
-          access-token: ${{ secrets.BWS_ACCESS_TOKEN }}
-          project-id: ${{ secrets.BWS_PROJECT_ID }}
-          bws-version: ${{ inputs.bws-version }}
-          bws-sha256: ${{ inputs.bws-sha256 }}
-          secrets: ${{ needs.plan.outputs.optional-source-secret-list }}
-          output-dir: .secrets
-
       - name: Mask fetched secrets
         shell: bash
         env:
           SECRET_NAMES: ${{ needs.plan.outputs.mirror-secret-list }}
-        run: |
-          set -euo pipefail
-          python3 shared/.github/scripts/mask_secret_files.py
-
-      - name: Mask optional source Git credentials
-        if: ${{ needs.plan.outputs.optional-source-secret-list != '' && steps.fetch_optional_source_git_credentials.outcome == 'success' }}
-        shell: bash
-        env:
-          SECRET_NAMES: ${{ needs.plan.outputs.optional-source-secret-list }}
         run: |
           set -euo pipefail
           python3 shared/.github/scripts/mask_secret_files.py

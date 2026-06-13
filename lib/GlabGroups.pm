@@ -1504,7 +1504,7 @@ sub _mirror_entry {
                 ),
                 planned_action => $entry->{action},
                 status => "skipped",
-                reason => "Source repository refused anonymous Git reads and no usable source credentials were available.",
+                reason => "Source repository refused anonymous public Git reads.",
                 error => $source_error,
                 failure_context => "source-ls-remote",
             };
@@ -2125,8 +2125,6 @@ sub _resolve_target_root_group_path {
 }
 
 sub _load_source_auth {
-    my $username = _optional_env_file("GL_GROUPS_SOURCE_USERNAME");
-    my $token = _optional_env_file("GL_GROUPS_SOURCE_TOKEN");
     my $github_app_id = _optional_env_file("GH_ORG_READ_APP_ID");
     my $github_app_install_id = _optional_env_file("GH_ORG_READ_APP_INSTALL_ID");
     my $github_app_pem = _optional_env_file("GH_ORG_READ_APP_PEM");
@@ -2146,8 +2144,6 @@ sub _load_source_auth {
     return {
         github_app => $github_app,
         github_installation_tokens => {},
-        token => $token,
-        username => $username,
     };
 }
 
@@ -2997,8 +2993,8 @@ sub _resolve_source_auth_for_entry {
         );
     }
     return {
-        token => $source_auth->{token},
-        username => $source_auth->{username},
+        token => undef,
+        username => undef,
     };
 }
 
