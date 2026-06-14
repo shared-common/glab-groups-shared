@@ -863,8 +863,11 @@ sub _cmd_report {
         generated_at => _timestamp(),
         input_failures => \@input_failures,
         plan_counts => $plan->{counts},
+        plan_total_groups => $plan->{total_groups},
+        plan_total_targets => $plan->{total_targets},
         result_counts => _aggregate_results( \@rows ),
         results => \@rows,
+        source_group_filter => $plan->{source_group_filter},
     };
     _write_json( $opt{output}, $report );
     _write_text( $opt{summary}, _render_report_summary($report) );
@@ -1340,6 +1343,7 @@ sub _normalize_inventory {
 sub _build_plan {
     my ( $config, $inventory, $batch_size, $opt ) = @_;
     $opt ||= {};
+    _assert_inventory_honors_source_group_filter( $config, $inventory );
     my @plan;
     my %counts = (
         fail => 0,
@@ -1520,9 +1524,100 @@ sub _build_plan {
         generated_at => _timestamp(),
         max_batches => $opt->{max_batches} || 0,
         plan => \@plan,
+        source_group_filter => _source_group_filter_summary( $config, $inventory, \@plan, $total_groups ),
         total_batches => scalar @{$batches},
         total_groups => $total_groups,
         total_targets => scalar @plan,
+    };
+}
+
+sub _configured_source_group_paths {
+    my ($config) = @_;
+    my @paths;
+    for my $namespace ( @{ $config->{namespaces} || [] } ) {
+        next unless ref($namespace) eq "HASH";
+        my $source_group_paths = $namespace->{source_group_paths};
+        next unless ref($source_group_paths) eq "ARRAY";
+        push @paths, grep { defined $_ && !ref($_) && length $_ } @{$source_group_paths};
+    }
+    return \@paths;
+}
+
+sub _source_group_filter_lookup {
+    my ($config) = @_;
+    my %allowed = map { ( $_ => 1 ) } @{ _configured_source_group_paths($config) };
+    return \%allowed;
+}
+
+sub _assert_inventory_honors_source_group_filter {
+    my ( $config, $inventory ) = @_;
+    my $allowed = _source_group_filter_lookup($config);
+    return unless %{$allowed};
+
+    for my $bucket ( @{ $inventory->{inventory} || [] } ) {
+        next unless ref($bucket) eq "HASH";
+        next if ref( $bucket->{project_entry} ) eq "HASH";
+        my $source_group_path = _required_relative_namespace_path(
+            $bucket->{group_path},
+            "discovered source group path",
+        );
+        exists $allowed->{$source_group_path}
+          or die "discovery returned source group outside groups.jsonl allowlist: $source_group_path\n";
+        my $exclude_reason = _source_group_exclusion_reason( $config, $source_group_path );
+        defined $exclude_reason
+          and die "discovery returned source group excluded by config: $source_group_path\n";
+    }
+}
+
+sub _source_group_filter_summary {
+    my ( $config, $inventory, $plan, $target_namespace_count ) = @_;
+    my @configured_source_groups = @{ _configured_source_group_paths($config) };
+    my %inventory_source_groups;
+    my %planned_source_groups;
+    my %planned_targets_by_source_group;
+
+    for my $bucket ( @{ $inventory->{inventory} || [] } ) {
+        next unless ref($bucket) eq "HASH";
+        next if ref( $bucket->{project_entry} ) eq "HASH";
+        my $path = $bucket->{group_path};
+        next unless defined $path && !ref($path) && length $path;
+        $inventory_source_groups{$path}++;
+    }
+    for my $entry ( @{$plan || []} ) {
+        next unless ref($entry) eq "HASH";
+        my $path = $entry->{source_group_path};
+        next unless defined $path && !ref($path) && length $path;
+        $planned_source_groups{$path} = 1;
+        $planned_targets_by_source_group{$path}++;
+    }
+
+    my @top_source_groups = sort {
+        $planned_targets_by_source_group{$b} <=> $planned_targets_by_source_group{$a}
+          || $a cmp $b
+    } keys %planned_targets_by_source_group;
+    splice @top_source_groups, 10 if @top_source_groups > 10;
+
+    my $mode =
+        @configured_source_groups     ? "groups.jsonl"
+      : @{ $config->{namespaces} || [] } ? "namespace"
+      :                                  "projects-only";
+
+    return {
+        configured_source_groups => scalar @configured_source_groups,
+        discovered_source_groups => scalar keys %inventory_source_groups,
+        excluded_source_groups => scalar( grep { ref($_) eq "HASH" } @{ $inventory->{excluded_source_groups} || [] } ),
+        missing_source_groups => scalar( grep { ref($_) eq "HASH" } @{ $inventory->{missing_source_groups} || [] } ),
+        mode => $mode,
+        planned_source_groups => scalar keys %planned_source_groups,
+        target_project_namespaces => $target_namespace_count,
+        top_source_groups_by_targets => [
+            map {
+                {
+                    planned_targets => $planned_targets_by_source_group{$_},
+                    source_group_path => $_,
+                }
+            } @top_source_groups
+        ],
     };
 }
 
@@ -1954,16 +2049,17 @@ sub _render_plan_summary {
     my ($plan) = @_;
     my $text = join(
         "",
-        "## Group mirror plan\n\n",
-        "- generated at: $plan->{generated_at}\n",
-        "- total targets: $plan->{total_targets}\n",
-        "- total target groups: $plan->{total_groups}\n",
-        "- batch size: $plan->{batch_size}\n",
-        "- total batches: $plan->{total_batches}\n",
-        "- sync: $plan->{counts}->{sync}\n",
-        "- skip: $plan->{counts}->{skip}\n",
-        "- fail: $plan->{counts}->{fail}\n",
+        "## Group Mirror Plan\n\n",
+        "- generated_at: $plan->{generated_at}\n",
+        _render_source_group_filter_summary( $plan->{source_group_filter} ),
+        "- planned_targets: $plan->{total_targets}\n",
+        "- planned_actions: sync=", ( $plan->{counts}->{sync} || 0 ),
+        " skip=", ( $plan->{counts}->{skip} || 0 ),
+        " fail=", ( $plan->{counts}->{fail} || 0 ), "\n",
+        "- batches: total=", ( $plan->{total_batches} || 0 ),
+        " batch_size=", ( $plan->{batch_size} || 0 ), "\n",
     );
+    $text .= _render_top_source_groups_summary( $plan->{source_group_filter} );
     my @missing_source_groups =
       grep { ref($_) eq "HASH" } @{ $plan->{missing_source_groups} || [] };
     if (@missing_source_groups) {
@@ -1988,6 +2084,86 @@ sub _render_plan_summary {
             my $reason = $item->{reason} || "Excluded source group by config";
             $text .= "- `$label$path` from `$base_url` skipped by config; target path `$target_path` will not be mirrored this run. Reason: $reason\n";
         }
+    }
+    return $text;
+}
+
+sub _render_source_group_filter_summary {
+    my ($filter) = @_;
+    return q{} unless ref($filter) eq "HASH";
+    my $text = join(
+        "",
+        "- source_filter: ", ( $filter->{mode} || "unknown" ), "\n",
+        "- configured_source_groups: ", ( $filter->{configured_source_groups} || 0 ), "\n",
+        "- discovered_source_groups: ", ( $filter->{discovered_source_groups} || 0 ), "\n",
+        "- planned_source_groups: ", ( $filter->{planned_source_groups} || 0 ), "\n",
+        "- target_project_namespaces: ", ( $filter->{target_project_namespaces} || 0 ), "\n",
+        "- missing_source_groups: ", ( $filter->{missing_source_groups} || 0 ), "\n",
+        "- excluded_source_groups: ", ( $filter->{excluded_source_groups} || 0 ), "\n",
+    );
+    return $text;
+}
+
+sub _render_top_source_groups_summary {
+    my ($filter) = @_;
+    return q{} unless ref($filter) eq "HASH";
+    my @top_source_groups =
+      grep { ref($_) eq "HASH" } @{ $filter->{top_source_groups_by_targets} || [] };
+    return q{} unless @top_source_groups;
+    my $text = "\n### Largest Source Groups By Planned Targets\n\n";
+    for my $item (@top_source_groups) {
+        my $path = $item->{source_group_path} || "<unknown>";
+        my $count = $item->{planned_targets} || 0;
+        $text .= "- `$path`: $count\n";
+    }
+    return $text;
+}
+
+sub _render_report_summary {
+    my ($report) = @_;
+    my $counts = $report->{result_counts} || {};
+    my @input_failures = grep { ref($_) eq "HASH" } @{ $report->{input_failures} || [] };
+    my @failed = grep { ( $_->{status} || "" ) eq "failed" } @{ $report->{results} || [] };
+    my $skip_breakdown = _summary_skip_breakdown( $report->{results} || [] );
+    my @other_skipped = @{ $skip_breakdown->{other_skipped} || [] };
+
+    my $text = join(
+        "",
+        "## Group Mirror Overview\n\n",
+        "- generated_at: $report->{generated_at}\n",
+        _render_source_group_filter_summary( $report->{source_group_filter} ),
+        "- planned_targets: ", ( $report->{plan_total_targets} || 0 ), "\n",
+        "- results: mirrored=", ( $counts->{mirrored} || 0 ),
+        " created_empty=", ( $counts->{created_empty} || 0 ),
+        " updated_empty=", ( $counts->{updated_empty} || 0 ), "\n",
+        "- skipped: total=", ( $counts->{skipped} || 0 ),
+        " archived=", ( $skip_breakdown->{archived_skipped} || 0 ),
+        " refs_matched=", ( $skip_breakdown->{refs_matched_skipped} || 0 ),
+        " other=", scalar @other_skipped, "\n",
+        "- failed: ", ( $counts->{failed} || 0 ),
+        " result_file_errors=", scalar @input_failures, "\n\n",
+    );
+    $text .= _render_top_source_groups_summary( $report->{source_group_filter} );
+    if (@input_failures) {
+        $text .= "### Result File Errors\n\n";
+        for my $item (@input_failures) {
+            $text .= _render_summary_item( $item, "error" );
+        }
+        $text .= "\n";
+    }
+    if (@other_skipped) {
+        $text .= "### Other Skipped\n\n";
+        for my $item (@other_skipped) {
+            $text .= _render_summary_item( $item, "reason" );
+        }
+        $text .= "\n";
+    }
+    if (@failed) {
+        $text .= "### Failed\n\n";
+        for my $item (@failed) {
+            $text .= _render_summary_item( $item, "error" );
+        }
+        $text .= "\n";
     }
     return $text;
 }
@@ -2040,52 +2216,6 @@ sub _render_summary_item {
         $detail, "\n",
         "```\n",
     );
-}
-
-sub _render_report_summary {
-    my ($report) = @_;
-    my $counts = $report->{result_counts} || {};
-    my @input_failures = grep { ref($_) eq "HASH" } @{ $report->{input_failures} || [] };
-    my @failed = grep { ( $_->{status} || "" ) eq "failed" } @{ $report->{results} || [] };
-    my $skip_breakdown = _summary_skip_breakdown( $report->{results} || [] );
-    my @other_skipped = @{ $skip_breakdown->{other_skipped} || [] };
-
-    my $text = join(
-        "",
-        "## Group Mirror Overview\n\n",
-        "- generated at: $report->{generated_at}\n",
-        "- mirrored: ", ( $counts->{mirrored} || 0 ), "\n",
-        "- created empty: ", ( $counts->{created_empty} || 0 ), "\n",
-        "- updated empty: ", ( $counts->{updated_empty} || 0 ), "\n",
-        "- skipped_total: ", ( $counts->{skipped} || 0 ), "\n",
-        "- archived_skipped: ", ( $skip_breakdown->{archived_skipped} || 0 ), "\n",
-        "- refs_matched_skipped: ", ( $skip_breakdown->{refs_matched_skipped} || 0 ), "\n",
-        "- other_skipped: ", scalar @other_skipped, "\n",
-        "- failed: ", ( $counts->{failed} || 0 ), "\n",
-        "- result_file_errors: ", scalar @input_failures, "\n\n",
-    );
-    if (@input_failures) {
-        $text .= "### Result File Errors\n\n";
-        for my $item (@input_failures) {
-            $text .= _render_summary_item( $item, "error" );
-        }
-        $text .= "\n";
-    }
-    if (@other_skipped) {
-        $text .= "### Other Skipped\n\n";
-        for my $item (@other_skipped) {
-            $text .= _render_summary_item( $item, "reason" );
-        }
-        $text .= "\n";
-    }
-    if (@failed) {
-        $text .= "### Failed\n\n";
-        for my $item (@failed) {
-            $text .= _render_summary_item( $item, "error" );
-        }
-        $text .= "\n";
-    }
-    return $text;
 }
 
 sub _normalize_defaults_payload {

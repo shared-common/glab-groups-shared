@@ -1283,6 +1283,173 @@ JSONL
 }
 
 {
+    my $config = {
+        defaults => { additional_branches => [], additional_tags => [] },
+        namespaces => [
+            {
+                name => "kde-root",
+                source_group_paths => ["plasma"],
+                source_group_url => "https://invent.kde.org",
+                target_owner_path => "glab-forks",
+                target_namespace_path => "kde",
+            },
+        ],
+        source_group_exclusions => {},
+    };
+    my $inventory = {
+        discovered_at => "2026-06-14T00:00:00Z",
+        inventory => [
+            {
+                base_url => "https://invent.kde.org",
+                group_id => 1,
+                group_path => "frameworks",
+                namespace => {
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "kde/frameworks",
+                },
+                projects => [],
+            },
+        ],
+    };
+
+    my $error = eval { GlabGroups::_build_plan( $config, $inventory, 10 ); 1 } ? undef : $@;
+    like(
+        $error,
+        qr/discovery returned source group outside groups\.jsonl allowlist: frameworks/,
+        "planning rejects discovery shards outside the configured groups.jsonl allowlist",
+    );
+}
+
+{
+    my $config = {
+        defaults => { additional_branches => [], additional_tags => [] },
+        namespaces => [
+            {
+                name => "kde-root",
+                source_group_paths => ["plasma"],
+                source_group_url => "https://invent.kde.org",
+                target_owner_path => "glab-forks",
+                target_namespace_path => "kde",
+            },
+        ],
+        source_group_exclusions => {
+            plasma => "Skip plasma by config",
+        },
+    };
+    my $inventory = {
+        discovered_at => "2026-06-14T00:00:00Z",
+        inventory => [
+            {
+                base_url => "https://invent.kde.org",
+                group_id => 2,
+                group_path => "plasma",
+                namespace => {
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "kde/plasma",
+                },
+                projects => [],
+            },
+        ],
+    };
+
+    my $error = eval { GlabGroups::_build_plan( $config, $inventory, 10 ); 1 } ? undef : $@;
+    like(
+        $error,
+        qr/discovery returned source group excluded by config: plasma/,
+        "planning rejects discovery shards for source groups excluded by config",
+    );
+}
+
+{
+    my $config = {
+        defaults => { additional_branches => [], additional_tags => [] },
+        namespaces => [
+            {
+                name => "kde-root",
+                source_group_paths => [ "frameworks", "plasma" ],
+                source_group_url => "https://invent.kde.org",
+                target_owner_path => "glab-forks",
+                target_namespace_path => "kde",
+            },
+        ],
+        source_group_exclusions => {},
+    };
+    my $inventory = {
+        discovered_at => "2026-06-14T00:00:00Z",
+        excluded_source_groups => [],
+        inventory => [
+            {
+                base_url => "https://invent.kde.org",
+                group_id => 1,
+                group_path => "frameworks",
+                namespace => {
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "kde/frameworks",
+                },
+                projects => [
+                    {
+                        archived => JSON::PP::false,
+                        default_branch => "master",
+                        empty_repo => JSON::PP::false,
+                        http_url_to_repo => "https://invent.kde.org/frameworks/kconfig.git",
+                        id => 101,
+                        path_with_namespace => "frameworks/kconfig",
+                    },
+                ],
+            },
+            {
+                base_url => "https://invent.kde.org",
+                group_id => 2,
+                group_path => "plasma",
+                namespace => {
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "kde/plasma",
+                },
+                projects => [
+                    {
+                        archived => JSON::PP::false,
+                        default_branch => "master",
+                        empty_repo => JSON::PP::false,
+                        http_url_to_repo => "https://invent.kde.org/plasma/kwin.git",
+                        id => 201,
+                        path_with_namespace => "plasma/kwin",
+                    },
+                    {
+                        archived => JSON::PP::false,
+                        default_branch => "master",
+                        empty_repo => JSON::PP::false,
+                        http_url_to_repo => "https://invent.kde.org/plasma/mobile/shell.git",
+                        id => 202,
+                        path_with_namespace => "plasma/mobile/shell",
+                    },
+                ],
+            },
+        ],
+        missing_source_groups => [],
+    };
+
+    my $plan = GlabGroups::_build_plan( $config, $inventory, 10 );
+    is( $plan->{source_group_filter}->{mode}, "groups.jsonl", "plan records the groups.jsonl source filter mode" );
+    is( $plan->{source_group_filter}->{configured_source_groups}, 2, "plan records configured top-level source group count" );
+    is( $plan->{source_group_filter}->{discovered_source_groups}, 2, "plan records discovered top-level source group count" );
+    is( $plan->{source_group_filter}->{planned_source_groups}, 2, "plan records source groups with planned targets" );
+    is( $plan->{source_group_filter}->{target_project_namespaces}, 3, "plan separates nested target project namespaces from configured source groups" );
+    is_deeply(
+        $plan->{source_group_filter}->{top_source_groups_by_targets},
+        [
+            { source_group_path => "plasma", planned_targets => 2 },
+            { source_group_path => "frameworks", planned_targets => 1 },
+        ],
+        "plan summarizes largest source groups by planned target count",
+    );
+    my $summary = GlabGroups::_render_plan_summary($plan);
+    like( $summary, qr/configured_source_groups: 2/, "plan summary includes configured source group count" );
+    like( $summary, qr/target_project_namespaces: 3/, "plan summary uses target project namespace terminology" );
+    like( $summary, qr/Largest Source Groups By Planned Targets/, "plan summary includes compressed largest source group context" );
+    unlike( $summary, qr/total_target_groups/, "plan summary avoids ambiguous target group wording" );
+}
+
+{
     no warnings 'redefine';
     my @warnings;
 
@@ -2744,9 +2911,11 @@ YAML
     is( $report->{result_counts}->{mirrored}, 1, "merged report counts mirrored rows" );
     is( $report->{result_counts}->{skipped}, 3, "merged report counts skipped rows" );
     my $summary = do { open( my $fh, "<:encoding(UTF-8)", $summary_path ) or die $!; local $/; <$fh> };
-    like( $summary, qr/archived_skipped: 1/, "report summary collapses archived-source skips into one counter" );
-    like( $summary, qr/refs_matched_skipped: 1/, "report summary collapses ref-matched skips into one counter" );
-    like( $summary, qr/other_skipped: 1/, "report summary counts remaining skipped repositories separately" );
+    like(
+        $summary,
+        qr/skipped: total=3 archived=1 refs_matched=1 other=1/,
+        "report summary compresses skipped counters into one line",
+    );
     unlike( $summary, qr/\Qowner\/archived\/demo\E/, "report summary omits per-repo archived skip lines after collapsing them" );
     unlike( $summary, qr/\Qowner\/matched\/demo\E/, "report summary omits per-repo ref-match skip lines after collapsing them" );
     like( $summary, qr/\Qowner\/kali\/demo\E.*Repository above permitted size limit\./s, "report summary still shows full detail for other skipped repositories" );

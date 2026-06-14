@@ -59,6 +59,8 @@ The plan includes:
 
 - source project id and full path
 - target full path and target namespace path
+- source-group filter metadata, including configured `groups.jsonl` top-level
+  source group counts and the number of generated target project namespaces
 - source inventory fields required for mirroring and verification
 - target-aware batches built from the merged discovery output and redistributed
   to keep the final mirror shards close in size

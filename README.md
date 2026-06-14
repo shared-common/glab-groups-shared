@@ -41,11 +41,11 @@ the missing group as a warning, skips that target path for the current run, and
 continues planning the remaining mirror work.
 
 Mirroring runs through deterministic discovery and mirror shards with the
-checked-in `max-parallel: 5` cap. Discovery fans out across up to 250 matrix
-jobs, the final plan is built from the merged discovery shards, and mirror
-batches are rebalanced so the final plan stays within 250 jobs with a much more
-even per-shard target count while still pushing the largest source groups later
-in the run.
+checked-in per-config `max_parallel` cap. Discovery fans out across up to 250
+matrix jobs, the final plan is built from the merged discovery shards, and
+mirror batches are rebalanced so the final plan stays within 250 jobs with a
+much more even per-shard target count while still pushing the largest source
+groups later in the run.
 
 ## Supported source roots
 
@@ -187,6 +187,11 @@ at the same time. Non-empty configs get at least 10 discovery matrix jobs, and
 GitLab instance-root configs with `groups.jsonl` split each configured source
 group path into its own discovery unit so large wrappers such as Debian do not
 serialize all discovery through a single job.
+
+Plan and workflow summaries distinguish `configured_source_groups` from
+`target_project_namespaces`. The first is the checked-in `groups.jsonl`
+top-level allowlist size; the second is the number of target namespaces that
+will contain planned projects after subgroup project paths are expanded.
 
 ## Validation
 

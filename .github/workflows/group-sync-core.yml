@@ -506,26 +506,41 @@ jobs:
 
           plan = json.loads(Path("plan.json").read_text(encoding="utf-8"))
           counts = plan.get("counts") or {}
+          source_filter = plan.get("source_group_filter") or {}
           missing_source_groups = [
               item for item in (plan.get("missing_source_groups") or []) if isinstance(item, dict)
           ]
           excluded_source_groups = [
               item for item in (plan.get("excluded_source_groups") or []) if isinstance(item, dict)
           ]
+          top_source_groups = [
+              item
+              for item in (source_filter.get("top_source_groups_by_targets") or [])
+              if isinstance(item, dict)
+          ]
 
           parts: list[str] = []
           append_line(parts, "## Plan Overview")
           append_line(parts, "")
           append_line(parts, f"- generated_at: {plan.get('generated_at', '')}")
-          append_line(parts, f"- total_targets: {plan.get('total_targets', 0)}")
-          append_line(parts, f"- total_target_groups: {plan.get('total_groups', 0)}")
-          append_line(parts, f"- batch_size: {plan.get('batch_size', 0)}")
-          append_line(parts, f"- total_batches: {plan.get('total_batches', 0)}")
-          append_line(parts, f"- sync_planned: {counts.get('sync', 0)}")
-          append_line(parts, f"- skip_planned: {counts.get('skip', 0)}")
-          append_line(parts, f"- fail_planned: {counts.get('fail', 0)}")
-          append_line(parts, f"- missing_source_groups: {len(missing_source_groups)}")
-          append_line(parts, f"- excluded_source_groups: {len(excluded_source_groups)}")
+          append_line(parts, f"- source_filter: {source_filter.get('mode', 'unknown')}")
+          append_line(parts, f"- configured_source_groups: {source_filter.get('configured_source_groups', 0)}")
+          append_line(parts, f"- discovered_source_groups: {source_filter.get('discovered_source_groups', 0)}")
+          append_line(parts, f"- planned_source_groups: {source_filter.get('planned_source_groups', 0)}")
+          append_line(parts, f"- target_project_namespaces: {source_filter.get('target_project_namespaces', plan.get('total_groups', 0))}")
+          append_line(parts, f"- missing_source_groups: {source_filter.get('missing_source_groups', len(missing_source_groups))}")
+          append_line(parts, f"- excluded_source_groups: {source_filter.get('excluded_source_groups', len(excluded_source_groups))}")
+          append_line(parts, f"- planned_targets: {plan.get('total_targets', 0)}")
+          append_line(parts, f"- planned_actions: sync={counts.get('sync', 0)} skip={counts.get('skip', 0)} fail={counts.get('fail', 0)}")
+          append_line(parts, f"- batches: total={plan.get('total_batches', 0)} batch_size={plan.get('batch_size', 0)}")
+          if top_source_groups:
+              append_line(parts, "")
+              append_line(parts, "### Largest Source Groups By Planned Targets")
+              for item in top_source_groups[:10]:
+                  append_line(
+                      parts,
+                      f"- `{item.get('source_group_path', '<unknown>')}`: {item.get('planned_targets', 0)}",
+                  )
 
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as handle:
               handle.write("".join(parts))
@@ -683,15 +698,10 @@ jobs:
           parts: list[str] = []
           append_line(parts, f"## Batch Shard {shard_index} Overview")
           append_line(parts, "")
-          append_line(parts, f"- processed_batches: {payload.get('processed_batches', 0)}")
+          append_line(parts, f"- batches: processed={payload.get('processed_batches', 0)} total={payload.get('total_batches', 0)}")
           append_line(parts, f"- result_rows: {len(results)}")
-          append_line(parts, f"- mirrored: {counts.get('mirrored', 0)}")
-          append_line(parts, f"- created_empty: {counts.get('created_empty', 0)}")
-          append_line(parts, f"- updated_empty: {counts.get('updated_empty', 0)}")
-          append_line(parts, f"- skipped_total: {counts.get('skipped', 0)}")
-          append_line(parts, f"- archived_skipped: {archived_skipped}")
-          append_line(parts, f"- refs_matched_skipped: {refs_matched_skipped}")
-          append_line(parts, f"- other_skipped: {len(other_skipped)}")
+          append_line(parts, f"- results: mirrored={counts.get('mirrored', 0)} created_empty={counts.get('created_empty', 0)} updated_empty={counts.get('updated_empty', 0)}")
+          append_line(parts, f"- skipped: total={counts.get('skipped', 0)} archived={archived_skipped} refs_matched={refs_matched_skipped} other={len(other_skipped)}")
           append_line(parts, f"- failed: {counts.get('failed', 0)}")
 
           append_repo_details(parts, "Other Skipped", other_skipped, "reason")
@@ -875,6 +885,7 @@ jobs:
           report = json.loads(Path("report.json").read_text(encoding="utf-8"))
 
           plan_counts = plan.get("counts") or {}
+          source_filter = plan.get("source_group_filter") or {}
           missing_source_groups = [
               item for item in (plan.get("missing_source_groups") or []) if isinstance(item, dict)
           ]
@@ -887,30 +898,38 @@ jobs:
           failed = [item for item in results if isinstance(item, dict) and (item.get("status") or "") == "failed"]
           input_failures = [item for item in (report.get("input_failures") or []) if isinstance(item, dict)]
           archived_skipped, refs_matched_skipped, other_skipped = classify_skipped(skipped)
+          top_source_groups = [
+              item
+              for item in (source_filter.get("top_source_groups_by_targets") or [])
+              if isinstance(item, dict)
+          ]
 
           parts: list[str] = []
           append_line(parts, "## Workflow Overview")
           append_line(parts, "")
           append_line(parts, f"- plan_generated_at: {plan.get('generated_at', '')}")
           append_line(parts, f"- report_generated_at: {report.get('generated_at', '')}")
-          append_line(parts, f"- total_targets: {plan.get('total_targets', 0)}")
-          append_line(parts, f"- total_target_groups: {plan.get('total_groups', 0)}")
-          append_line(parts, f"- batch_size: {plan.get('batch_size', 0)}")
-          append_line(parts, f"- total_batches: {plan.get('total_batches', 0)}")
-          append_line(parts, f"- sync_planned: {plan_counts.get('sync', 0)}")
-          append_line(parts, f"- skip_planned: {plan_counts.get('skip', 0)}")
-          append_line(parts, f"- fail_planned: {plan_counts.get('fail', 0)}")
-          append_line(parts, f"- missing_source_groups: {len(missing_source_groups)}")
-          append_line(parts, f"- excluded_source_groups: {len(excluded_source_groups)}")
-          append_line(parts, f"- mirrored: {result_counts.get('mirrored', 0)}")
-          append_line(parts, f"- created_empty: {result_counts.get('created_empty', 0)}")
-          append_line(parts, f"- updated_empty: {result_counts.get('updated_empty', 0)}")
-          append_line(parts, f"- skipped_total: {result_counts.get('skipped', 0)}")
-          append_line(parts, f"- archived_skipped: {archived_skipped}")
-          append_line(parts, f"- refs_matched_skipped: {refs_matched_skipped}")
-          append_line(parts, f"- other_skipped: {len(other_skipped)}")
-          append_line(parts, f"- failed: {result_counts.get('failed', 0)}")
-          append_line(parts, f"- result_file_errors: {len(input_failures)}")
+          append_line(parts, f"- source_filter: {source_filter.get('mode', 'unknown')}")
+          append_line(parts, f"- configured_source_groups: {source_filter.get('configured_source_groups', 0)}")
+          append_line(parts, f"- discovered_source_groups: {source_filter.get('discovered_source_groups', 0)}")
+          append_line(parts, f"- planned_source_groups: {source_filter.get('planned_source_groups', 0)}")
+          append_line(parts, f"- target_project_namespaces: {source_filter.get('target_project_namespaces', plan.get('total_groups', 0))}")
+          append_line(parts, f"- missing_source_groups: {source_filter.get('missing_source_groups', len(missing_source_groups))}")
+          append_line(parts, f"- excluded_source_groups: {source_filter.get('excluded_source_groups', len(excluded_source_groups))}")
+          append_line(parts, f"- planned_targets: {plan.get('total_targets', 0)}")
+          append_line(parts, f"- planned_actions: sync={plan_counts.get('sync', 0)} skip={plan_counts.get('skip', 0)} fail={plan_counts.get('fail', 0)}")
+          append_line(parts, f"- batches: total={plan.get('total_batches', 0)} batch_size={plan.get('batch_size', 0)}")
+          append_line(parts, f"- results: mirrored={result_counts.get('mirrored', 0)} created_empty={result_counts.get('created_empty', 0)} updated_empty={result_counts.get('updated_empty', 0)}")
+          append_line(parts, f"- skipped: total={result_counts.get('skipped', 0)} archived={archived_skipped} refs_matched={refs_matched_skipped} other={len(other_skipped)}")
+          append_line(parts, f"- failed: {result_counts.get('failed', 0)} result_file_errors={len(input_failures)}")
+          if top_source_groups:
+              append_line(parts, "")
+              append_line(parts, "### Largest Source Groups By Planned Targets")
+              for item in top_source_groups[:10]:
+                  append_line(
+                      parts,
+                      f"- `{item.get('source_group_path', '<unknown>')}`: {item.get('planned_targets', 0)}",
+                  )
 
           if missing_source_groups:
               append_line(parts, "")
@@ -927,9 +946,9 @@ jobs:
                   )
               if len(missing_source_groups) > MAX_MISSING_SOURCE_GROUPS:
                   append_line(
-                          parts,
-                          f"- _... {len(missing_source_groups) - MAX_MISSING_SOURCE_GROUPS} additional entries omitted; see workflow artifacts for full JSON outputs._",
-                      )
+                      parts,
+                      f"- _... {len(missing_source_groups) - MAX_MISSING_SOURCE_GROUPS} additional entries omitted; see workflow artifacts for full JSON outputs._",
+                  )
 
           if excluded_source_groups:
               append_line(parts, "")
@@ -947,9 +966,9 @@ jobs:
                   )
               if len(excluded_source_groups) > MAX_MISSING_SOURCE_GROUPS:
                   append_line(
-                          parts,
-                          f"- _... {len(excluded_source_groups) - MAX_MISSING_SOURCE_GROUPS} additional entries omitted; see workflow artifacts for full JSON outputs._",
-                      )
+                      parts,
+                      f"- _... {len(excluded_source_groups) - MAX_MISSING_SOURCE_GROUPS} additional entries omitted; see workflow artifacts for full JSON outputs._",
+                  )
 
           append_items(parts, "Result File Errors", input_failures, "error")
           append_items(parts, "Other Skipped", other_skipped, "reason")
