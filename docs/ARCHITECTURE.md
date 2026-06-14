@@ -13,6 +13,11 @@ Target paths in config are stored relative to the target owner group. The
 runtime composes full paths from `GL_BASE_URL`, namespace `target_owner_path`,
 and the configured relative namespace path.
 
+When a configured or discovered target path segment would be invalid on GitLab,
+the runtime preserves the requested path for reporting and exclusions but
+derives a deterministic GitLab-safe target path for creation and push
+operations instead of skipping the repository outright.
+
 Explicit project configs are the exception: they provide a full
 `target_group_path`, and the runtime creates the destination as
 `<target_group_path>/<name>` without deriving any target path segments from the
@@ -79,7 +84,7 @@ The mirror stage:
   push
 - skips source repositories when the upstream API marks them as archived
 - does not mutate GitLab archive state as part of mirror execution
-- creates missing target projects and auto-created nested target subgroups with
+- creates missing target projects and any missing target namespace groups with
   `visibility=public`, but does not reconcile visibility on already-existing
   targets
 - discovers source inventory through GitLab group traversal, GitLab top-level
@@ -126,14 +131,16 @@ The mirror stage:
 - reconciles only the explicitly configured target branch protections
 - auto-protects target `pristine-tar` when a project opts into
   `mirror_pristine_tar: true`
-- requires the top-level target owner group and each immediate wrapper subgroup
-  to be pre-created, and only creates deeper nested subgroups automatically
+- resolves target namespace paths from the configured owner group downward,
+  reuses any already-existing matching groups, and creates missing groups or
+  subgroups automatically when the target token has permission
 - enforces a 9 GiB packed selected-ref storage budget that better matches GitLab
   repository storage behavior than an uncompressed object-size sum
 - attempts LFS migration for blobs larger than 100 MiB before falling back to
   per-repository skip
-- applies repo-local `locksverify` and `lfs.allowincompletepush` remediations
-  before retrying a Git LFS upload
+- applies repo-local `locksverify` and `lfs.allowincompletepush` remediations,
+  reruns `git lfs push --all`, and then retries the Git push when LFS uploads
+  fail because local objects are missing
 - retries retryable Git and GitLab operations with bounded backoff
 - skips redundant target verification reads after push
 

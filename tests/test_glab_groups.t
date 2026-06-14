@@ -268,6 +268,32 @@ YAML
     write_text_file(
         File::Spec->catfile( $dir, "projects.yml" ),
         <<'YAML'
+- name: .github
+  source_project_url: https://github.com/crowdsecurity/.github
+  target_group_path: glab-forks/crowdsecurity/.shadow
+YAML
+    );
+
+    my $config = load_config_dir($dir);
+    is( $config->{projects}->[0]->{name}, ".github", "raw config loading keeps odd explicit project names intact" );
+    is( $config->{projects}->[0]->{target_group_path}, "glab-forks/crowdsecurity/.shadow", "raw config loading keeps odd explicit target group paths intact" );
+}
+
+{
+    my $dir = tempdir( CLEANUP => 1 );
+    write_text_file(
+        File::Spec->catfile( $dir, "defaults.yml" ),
+        <<'YAML'
+kind: glab-groups/defaults
+version: 1
+defaults:
+  additional_branches: []
+  additional_tags: []
+YAML
+    );
+    write_text_file(
+        File::Spec->catfile( $dir, "projects.yml" ),
+        <<'YAML'
 - name: poweralertd
   source_project_url: https://git.sr.ht/~kennylevinsen/poweralertd
   target_group_path: glab-forks/labwc
@@ -1598,6 +1624,13 @@ HTML
     is( $parsed->{clone_url}, "https://git.sr.ht/~kennylevinsen/seatd", "SourceHut project URLs preserve the Git-over-HTTPS clone URL" );
     is( $parsed->{group_path}, "~kennylevinsen", "SourceHut project URLs preserve the tilde-prefixed owner path" );
     is( $parsed->{path_with_namespace}, "~kennylevinsen/seatd", "SourceHut project URLs preserve the owner and project path" );
+
+    $parsed = GlabGroups::_parse_source_project_url(
+        "https://github.com/crowdsecurity/.github",
+        ".github",
+    );
+    is( $parsed->{clone_url}, "https://github.com/crowdsecurity/.github.git", "GitHub direct project URLs accept leading-dot repository names" );
+    is( $parsed->{path_with_namespace}, "crowdsecurity/.github", "GitHub direct project URLs keep leading-dot repository paths intact" );
 }
 
 {
@@ -1983,6 +2016,49 @@ HTML
     is( $plan->{plan}->[0]->{target_relative_project_path}, "glab-forks/labwc/darkman", "explicit project planning keys exclusions by the resolved explicit target project path" );
     is_deeply( $plan->{plan}->[0]->{source_available_branches}, [ "main", "release" ], "explicit project planning carries discovered source branches into the plan" );
     is_deeply( $plan->{plan}->[0]->{source_available_tags}, [ "v1.0.0" ], "explicit project planning carries discovered source tags into the plan" );
+}
+
+{
+    my $plan = GlabGroups::_build_plan(
+        {
+            defaults => { additional_branches => [], additional_tags => [], force_lfs => JSON::PP::false },
+            exclusions => {},
+        },
+        {
+            inventory => [
+                {
+                    group_path => "crowdsecurity",
+                    project_entry => {
+                        name => ".github",
+                        target_group_path => "glab-forks/crowdsecurity/.shadow",
+                    },
+                    projects => [
+                        {
+                            archived => JSON::PP::false,
+                            available_branches => [ "main" ],
+                            available_tags => [],
+                            default_branch => "main",
+                            description => "",
+                            description_known => JSON::PP::false,
+                            empty_repo => JSON::PP::false,
+                            http_url_to_repo => "https://github.com/crowdsecurity/.github.git",
+                            lfs_enabled => JSON::PP::false,
+                            lfs_enabled_known => JSON::PP::false,
+                            path_with_namespace => "crowdsecurity/.github",
+                            ssh_url_to_repo => "https://github.com/crowdsecurity/.github.git",
+                            visibility => "public",
+                        },
+                    ],
+                },
+            ],
+        },
+        25,
+    );
+    is( $plan->{plan}->[0]->{requested_target_full_path}, "glab-forks/crowdsecurity/.shadow/.github", "explicit project planning preserves the requested unsanitized odd target path" );
+    is( $plan->{plan}->[0]->{target_full_path}, "glab-forks/crowdsecurity/x-2e736861646f77/x-2e676974687562", "explicit project planning rewrites odd namespace and repository path segments into GitLab-safe target paths" );
+    is( $plan->{plan}->[0]->{target_namespace_path}, "glab-forks/crowdsecurity/x-2e736861646f77", "explicit project planning rewrites odd target namespace paths into GitLab-safe namespace paths" );
+    ok( !defined $plan->{plan}->[0]->{skip_reason}, "explicit odd target paths stay syncable after safe-path rewriting" );
+    is( $plan->{plan}->[0]->{action}, "sync", "explicit odd target paths remain actionable sync rows" );
 }
 
 {
@@ -3084,7 +3160,7 @@ YAML
 
 {
     no warnings 'redefine';
-    my %cache = ( "owner/precreated" => 7 );
+    my %cache = ( owner => 6, "owner/precreated" => 7 );
 
     local *GlabGroups::_ensure_main_user_group_membership_owner = sub { return 1; };
     local *GlabGroups::_ensure_service_user_group_membership_owner = sub { return 1; };
@@ -3133,7 +3209,7 @@ YAML
 
 {
     no warnings 'redefine';
-    my %cache = ( "owner/precreated" => 7 );
+    my %cache = ( owner => 6, "owner/precreated" => 7 );
 
     local *GlabGroups::_ensure_main_user_group_membership_owner = sub { return 1; };
     local *GlabGroups::_ensure_service_user_group_membership_owner = sub { return 1; };
@@ -3237,7 +3313,7 @@ YAML
 
 {
     no warnings 'redefine';
-    my %cache = ( "owner/precreated" => 7 );
+    my %cache = ( owner => 6, "owner/precreated" => 7 );
 
     local *GlabGroups::_ensure_main_user_group_membership_owner = sub { return 1; };
     local *GlabGroups::_ensure_service_user_group_membership_owner = sub { return 1; };
@@ -3273,7 +3349,7 @@ YAML
 
 {
     no warnings 'redefine';
-    my %cache = ( "glab-forks/crowdsecurity" => 7 );
+    my %cache = ( "glab-forks" => 6, "glab-forks/crowdsecurity" => 7 );
 
     local *GlabGroups::_ensure_main_user_group_membership_owner = sub { return 1; };
     local *GlabGroups::_ensure_service_user_group_membership_owner = sub { return 1; };
@@ -3409,24 +3485,60 @@ YAML
 
 {
     no warnings 'redefine';
-    my %cache;
+    my %cache = ( owner => 7 );
+    my @payloads;
     local *GlabGroups::_get_group = sub {
         my ( $client, $group_path ) = @_;
         return undef if $group_path eq "owner/team";
         die "unexpected group lookup: $group_path";
     };
 
-    my $ok = eval {
-        GlabGroups::_ensure_group_path( {}, "owner/team", \%cache );
-        1;
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        if ( $method eq "POST" && $path eq "/groups" ) {
+            push @payloads, { %{$payload} };
+            return { id => 11 };
+        }
+        die "unexpected gitlab request: $method $path";
     };
-    ok( !$ok, "missing pre-created immediate target group fails closed" );
-    like( $@, qr/required target group owner\/team must already exist before mirror runs/, "missing immediate target group keeps the pre-create contract explicit" );
+
+    my $group_id = GlabGroups::_ensure_group_path( {}, "owner/team", \%cache );
+    is( $group_id, 11, "creates a missing immediate target group beneath an existing top-level owner group" );
+    is( $payloads[0]->{parent_id}, 7, "missing immediate target groups are created beneath the cached top-level owner id" );
 }
 
 {
     no warnings 'redefine';
-    my %cache = ( "owner/team" => 7 );
+    my %cache;
+    my @payloads;
+
+    local *GlabGroups::_get_group = sub {
+        my ( $client, $group_path ) = @_;
+        return undef if $group_path eq "glab-forks";
+        return undef if $group_path eq "glab-forks/nvidia";
+        die "unexpected group lookup: $group_path";
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        if ( $method eq "POST" && $path eq "/groups" ) {
+            push @payloads, { %{$payload} };
+            return { id => @payloads == 1 ? 41 : 42 };
+        }
+        die "unexpected gitlab request: $method $path";
+    };
+
+    my $group_id = GlabGroups::_ensure_group_path( {}, "glab-forks/nvidia", \%cache );
+    is( $group_id, 42, "creates a missing target namespace path from the top level down" );
+    ok( !exists $payloads[0]->{parent_id}, "top-level target group creation omits parent_id" );
+    is( $payloads[0]->{path}, "glab-forks", "top-level target group creation uses the first namespace segment as the GitLab path" );
+    is( $payloads[1]->{parent_id}, 41, "nested target group creation chains from the created top-level group id" );
+    is( $cache{"glab-forks/nvidia"}, 42, "caches the fully created target namespace path" );
+}
+
+{
+    no warnings 'redefine';
+    my %cache = ( owner => 6, "owner/team" => 7 );
     my @payloads;
 
     local *GlabGroups::_get_group = sub {
@@ -4684,6 +4796,51 @@ OUT
 {
     no warnings 'redefine';
     my @commands;
+    my $push_attempts = 0;
+
+    local *GlabGroups::_run_command = sub {
+        my ( $cmd, $opt ) = @_;
+        push @commands, [ @{$cmd} ];
+        if ( $cmd->[3] eq "lfs" && $cmd->[4] eq "push" ) {
+            $push_attempts++;
+            return {
+                output => <<'OUT',
+Git LFS upload missing objects:
+  (missing) compileiq/core/executable/linux/x86_64/bin/_core (66ae0843983570cf4984580bf69f329fd889b24337e59ea9994d6d190ee8bde9)
+remote: GitLab: LFS objects are missing. Ensure LFS is properly set up or try a manual "git lfs push --all".
+OUT
+                status => 1,
+            } if $push_attempts == 1;
+            return { output => q{}, status => 0 };
+        }
+        return { output => q{}, status => 0 };
+    };
+
+    GlabGroups::_run_git_lfs_push_all(
+        "/tmp/repo",
+        {
+            git_timeout_seconds => 60,
+            retry_attempts => 1,
+            retry_backoff_seconds => 1,
+        },
+    );
+
+    ok(
+        grep(
+            {
+                $_->[3] eq "config"
+                  && $_->[5] eq "lfs.allowincompletepush"
+                  && $_->[6] eq "true"
+            } @commands
+        ),
+        "LFS push-all enables allowincompletepush when GitLab reports missing LFS objects without the older local-object wording",
+    );
+    is( $push_attempts, 2, "LFS push-all retries after the missing-object remediation path" );
+}
+
+{
+    no warnings 'redefine';
+    my @commands;
 
     local *GlabGroups::_run_command = sub {
         my ( $cmd, $opt ) = @_;
@@ -4740,6 +4897,119 @@ OUT
 
     is_deeply( \@callbacks, ["sync_lfs"], "push retries call the shared LFS remediation hook before retrying the Git push" );
     is( $push_attempts, 2, "push retries the target refspec after the LFS remediation hook runs" );
+}
+
+{
+    no warnings 'redefine';
+    my $initial_lfs_syncs = 0;
+    my $lfs_repushes = 0;
+    my $lfs_enable_calls = 0;
+
+    local *GlabGroups::_resolve_source_auth_for_entry = sub {
+        return {
+            token => undef,
+            username => undef,
+        };
+    };
+    local *GlabGroups::_discover_remote_refs_from_urls = sub {
+        my ( $urls, $policy, $chosen_source_url_ref ) = @_;
+        $$chosen_source_url_ref = $urls->[0] if ref($chosen_source_url_ref) eq "SCALAR";
+        return {
+            branches => { main => "deadbeef" },
+            default_branch => "main",
+            tags => {},
+        };
+    };
+    local *GlabGroups::resolve_selected_refs = sub {
+        return {
+            branches => ["main"],
+            tags => [],
+        };
+    };
+    local *GlabGroups::_discover_target_remote_refs_if_exists = sub {
+        return undef;
+    };
+    local *GlabGroups::_ensure_target_project = sub {
+        return {
+            created => JSON::PP::false,
+            project_id => 99,
+            requested_target_full_path => "glab-forks/openai/demo",
+            resolved_target_full_path => "glab-forks/openai/demo",
+            resolved_target_namespace_path => "glab-forks/openai",
+            updated => JSON::PP::false,
+        };
+    };
+    local *GlabGroups::_run_command = sub {
+        return { output => q{}, status => 0 };
+    };
+    local *GlabGroups::_fetch_selected_refs = sub { return 1; };
+    local *GlabGroups::_checkout_selected_ref = sub { return 1; };
+    local *GlabGroups::analyze_selected_refs = sub {
+        return {
+            oversized_blobs => [],
+            total_bytes => 0,
+        };
+    };
+    local *GlabGroups::_repo_has_lfs_files = sub {
+        return 1;
+    };
+    local *GlabGroups::_ensure_target_lfs_enabled = sub {
+        $lfs_enable_calls++;
+        return 1;
+    };
+    local *GlabGroups::_sync_lfs_objects = sub {
+        $initial_lfs_syncs++;
+        return 1;
+    };
+    local *GlabGroups::_run_git_lfs_push_all = sub {
+        $lfs_repushes++;
+        return 1;
+    };
+    local *GlabGroups::_push_selected_refs = sub {
+        my ( $repo_dir, $selected, $policy, $default_branch, $target_sync_branch, $opt ) = @_;
+        $opt->{on_missing_lfs}->();
+        return 1;
+    };
+    local *GlabGroups::_prepared_requires_finalize = sub {
+        return 0;
+    };
+
+    my $result = GlabGroups::_mirror_entry(
+        {
+            base_url => "https://gitlab.example.invalid",
+            sync_branch => "managed/sync",
+            token => "target-token",
+            username => "0auth",
+        },
+        {},
+        {
+            action => "sync",
+            policy => {
+                additional_branches => [],
+                additional_tags => [],
+                allow_blob_rewrite => JSON::PP::true,
+                force_lfs => JSON::PP::false,
+                git_timeout_seconds => 60,
+                max_blob_bytes => 100 * 1024 * 1024,
+                retry_attempts => 1,
+                retry_backoff_seconds => 1,
+                size_limit_bytes => 9 * 1024 * 1024 * 1024,
+            },
+            source_default_branch => "main",
+            source_empty_repo => JSON::PP::false,
+            source_full_path => "openai/demo",
+            source_http_url => "https://github.com/openai/demo.git",
+            source_lfs_enabled => JSON::PP::false,
+            target_full_path => "glab-forks/openai/demo",
+            target_namespace_path => "glab-forks/openai",
+        },
+        undef,
+    );
+
+    is( $result->{status}, "mirrored", "mirror entry still succeeds after rerunning LFS remediation for a push-time missing-object failure" );
+    is( $initial_lfs_syncs, 1, "mirror entry performs the initial LFS sync exactly once" );
+    is( $lfs_repushes, 1, "mirror entry reruns git lfs push --all when the later Git push reports missing LFS objects" );
+    is( $lfs_enable_calls, 2, "mirror entry re-checks target LFS enablement before the remediation push-all retry" );
 }
 
 {

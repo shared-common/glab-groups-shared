@@ -1807,15 +1807,26 @@ sub _mirror_entry {
     }
 
     my $needs_lfs = $entry->{policy}->{force_lfs} || $entry->{source_lfs_enabled} || _repo_has_lfs_files($repo_dir);
-    my $sync_lfs_objects = sub {
-        return if $prepared->{lfs_synced};
+    my $ensure_lfs_ready = sub {
         if ( !$prepared->{project_id} ) {
             my $ensured = _ensure_target_project( $target_client, $entry );
             %{$prepared} = ( %{$prepared}, %{$ensured} );
         }
         _ensure_target_lfs_enabled( $target_client, $prepared->{project_id} );
+        return 1;
+    };
+    my $sync_lfs_objects = sub {
+        return if $prepared->{lfs_synced};
+        $ensure_lfs_ready->();
         _sync_lfs_objects( $repo_dir, $refs_to_sync, $entry->{policy} );
         $prepared->{lfs_synced} = JSON::PP::true;
+        return 1;
+    };
+    my $resync_lfs_objects = sub {
+        $ensure_lfs_ready->();
+        _run_git_lfs_push_all( $repo_dir, $entry->{policy} );
+        $prepared->{lfs_synced} = JSON::PP::true;
+        return 1;
     };
     if ($needs_lfs) {
         $sync_lfs_objects->();
@@ -1829,7 +1840,7 @@ sub _mirror_entry {
             $default_branch,
             $target_client->{sync_branch},
             {
-                on_missing_lfs => $sync_lfs_objects,
+                on_missing_lfs => $resync_lfs_objects,
             },
         );
         1;
@@ -2245,6 +2256,13 @@ sub _load_target_client {
 
 sub _resolve_target_root_group_path {
     my ($namespace) = @_;
+    return _gitlab_safe_group_path(
+        _resolve_requested_target_root_group_path($namespace)
+    );
+}
+
+sub _resolve_requested_target_root_group_path {
+    my ($namespace) = @_;
     return _required_relative_namespace_path(
         $namespace->{target_owner_path},
         "target_owner_path",
@@ -2334,35 +2352,13 @@ sub _managed_group_settings_payload {
 sub _ensure_group_path {
     my ( $client, $group_path, $cache ) = @_;
     return $cache->{$group_path} if exists $cache->{$group_path};
-    my $group = _get_group( $client, $group_path );
-    if ( ref($group) eq "HASH" ) {
-        $cache->{$group_path} = $group->{id};
-        return $group->{id};
-    }
-
-    my @parts = split m{/}, $group_path;
+    my @parts = split m{/}, _required_relative_namespace_path( $group_path, "group_path" ), -1;
     @parts or die "group_path must contain at least one segment\n";
 
-    my $precreated_depth = @parts >= 2 ? 2 : 1;
-    my $precreated_path = join "/", @parts[ 0 .. $precreated_depth - 1 ];
-    my $parent_id = $cache->{$precreated_path};
-    if ( !defined $parent_id ) {
-        my $precreated_group = _get_group( $client, $precreated_path );
-        if ( ref($precreated_group) ne "HASH" ) {
-            die sprintf(
-                "required target group %s must already exist before mirror runs; only nested subgroups below it are created automatically\n",
-                $precreated_path,
-            );
-        }
-        $parent_id = $precreated_group->{id};
-        $cache->{$precreated_path} = $parent_id;
-    }
-    return $parent_id if $group_path eq $precreated_path;
-
-    my $current = $precreated_path;
-    for my $index ( $precreated_depth .. $#parts ) {
-        my $part = $parts[$index];
-        $current = "$current/$part";
+    my $current = q{};
+    my $parent_id;
+    for my $part (@parts) {
+        $current = length $current ? "$current/$part" : $part;
         if ( exists $cache->{$current} ) {
             $parent_id = $cache->{$current};
             next;
@@ -2372,10 +2368,10 @@ sub _ensure_group_path {
             my %payload = (
                 name => $part,
                 path => $part,
-                parent_id => $parent_id,
                 visibility => "public",
                 _managed_group_settings_payload(),
             );
+            $payload{parent_id} = $parent_id if defined $parent_id;
             my $create_ok = eval {
                 $group = _gitlab_request( $client, "POST", "/groups", \%payload );
                 1;
@@ -2383,8 +2379,15 @@ sub _ensure_group_path {
             if ( !$create_ok ) {
                 my $create_error = $@ || "unknown group creation error\n";
                 if ( _is_gitlab_forbidden_error($create_error) ) {
+                    if ( defined $parent_id ) {
+                        die sprintf(
+                            "unable to create required target group %s: target token lacks permission to create this nested subgroup; pre-create it or grant subgroup creation rights: %s",
+                            $current,
+                            $create_error,
+                        );
+                    }
                     die sprintf(
-                        "unable to create required target group %s: target token lacks permission to create this nested subgroup; pre-create it or grant subgroup creation rights: %s",
+                        "unable to create required target group %s: target token lacks permission to create this top-level group; pre-create it or grant top-level group creation rights: %s",
                         $current,
                         $create_error,
                     );
@@ -4432,6 +4435,12 @@ sub _gitlab_safe_relative_project_path {
     return join "/", map { _gitlab_safe_path_segment($_) } @segments;
 }
 
+sub _gitlab_safe_group_path {
+    my ($group_path) = @_;
+    $group_path = _required_relative_namespace_path( $group_path, "target group path" );
+    return _gitlab_safe_relative_project_path($group_path);
+}
+
 sub _gitlab_safe_path_segment {
     my ($segment) = @_;
     $segment = _required_string( $segment, "target path segment" );
@@ -4441,25 +4450,35 @@ sub _gitlab_safe_path_segment {
 
 sub _resolve_explicit_project_target_paths {
     my ( $project, $namespace ) = @_;
-    my $target_namespace_path = _required_relative_namespace_path(
+    my $requested_target_namespace_path = _required_relative_namespace_path(
         $project->{target_group_path},
         "target_group_path",
     );
+    my $target_namespace_path =
+      _gitlab_safe_group_path($requested_target_namespace_path);
     my $target_project_name = _required_path_segment( $project->{name}, "project.name" );
-    my $target_full_path = _join_path(
-        $target_namespace_path,
+    my $target_project_path = _gitlab_safe_path_segment($target_project_name);
+    my $requested_target_full_path = _join_path(
+        $requested_target_namespace_path,
         $target_project_name,
     );
+    my $target_full_path = _join_path(
+        $target_namespace_path,
+        $target_project_path,
+    );
+    my $requested_target_relative_project_path = $requested_target_full_path;
     my $target_relative_project_path = $target_full_path;
 
     if ( ref($namespace) eq "HASH" ) {
         my $target_owner_path = $namespace->{target_owner_path};
         if ( defined $target_owner_path && !ref($target_owner_path) && length $target_owner_path ) {
-            my $normalized_owner_path = _required_relative_namespace_path(
-                $target_owner_path,
-                "target_owner_path",
-            );
-            my $prefix = $normalized_owner_path . "/";
+            my $requested_prefix =
+              _resolve_requested_target_root_group_path($namespace) . "/";
+            if ( index( $requested_target_full_path, $requested_prefix ) == 0 ) {
+                $requested_target_relative_project_path =
+                  substr( $requested_target_full_path, length($requested_prefix) );
+            }
+            my $prefix = _resolve_target_root_group_path($namespace) . "/";
             if ( index( $target_full_path, $prefix ) == 0 ) {
                 $target_relative_project_path =
                   substr( $target_full_path, length($prefix) );
@@ -4468,8 +4487,8 @@ sub _resolve_explicit_project_target_paths {
     }
 
     return {
-        requested_target_full_path => $target_full_path,
-        requested_target_relative_project_path => $target_relative_project_path,
+        requested_target_full_path => $requested_target_full_path,
+        requested_target_relative_project_path => $requested_target_relative_project_path,
         target_full_path => $target_full_path,
         target_project_name => $target_project_name,
         target_relative_project_path => $target_relative_project_path,
@@ -4479,17 +4498,25 @@ sub _resolve_explicit_project_target_paths {
 
 sub _resolve_namespace_project_target_paths {
     my ( $namespace, $source_group_path, $source_full_path ) = @_;
+    my $requested_target_root_path =
+      _resolve_requested_target_root_group_path($namespace);
     my $target_root_path = _resolve_target_root_group_path($namespace);
     my $relative_path = _relative_path( $source_group_path, $source_full_path );
     my @source_segments = split m{/}, $relative_path;
     my $target_project_name = $source_segments[-1];
+    my $requested_target_namespace_path = _required_relative_namespace_path(
+        $namespace->{target_namespace_path},
+        "target_namespace_path",
+    );
     my $requested_target_relative_project_path =
-      _join_path( $namespace->{target_namespace_path}, $relative_path );
+      _join_path( $requested_target_namespace_path, $relative_path );
     my $requested_target_full_path =
-      _join_path( $target_root_path, $requested_target_relative_project_path );
+      _join_path( $requested_target_root_path, $requested_target_relative_project_path );
     my $gitlab_safe_relative_path = _gitlab_safe_relative_project_path($relative_path);
+    my $target_namespace_root =
+      _gitlab_safe_group_path($requested_target_namespace_path);
     my $target_relative_project_path =
-      _join_path( $namespace->{target_namespace_path}, $gitlab_safe_relative_path );
+      _join_path( $target_namespace_root, $gitlab_safe_relative_path );
     my $target_full_path = _join_path( $target_root_path, $target_relative_project_path );
     return {
         requested_target_full_path => $requested_target_full_path,
@@ -4562,19 +4589,17 @@ sub _required_relative_project_path {
 sub _required_path_segment {
     my ( $value, $label ) = @_;
     $value = _required_string( $value, $label );
-    $value =~ /\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
-      or die "$label must be a single path segment\n";
+    _assert_path_segment_shape( $value, $label );
     return $value;
 }
 
 sub _required_group_path_min_segments {
     my ( $value, $label, $minimum_segments ) = @_;
     $value = _required_string( $value, $label );
-    my @segments = split m{/}, $value;
+    my @segments = split m{/}, $value, -1;
     @segments >= $minimum_segments
       or die "$label must contain at least $minimum_segments path segment(s)\n";
-    $value =~ /\A[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*\z/
-      or die "$label must be a namespace path\n";
+    _assert_path_segment_shape( $_, "$label path segment" ) for @segments;
     return $value;
 }
 
@@ -4709,13 +4734,28 @@ sub _relative_path {
     index( $path, $normalized_prefix ) == 0
       or die "source project path is outside configured group: $path\n";
     my $relative = substr( $path, length($normalized_prefix) );
-    $relative =~ /\A[A-Za-z0-9.][A-Za-z0-9._-]*(?:\/[A-Za-z0-9.][A-Za-z0-9._-]*)*\z/
-      or die "invalid relative project path: $relative\n";
-    for my $segment ( split m{/}, $relative ) {
-        $segment ne "." && $segment ne ".."
-          or die "invalid relative project path: $relative\n";
-    }
+    my @segments = split m{/}, $relative, -1;
+    @segments or die "invalid relative project path: $relative\n";
+    eval {
+        _assert_path_segment_shape( $_, "relative project path segment" ) for @segments;
+        1;
+    } or die "invalid relative project path: $relative\n";
     return $relative;
+}
+
+sub _assert_path_segment_shape {
+    my ( $value, $label ) = @_;
+    defined $value && !ref($value)
+      or die "$label must be a single path segment\n";
+    length $value
+      or die "$label must be a single path segment\n";
+    $value !~ m{/}
+      or die "$label must be a single path segment\n";
+    $value ne "." && $value ne ".."
+      or die "$label must not be '.' or '..'\n";
+    $value !~ /[\x00-\x1F\x7F]/
+      or die "$label must not contain control characters\n";
+    return $value;
 }
 
 sub _gitlab_invalid_target_path_reason {
@@ -4930,6 +4970,9 @@ sub _git_output_reports_lfs_incomplete_push {
     return 0 unless defined $output && !ref($output) && length $output;
     return 1 if $output =~ /\blfs\.allowincompletepush\b/i;
     return 1 if $output =~ /missing or corrupt local objects/i;
+    return 1 if $output =~ /Git LFS upload missing objects/i;
+    return 1 if $output =~ /\bLFS objects are missing\b/i;
+    return 1 if $output =~ /git lfs push --all/i;
     return 0;
 }
 

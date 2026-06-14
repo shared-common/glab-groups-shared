@@ -126,10 +126,17 @@ sub _extract_root_repo_path {
     return undef if $candidate =~ /\A(?:about|favicon\.ico|robots\.txt|cgit\.(?:css|png))\z/i;
     if ( !$opt->{allow_nested_paths} ) {
         return undef if $candidate =~ m{/};
-        return undef unless $candidate =~ /\A[A-Za-z0-9][A-Za-z0-9._-]*\z/;
+        return undef if $candidate eq "." || $candidate eq "..";
+        return undef if $candidate =~ /[\x00-\x1F\x7F]/;
         return $candidate;
     }
-    return undef unless $candidate =~ /\A[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*\z/;
+    my @segments = split m{/}, $candidate, -1;
+    return undef unless @segments;
+    for my $segment (@segments) {
+        return undef unless length $segment;
+        return undef if $segment eq "." || $segment eq "..";
+        return undef if $segment =~ /[\x00-\x1F\x7F]/;
+    }
     return $candidate;
 }
 

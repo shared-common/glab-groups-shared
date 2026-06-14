@@ -49,19 +49,17 @@ sub _required_relative_project_path {
 sub _required_path_segment {
     my ( $value, $label ) = @_;
     $value = _required_string( $value, $label );
-    $value =~ /\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
-      or die "$label must be a single path segment\n";
+    _assert_path_segment_shape( $value, $label );
     return $value;
 }
 
 sub _required_group_path_min_segments {
     my ( $value, $label, $minimum_segments ) = @_;
     $value = _required_string( $value, $label );
-    my @segments = split m{/}, $value;
+    my @segments = split m{/}, $value, -1;
     @segments >= $minimum_segments
       or die "$label must contain at least $minimum_segments path segment(s)\n";
-    $value =~ /\A[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*\z/
-      or die "$label must be a namespace path\n";
+    _assert_path_segment_shape( $_, "$label path segment" ) for @segments;
     return $value;
 }
 
@@ -113,12 +111,12 @@ sub _relative_path {
     index( $path, $normalized_prefix ) == 0
       or die "source project path is outside configured group: $path\n";
     my $relative = substr( $path, length($normalized_prefix) );
-    $relative =~ /\A[A-Za-z0-9.][A-Za-z0-9._-]*(?:\/[A-Za-z0-9.][A-Za-z0-9._-]*)*\z/
-      or die "invalid relative project path: $relative\n";
-    for my $segment ( split m{/}, $relative ) {
-        $segment ne "." && $segment ne ".."
-          or die "invalid relative project path: $relative\n";
-    }
+    my @segments = split m{/}, $relative, -1;
+    @segments or die "invalid relative project path: $relative\n";
+    eval {
+        _assert_path_segment_shape( $_, "relative project path segment" ) for @segments;
+        1;
+    } or die "invalid relative project path: $relative\n";
     return $relative;
 }
 
@@ -143,10 +141,28 @@ sub _split_source_url {
     my $path = defined $2 ? $2 : q{};
     $path =~ s{/\z}{};
     if ( length $path ) {
-        $path =~ /\A(?:~?[A-Za-z0-9][A-Za-z0-9._-]*)(?:\/(?:~?[A-Za-z0-9][A-Za-z0-9._-]*))*\z/
-          or die "invalid source URL path: $url\n";
+        my @segments = split m{/}, $path, -1;
+        eval {
+            _assert_path_segment_shape( $_, "source URL path segment" ) for @segments;
+            1;
+        } or die "invalid source URL path: $url\n";
     }
     return ( $base, $path );
+}
+
+sub _assert_path_segment_shape {
+    my ( $value, $label ) = @_;
+    defined $value && !ref($value)
+      or die "$label must be a single path segment\n";
+    length $value
+      or die "$label must be a single path segment\n";
+    $value !~ m{/}
+      or die "$label must be a single path segment\n";
+    $value ne "." && $value ne ".."
+      or die "$label must not be '.' or '..'\n";
+    $value !~ /[\x00-\x1F\x7F]/
+      or die "$label must not contain control characters\n";
+    return $value;
 }
 
 sub _base_url_host {

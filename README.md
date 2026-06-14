@@ -173,13 +173,13 @@ serializes all discovery into one job. Target preparation is best-effort per
 repository: the mirror stage compares source and target refs with `git
 ls-remote`, skips already-synced repositories before any target API work, and
 uses the per-wrapper GitLab PAT for both target-side `git ls-remote` checks and
-force-push authentication. The top-level target owner group and each immediate
-wrapper subgroup such as `glab-forks/debian` must already exist before mirror
-runs; the shared runtime only creates deeper nested subgroups beneath those
-pre-created roots. When Git LFS
-reports remote locking support or incomplete local LFS objects, the runtime now
-applies repo-local `locksverify` and `lfs.allowincompletepush` remediation
-before retrying the LFS upload. When a source host refuses anonymous public Git
+force-push authentication. The shared runtime now resolves the configured
+target namespace path from the top-level owner group down, reuses any existing
+matching group path it finds, and creates missing target groups or subgroups as
+public namespaces when the target token has permission. When Git LFS reports
+remote locking support or missing local LFS objects, the runtime applies
+repo-local `locksverify` and `lfs.allowincompletepush` remediation and reruns
+`git lfs push --all` before retrying the Git push. When a source host refuses anonymous public Git
 reads, the runtime records a clear per-repository skip.
 
 Discovery matrix fan-out uses up to 250 jobs and runs at most 10 discovery jobs
