@@ -509,6 +509,9 @@ jobs:
           missing_source_groups = [
               item for item in (plan.get("missing_source_groups") or []) if isinstance(item, dict)
           ]
+          excluded_source_groups = [
+              item for item in (plan.get("excluded_source_groups") or []) if isinstance(item, dict)
+          ]
 
           parts: list[str] = []
           append_line(parts, "## Plan Overview")
@@ -522,6 +525,7 @@ jobs:
           append_line(parts, f"- skip_planned: {counts.get('skip', 0)}")
           append_line(parts, f"- fail_planned: {counts.get('fail', 0)}")
           append_line(parts, f"- missing_source_groups: {len(missing_source_groups)}")
+          append_line(parts, f"- excluded_source_groups: {len(excluded_source_groups)}")
 
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as handle:
               handle.write("".join(parts))
@@ -874,6 +878,9 @@ jobs:
           missing_source_groups = [
               item for item in (plan.get("missing_source_groups") or []) if isinstance(item, dict)
           ]
+          excluded_source_groups = [
+              item for item in (plan.get("excluded_source_groups") or []) if isinstance(item, dict)
+          ]
           result_counts = report.get("result_counts") or {}
           results = report.get("results") or []
           skipped = [item for item in results if isinstance(item, dict) and (item.get("status") or "") == "skipped"]
@@ -894,6 +901,7 @@ jobs:
           append_line(parts, f"- skip_planned: {plan_counts.get('skip', 0)}")
           append_line(parts, f"- fail_planned: {plan_counts.get('fail', 0)}")
           append_line(parts, f"- missing_source_groups: {len(missing_source_groups)}")
+          append_line(parts, f"- excluded_source_groups: {len(excluded_source_groups)}")
           append_line(parts, f"- mirrored: {result_counts.get('mirrored', 0)}")
           append_line(parts, f"- created_empty: {result_counts.get('created_empty', 0)}")
           append_line(parts, f"- updated_empty: {result_counts.get('updated_empty', 0)}")
@@ -921,6 +929,26 @@ jobs:
                   append_line(
                           parts,
                           f"- _... {len(missing_source_groups) - MAX_MISSING_SOURCE_GROUPS} additional entries omitted; see workflow artifacts for full JSON outputs._",
+                      )
+
+          if excluded_source_groups:
+              append_line(parts, "")
+              append_line(parts, "### Excluded Source Groups")
+              for item in excluded_source_groups[:MAX_MISSING_SOURCE_GROUPS]:
+                  namespace_name = item.get("namespace_name") or ""
+                  source_group_path = item.get("source_group_path") or "<unknown>"
+                  base_url = item.get("base_url") or "<unknown>"
+                  target_namespace_path = item.get("target_namespace_path") or source_group_path
+                  reason = item.get("reason") or "Excluded source group by config"
+                  label = f"{namespace_name}: " if namespace_name else ""
+                  append_line(
+                      parts,
+                      f"- `{label}{source_group_path}` from `{base_url}` skipped by config; target path `{target_namespace_path}` will not be mirrored this run. Reason: {reason}",
+                  )
+              if len(excluded_source_groups) > MAX_MISSING_SOURCE_GROUPS:
+                  append_line(
+                          parts,
+                          f"- _... {len(excluded_source_groups) - MAX_MISSING_SOURCE_GROUPS} additional entries omitted; see workflow artifacts for full JSON outputs._",
                       )
 
           append_items(parts, "Result File Errors", input_failures, "error")

@@ -526,12 +526,28 @@ YAML
 {"source_group_path":"plasma"}
 JSONL
     );
+    write_text_file(
+        File::Spec->catfile( $dir, "exclude.yml" ),
+        <<'YAML'
+kind: glab-groups/project-exclusions
+version: 1
+projects: []
+source_groups:
+  - source_group_path: plasma
+    reason: Skip plasma by config
+YAML
+    );
 
     my $config = load_config_dir($dir);
     is_deeply(
         $config->{namespaces}->[0]->{source_group_paths},
         [ "frameworks", "plasma" ],
         "loads optional groups.jsonl allowlists for a single instance-root namespace",
+    );
+    is(
+        $config->{source_group_exclusions}->{plasma},
+        "Skip plasma by config",
+        "loads optional source_groups exclusions from exclude.yml",
     );
 }
 
@@ -1294,6 +1310,85 @@ JSONL
 
 {
     no warnings 'redefine';
+    my @warnings;
+
+    local $SIG{__WARN__} = sub {
+        push @warnings, @_;
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        return []
+          if $method eq "GET"
+          && $path =~ m{\A/groups\?top_level_only=true};
+        return {
+            full_path => "frameworks",
+            id => 1,
+            path => "frameworks",
+        } if $method eq "GET" && $path eq "/groups/frameworks";
+        return []
+          if $method eq "GET"
+          && $path =~ m{\A/groups/1/subgroups\?};
+        return [
+            {
+                archived => JSON::PP::false,
+                default_branch => "master",
+                description => "KWin",
+                empty_repo => JSON::PP::false,
+                http_url_to_repo => "https://invent.kde.org/frameworks/kwin.git",
+                id => 202,
+                lfs_enabled => JSON::PP::false,
+                path_with_namespace => "frameworks/kwin",
+                ssh_url_to_repo => 'git@invent.kde.org:frameworks/kwin.git',
+                visibility => "public",
+            },
+        ] if $method eq "GET" && $path =~ m{\A/groups/1/projects\?};
+        die "excluded source group should not be fetched"
+          if $method eq "GET" && $path eq "/groups/plasma";
+        die "unexpected gitlab request: $method $path";
+    };
+
+    my $inventory = GlabGroups::_discover_inventory(
+        {
+            defaults => { additional_branches => [], additional_tags => [] },
+            namespaces => [
+                {
+                    name => "kde-root",
+                    source_group_paths => [ "frameworks", "plasma" ],
+                    source_group_url => "https://invent.kde.org",
+                    target_namespace_path => "kde",
+                },
+            ],
+            source_group_exclusions => {
+                plasma => "Skip plasma by config",
+            },
+        }
+    );
+
+    is( scalar @{ $inventory->{inventory} }, 1, "GitLab instance-root allowlist keeps non-excluded groups in discovery output" );
+    is( $inventory->{inventory}->[0]->{group_path}, "frameworks", "GitLab instance-root allowlist keeps the non-excluded configured source group path" );
+    is_deeply(
+        $inventory->{excluded_source_groups},
+        [
+            {
+                base_url => "https://invent.kde.org",
+                namespace_name => "kde-root",
+                reason => "Skip plasma by config",
+                source_group_path => "plasma",
+                target_namespace_path => "kde/plasma",
+            },
+        ],
+        "GitLab instance-root allowlist records configured source groups excluded by config",
+    );
+    like(
+        $warnings[0] || q{},
+        qr/configured source group path excluded by config: plasma; skipping/,
+        "GitLab instance-root allowlist warns when a configured group is excluded by config",
+    );
+}
+
+{
+    no warnings 'redefine';
 
     local *GlabGroups::_is_gitlab_instance_root = sub { return 0; };
     local *GlabGroups::_http_text_request = sub {
@@ -1627,6 +1722,81 @@ HTML
     my $summary = read_text_file($summary_path);
     like( $summary, qr/### Missing Source Groups/, "plan summary includes a missing configured source group section" );
     like( $summary, qr/debian\/edd/, "plan summary names the skipped target path for a missing source group" );
+}
+
+{
+    no warnings 'redefine';
+    my $dir = tempdir( CLEANUP => 1 );
+    my $plan_path = File::Spec->catfile( $dir, "plan.json" );
+    my $discover_path = File::Spec->catfile( $dir, "discover.json" );
+    my $summary_path = File::Spec->catfile( $dir, "plan.md" );
+
+    write_json_file(
+        File::Spec->catfile( $dir, "defaults.json" ),
+        {
+            kind => "glab-groups/defaults",
+            version => 1,
+            defaults => {},
+        }
+    );
+    write_json_file(
+        File::Spec->catfile( $dir, "namespaces.json" ),
+        {
+            kind => "glab-groups/namespaces",
+            version => 1,
+            namespaces => [
+                {
+                    name => "debian",
+                    source_group_url => "https://salsa.debian.org",
+                    target_owner_path => "glab-forks",
+                    target_namespace_path => "debian",
+                },
+            ],
+        }
+    );
+
+    local *GlabGroups::_discover_inventory = sub {
+        return {
+            discovered_at => GlabGroups::_timestamp(),
+            excluded_source_groups => [
+                {
+                    base_url => "https://salsa.debian.org",
+                    namespace_name => "debian",
+                    reason => "Curated Debian team allowlist excludes the umbrella debian group",
+                    source_group_path => "debian",
+                    target_namespace_path => "debian/debian",
+                },
+            ],
+            inventory => [],
+            missing_source_groups => [],
+        };
+    };
+
+    GlabGroups::_cmd_plan(
+        "--config-dir",      $dir,
+        "--discover-output", $discover_path,
+        "--output",          $plan_path,
+        "--summary",         $summary_path,
+    );
+
+    my $plan = read_json_file($plan_path);
+    is( $plan->{total_targets}, 0, "plan allows zero targets when discovery only reports source groups excluded by config" );
+    is_deeply(
+        $plan->{excluded_source_groups},
+        [
+            {
+                base_url => "https://salsa.debian.org",
+                namespace_name => "debian",
+                reason => "Curated Debian team allowlist excludes the umbrella debian group",
+                source_group_path => "debian",
+                target_namespace_path => "debian/debian",
+            },
+        ],
+        "plan output preserves excluded source group notices",
+    );
+    my $summary = read_text_file($summary_path);
+    like( $summary, qr/### Excluded Source Groups/, "plan summary includes an excluded source group section" );
+    like( $summary, qr/Curated Debian team allowlist excludes the umbrella debian group/, "plan summary includes the exclusion reason" );
 }
 
 {
@@ -2257,6 +2427,7 @@ YAML
                 },
             ],
             missing_source_groups => [],
+            excluded_source_groups => [],
         }
     );
     write_json_file(
@@ -2287,6 +2458,15 @@ YAML
                 },
             ],
             missing_source_groups => [],
+            excluded_source_groups => [
+                {
+                    base_url => "https://gitlab.example.invalid",
+                    namespace_name => "root",
+                    reason => "Skip the shadow root group",
+                    source_group_path => "shadow",
+                    target_namespace_path => "mirror/shadow",
+                },
+            ],
         }
     );
 
@@ -2309,6 +2489,19 @@ YAML
     );
     my $plan = JSON::PP->new->decode( do { open( my $fh, "<:encoding(UTF-8)", $output_path ) or die $!; local $/; <$fh> } );
     is( $plan->{total_targets}, 2, "merged discover shards contribute all targets to the plan" );
+    is_deeply(
+        $plan->{excluded_source_groups},
+        [
+            {
+                base_url => "https://gitlab.example.invalid",
+                namespace_name => "root",
+                reason => "Skip the shadow root group",
+                source_group_path => "shadow",
+                target_namespace_path => "mirror/shadow",
+            },
+        ],
+        "merged discover shards preserve excluded source group notices",
+    );
 }
 
 {
@@ -4161,6 +4354,138 @@ YAML
     );
     is( scalar @calls, 2, "gitlab request retries a transient Request timed out 400 response" );
     is( $result->{id}, 99, "gitlab request returns the successful retry payload" );
+}
+
+{
+    no warnings 'redefine';
+    my @calls;
+    my @sleeps;
+
+    local *GlabGroups::_current_epoch = sub { return 100; };
+    local *GlabGroups::_sleep_seconds = sub {
+        my ($seconds) = @_;
+        push @sleeps, $seconds;
+        return 1;
+    };
+    local *GlabGroups::_run_command = sub {
+        my ( $args, $opt ) = @_;
+        push @calls, [ @{$args} ];
+        my ($header_index) = grep { $args->[$_] eq "--dump-header" } 0 .. $#{$args};
+        my $header_path = $args->[ $header_index + 1 ];
+        open( my $fh, ">:encoding(UTF-8)", $header_path ) or die "unable to write $header_path\n";
+        if ( @calls == 1 ) {
+            print {$fh} "HTTP/1.1 429 Too Many Requests\nRetry-After: 7\nRateLimit-Reset: 107\n\n";
+            close $fh;
+            return {
+                output => "Retry later\n429",
+                status => 0,
+            };
+        }
+        print {$fh} "HTTP/1.1 201 Created\nRateLimit-Remaining: 10\nRateLimit-Reset: 160\n\n";
+        close $fh;
+        return {
+            output => "{\"id\":99}\n201",
+            status => 0,
+        };
+    };
+
+    my $result = GlabGroups::_gitlab_request(
+        { base_url => "https://gitlab.example.invalid", token => "secret" },
+        "POST",
+        "/projects",
+        { name => "demo" },
+        { retry_attempts => 2, retry_backoff_seconds => 1 },
+    );
+    is_deeply( \@sleeps, [7], "gitlab request honors Retry-After when retrying a 429 response" );
+    is( scalar @calls, 2, "gitlab request retries once after a 429 response" );
+    is( $result->{id}, 99, "gitlab request returns the successful payload after a 429 retry" );
+}
+
+{
+    my $enabled = GlabGroups::_configure_target_namespace_state_cache_for_entries(
+        {},
+        [
+            { action => "sync", target_namespace_path => "glab-forks/debian/pkg-ruby" },
+            { action => "sync", target_namespace_path => "glab-forks/debian/pkg-ruby" },
+            { action => "sync", target_namespace_path => "glab-forks/debian/pkg-ruby" },
+            { action => "sync", target_namespace_path => "glab-forks/debian/pkg-go" },
+        ],
+    );
+    ok(
+        $enabled->{"glab-forks/debian/pkg-ruby"},
+        "namespace state cache is enabled for namespaces with enough targets in the current batch",
+    );
+    ok(
+        !$enabled->{"glab-forks/debian/pkg-go"},
+        "namespace state cache stays disabled for sparse namespaces",
+    );
+}
+
+{
+    no warnings 'redefine';
+    my @urls;
+    local *GlabGroups::_discover_remote_refs_if_exists = sub {
+        my ( $url, $policy ) = @_;
+        push @urls, $url;
+        return {
+            branches => { main => "abc123" },
+            default_branch => "main",
+            tags => {},
+        } if $url eq "https://gitlab.example.invalid/group/project.git";
+        die "target auth URL should not be probed when anonymous reads succeed\n";
+    };
+
+    my $refs = GlabGroups::_discover_target_remote_refs_if_exists(
+        {
+            base_url => "https://gitlab.example.invalid",
+            read_token => "secret",
+            read_username => "0auth",
+        },
+        "group/project",
+        {},
+    );
+    is_deeply(
+        \@urls,
+        ["https://gitlab.example.invalid/group/project.git"],
+        "target remote ref discovery prefers anonymous public Git reads before authenticated target token reads",
+    );
+    is( $refs->{default_branch}, "main", "target remote ref discovery returns the anonymous target refs when available" );
+}
+
+{
+    no warnings 'redefine';
+    my @urls;
+    local *GlabGroups::_discover_remote_refs_if_exists = sub {
+        my ( $url, $policy ) = @_;
+        push @urls, $url;
+        die "git ls-remote failed: fatal: could not read Username for 'https://gitlab.example.invalid': No such device or address\n"
+          if $url eq "https://gitlab.example.invalid/group/project.git";
+        return {
+            branches => { main => "abc123" },
+            default_branch => "main",
+            tags => {},
+        } if $url eq "https://0auth:secret\@gitlab.example.invalid/group/project.git";
+        die "unexpected ls-remote URL: $url";
+    };
+
+    my $refs = GlabGroups::_discover_target_remote_refs_if_exists(
+        {
+            base_url => "https://gitlab.example.invalid",
+            read_token => "secret",
+            read_username => "0auth",
+        },
+        "group/project",
+        {},
+    );
+    is_deeply(
+        \@urls,
+        [
+            "https://gitlab.example.invalid/group/project.git",
+            "https://0auth:secret\@gitlab.example.invalid/group/project.git",
+        ],
+        "target remote ref discovery falls back to authenticated target Git reads only when anonymous access is refused",
+    );
+    is( $refs->{default_branch}, "main", "target remote ref discovery returns the authenticated fallback refs when needed" );
 }
 
 {

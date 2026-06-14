@@ -149,6 +149,8 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn('append_line(parts, "## Workflow Overview")', text)
         self.assertIn('append_line(parts, "### Missing Source Groups")', text)
         self.assertIn('append_line(parts, f"- missing_source_groups: {len(missing_source_groups)}")', text)
+        self.assertIn('append_line(parts, f"- excluded_source_groups: {len(excluded_source_groups)}")', text)
+        self.assertIn('append_line(parts, "### Excluded Source Groups")', text)
         self.assertIn('append_line(parts, f"- archived_skipped: {archived_skipped}")', text)
         self.assertIn('append_line(parts, f"- refs_matched_skipped: {refs_matched_skipped}")', text)
         self.assertIn('append_items(parts, "Other Skipped", other_skipped, "reason")', text)

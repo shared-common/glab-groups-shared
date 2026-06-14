@@ -60,6 +60,7 @@ my %GITLAB_READ_DEFAULTS = (
 my $GROUP_PROJECT_CREATION_LEVEL = "maintainer";
 my $GROUP_SHARED_RUNNERS_SETTING = "disabled_and_unoverridable";
 my $GROUP_SUBGROUP_CREATION_LEVEL = "maintainer";
+my $TARGET_NAMESPACE_STATE_CACHE_MIN_TARGETS = 3;
 
 sub run_cli {
     my (@argv) = @_;
@@ -127,6 +128,7 @@ sub load_config_dir {
         namespaces => [],
         projects => [],
         exclusions => {},
+        source_group_exclusions => {},
         source_group_paths => [],
     );
 
@@ -194,6 +196,18 @@ sub load_config_dir {
                 my $path = _required_relative_project_path( $item->{target_project_path}, "$file.projects[$index].target_project_path" );
                 my $reason = _required_string( $item->{reason} || "Excluded by config", "$file.projects[$index].reason" );
                 $config{exclusions}->{$path} = $reason;
+            }
+            my $source_groups = $payload->{source_groups} || [];
+            ref($source_groups) eq "ARRAY" or die "$file.source_groups must be a list\n";
+            for my $index ( 0 .. $#{$source_groups} ) {
+                my $item = $source_groups->[$index];
+                ref($item) eq "HASH" or die "$file.source_groups[$index] must be an object\n";
+                my $path = _normalize_source_group_path( $item, "$file.source_groups[$index]" );
+                my $reason = _required_string(
+                    $item->{reason} || "Excluded source group by config",
+                    "$file.source_groups[$index].reason"
+                );
+                $config{source_group_exclusions}->{$path} = $reason;
             }
             next;
         }
@@ -489,10 +503,17 @@ sub _cmd_plan {
     if ( ref( $normalized->{missing_source_groups} ) eq "ARRAY" && @{ $normalized->{missing_source_groups} } ) {
         $plan->{missing_source_groups} = [ @{ $normalized->{missing_source_groups} } ];
     }
+    if ( ref( $normalized->{excluded_source_groups} ) eq "ARRAY" && @{ $normalized->{excluded_source_groups} } ) {
+        $plan->{excluded_source_groups} = [ @{ $normalized->{excluded_source_groups} } ];
+    }
     $plan->{total_targets} > 0
       || (
         ref( $plan->{missing_source_groups} ) eq "ARRAY"
         && @{ $plan->{missing_source_groups} }
+      )
+      || (
+        ref( $plan->{excluded_source_groups} ) eq "ARRAY"
+        && @{ $plan->{excluded_source_groups} }
       )
       || $opt{projects_only}
       or die "discovery produced zero targets; refusing to continue with a no-op mirror plan\n";
@@ -627,11 +648,13 @@ sub _cmd_prepare_target {
             next unless defined $start && defined $end;
             last if $start > $#entries;
             $end = $#entries if $end > $#entries;
+            my @batch_entries = @entries[ $start .. $end ];
+            _configure_target_namespace_state_cache_for_entries( $client, \@batch_entries );
 
 	            for my $index ( $start .. $end ) {
-	                my $entry = $entries[$index];
-	                next if $entry->{action} eq "skip" || $entry->{action} eq "fail";
-	                my ( $prepared, $failed ) = _prepare_target_entry_result( $client, $entry );
+		                my $entry = $entries[$index];
+		                next if $entry->{action} eq "skip" || $entry->{action} eq "fail";
+		                my ( $prepared, $failed ) = _prepare_target_entry_result( $client, $entry );
 	                push @prepared, $prepared if $prepared;
 	                push @failed, $failed if $failed;
 	            }
@@ -639,6 +662,7 @@ sub _cmd_prepare_target {
 	        }
 	    }
 	    else {
+	        _configure_target_namespace_state_cache_for_entries( $client, \@entries );
 	        for my $entry (@entries) {
 	            next if $entry->{action} eq "skip" || $entry->{action} eq "fail";
 	            my ( $prepared, $failed ) = _prepare_target_entry_result( $client, $entry );
@@ -713,6 +737,8 @@ sub _cmd_mirror {
         next unless defined $start && defined $end;
         last if $start > $#entries;
         $end = $#entries if $end > $#entries;
+        my @batch_entries = @entries[ $start .. $end ];
+        _configure_target_namespace_state_cache_for_entries( $target_client, \@batch_entries );
 
         for my $index ( $start .. $end ) {
             my $entry = $entries[$index];
@@ -875,6 +901,7 @@ sub _discover_inventory {
     my $source_auth = _load_source_auth();
     my @inventory;
     my @missing_source_groups;
+    my @excluded_source_groups;
     my $authoritative_projects = _config_authoritative_projects_by_target_full_path($config);
     my $has_authoritative_projects = scalar keys %{$authoritative_projects};
     my @units = @{ _discover_inventory_units($config) };
@@ -906,7 +933,7 @@ sub _discover_inventory {
             }
             my $policy = _merge_policy( $config->{defaults}, $namespace, {} );
             my $namespace_inventory =
-              _discover_namespace_inventory( $namespace, $policy, $source_auth );
+              _discover_namespace_inventory( $namespace, $policy, $source_auth, $config );
             my $namespace_buckets =
                 ref($namespace_inventory) eq "HASH"
               ? $namespace_inventory->{inventory}
@@ -914,6 +941,8 @@ sub _discover_inventory {
             if ( ref($namespace_inventory) eq "HASH" ) {
                 push @missing_source_groups,
                   grep { ref($_) eq "HASH" } @{ $namespace_inventory->{missing_source_groups} || [] };
+                push @excluded_source_groups,
+                  grep { ref($_) eq "HASH" } @{ $namespace_inventory->{excluded_source_groups} || [] };
             }
             if ( !$has_authoritative_projects ) {
                 push @inventory, @{$namespace_buckets};
@@ -960,6 +989,7 @@ sub _discover_inventory {
         discovered_at => _timestamp(),
         inventory => \@inventory,
         missing_source_groups => \@missing_source_groups,
+        excluded_source_groups => \@excluded_source_groups,
     };
 }
 
@@ -1023,22 +1053,26 @@ sub _merge_discover_payloads {
     ref($payloads) eq "ARRAY" or die "discover payloads must be a list\n";
     my @inventory;
     my @missing_source_groups;
+    my @excluded_source_groups;
     for my $payload ( @{$payloads} ) {
         ref($payload) eq "HASH" or die "discover payload must be an object\n";
         push @inventory,
           grep { ref($_) eq "HASH" } @{ $payload->{inventory} || [] };
         push @missing_source_groups,
           grep { ref($_) eq "HASH" } @{ $payload->{missing_source_groups} || [] };
+        push @excluded_source_groups,
+          grep { ref($_) eq "HASH" } @{ $payload->{excluded_source_groups} || [] };
     }
     return {
         discovered_at => _timestamp(),
         inventory => \@inventory,
         missing_source_groups => \@missing_source_groups,
+        excluded_source_groups => \@excluded_source_groups,
     };
 }
 
 sub _discover_namespace_inventory {
-    my ( $namespace, $policy, $source_auth ) = @_;
+    my ( $namespace, $policy, $source_auth, $config ) = @_;
     my $source = _parse_source_url(
         $namespace->{source_group_url},
         sub {
@@ -1050,8 +1084,20 @@ sub _discover_namespace_inventory {
     if ( ref($source_group_paths) eq "ARRAY" && @{$source_group_paths} && $source->{kind} ne "gitlab_instance_root" ) {
         die "groups.jsonl is only supported for GitLab instance-root source_group_url values\n";
     }
+    my @excluded_source_groups;
 
     if ( $source->{kind} eq "gitlab_group" ) {
+        my $exclude_reason = _source_group_exclusion_reason( $config, $source->{root_path} );
+        if ($exclude_reason) {
+            warn "source group excluded by config: $source->{root_path}; skipping\n";
+            push @excluded_source_groups,
+              _source_group_notice_entry( $namespace, $source->{base_url}, $source->{root_path}, $exclude_reason );
+            return {
+                inventory => [],
+                missing_source_groups => [],
+                excluded_source_groups => \@excluded_source_groups,
+            };
+        }
         my $source_client = _make_gitlab_client( $source->{base_url}, undef, undef );
         my $source_group = _get_group( $source_client, $source->{root_path}, _gitlab_read_request_opt($policy) );
         return [] if !$source_group;
@@ -1074,16 +1120,18 @@ sub _discover_namespace_inventory {
         if ( ref($source_group_paths) eq "ARRAY" && @{$source_group_paths} ) {
             my @selected_groups;
             for my $path ( @{$source_group_paths} ) {
+                my $exclude_reason = _source_group_exclusion_reason( $config, $path );
+                if ($exclude_reason) {
+                    warn "configured source group path excluded by config: $path; skipping\n";
+                    push @excluded_source_groups,
+                      _source_group_notice_entry( $namespace, $source->{base_url}, $path, $exclude_reason );
+                    next;
+                }
                 my $group = _get_group( $source_client, $path, _gitlab_read_request_opt($policy) );
                 if ( !$group ) {
                     warn "configured source group path not found at GitLab instance root: $path; skipping\n";
                     push @missing_source_groups,
-                      {
-                        base_url => $source->{base_url},
-                        namespace_name => $namespace->{name},
-                        source_group_path => $path,
-                        target_namespace_path => _join_path( $namespace->{target_namespace_path}, $path ),
-                      };
+                      _source_group_notice_entry( $namespace, $source->{base_url}, $path );
                     next;
                 }
                 push @selected_groups, $group;
@@ -1093,6 +1141,23 @@ sub _discover_namespace_inventory {
         else {
             $groups = _list_gitlab_top_level_groups( $source_client, $policy );
         }
+        my @selected_groups;
+        for my $group ( @{$groups} ) {
+            next unless ref($group) eq "HASH";
+            my $group_path = _required_relative_namespace_path(
+                $group->{full_path} || $group->{path},
+                "gitlab top-level group path",
+            );
+            my $exclude_reason = _source_group_exclusion_reason( $config, $group_path );
+            if ($exclude_reason) {
+                warn "source group excluded by config: $group_path; skipping\n";
+                push @excluded_source_groups,
+                  _source_group_notice_entry( $namespace, $source->{base_url}, $group_path, $exclude_reason );
+                next;
+            }
+            push @selected_groups, $group;
+        }
+        $groups = \@selected_groups;
         my @inventory;
         for my $group ( @{$groups} ) {
             next unless ref($group) eq "HASH";
@@ -1116,6 +1181,7 @@ sub _discover_namespace_inventory {
         return {
             inventory => \@inventory,
             missing_source_groups => \@missing_source_groups,
+            excluded_source_groups => \@excluded_source_groups,
         };
     }
 
@@ -1251,10 +1317,23 @@ sub _normalize_inventory {
             target_namespace_path => $item->{target_namespace_path},
           };
     }
+    my @excluded_source_groups;
+    for my $item ( @{ $inventory->{excluded_source_groups} || [] } ) {
+        next unless ref($item) eq "HASH";
+        push @excluded_source_groups,
+          {
+            base_url => $item->{base_url},
+            namespace_name => $item->{namespace_name},
+            reason => $item->{reason},
+            source_group_path => $item->{source_group_path},
+            target_namespace_path => $item->{target_namespace_path},
+          };
+    }
     return {
         discovered_at => $inventory->{discovered_at},
         inventory => \@normalized,
         missing_source_groups => \@missing_source_groups,
+        excluded_source_groups => \@excluded_source_groups,
     };
 }
 
@@ -1541,12 +1620,9 @@ sub _mirror_entry {
     my $target_remote_refs =
       $prepared_from_override
       ? undef
-      : _discover_remote_refs_if_exists(
-            _maybe_auth_url(
-                _project_git_url( $target_client->{base_url}, $entry->{target_full_path} ),
-                $target_client->{read_username},
-                $target_client->{read_token},
-            ),
+      : _discover_target_remote_refs_if_exists(
+            $target_client,
+            $entry->{target_full_path},
             $entry->{policy},
         );
 
@@ -1889,6 +1965,19 @@ sub _render_plan_summary {
             $text .= "- `$label$path` from `$base_url` skipped; target path `$target_path` will not be mirrored this run.\n";
         }
     }
+    my @excluded_source_groups =
+      grep { ref($_) eq "HASH" } @{ $plan->{excluded_source_groups} || [] };
+    if (@excluded_source_groups) {
+        $text .= "\n### Excluded Source Groups\n\n";
+        for my $item (@excluded_source_groups) {
+            my $label = $item->{namespace_name} ? "$item->{namespace_name}: " : q{};
+            my $path = $item->{source_group_path} || "<unknown>";
+            my $base_url = $item->{base_url} || "<unknown>";
+            my $target_path = $item->{target_namespace_path} || $path;
+            my $reason = $item->{reason} || "Excluded source group by config";
+            $text .= "- `$label$path` from `$base_url` skipped by config; target path `$target_path` will not be mirrored this run. Reason: $reason\n";
+        }
+    }
     return $text;
 }
 
@@ -2211,6 +2300,29 @@ sub _make_gitlab_client {
     };
 }
 
+sub _configure_target_namespace_state_cache_for_entries {
+    my ( $client, $entries ) = @_;
+    return {} unless ref($client) eq "HASH";
+    return {} unless ref($entries) eq "ARRAY";
+    my $enabled = $client->{enable_namespace_state_cache};
+    $enabled = {} if !$enabled || ref($enabled) ne "HASH";
+    my %counts;
+    for my $entry ( @{$entries} ) {
+        next unless ref($entry) eq "HASH";
+        next if ( $entry->{action} || q{} ) eq "skip";
+        next if ( $entry->{action} || q{} ) eq "fail";
+        my $namespace_path = $entry->{target_namespace_path};
+        next unless defined $namespace_path && !ref($namespace_path) && length $namespace_path;
+        $counts{$namespace_path}++;
+    }
+    for my $namespace_path ( keys %counts ) {
+        next unless $counts{$namespace_path} >= $TARGET_NAMESPACE_STATE_CACHE_MIN_TARGETS;
+        $enabled->{$namespace_path} = JSON::PP::true;
+    }
+    $client->{enable_namespace_state_cache} = $enabled;
+    return $enabled;
+}
+
 sub _managed_group_settings_payload {
     return (
         project_creation_level => $GROUP_PROJECT_CREATION_LEVEL,
@@ -2295,6 +2407,9 @@ sub _target_namespace_state {
     my ( $client, $group_path, $policy ) = @_;
     return undef
       unless ref($client) eq "HASH" && $client->{enable_namespace_state_cache};
+    if ( ref( $client->{enable_namespace_state_cache} ) eq "HASH" ) {
+        return undef unless $client->{enable_namespace_state_cache}->{$group_path};
+    }
     return undef
       unless defined $group_path && !ref($group_path) && length $group_path;
     my $cache = $client->{namespace_state_cache} ||= {};
@@ -3736,6 +3851,9 @@ sub _gitlab_request {
     my $timeout = $opt->{timeout_seconds} || 90;
     my $content = defined $payload ? $JSON->encode($payload) : undef;
     for my $attempt ( 1 .. $attempts ) {
+        _wait_for_gitlab_rate_limit_window($client);
+        my ( $headers_fh, $headers_path ) = tempfile();
+        close $headers_fh;
         my @command = (
             "curl",
             "--silent",
@@ -3743,6 +3861,8 @@ sub _gitlab_request {
             "--location",
             "--max-time",
             $max_time,
+            "--dump-header",
+            $headers_path,
             "--request",
             $method,
             "--header",
@@ -3766,7 +3886,10 @@ sub _gitlab_request {
         );
 
         my ( $http_status, $body ) = _split_curl_response( $response->{output} );
+        my $headers = _read_http_headers_file($headers_path);
+        unlink $headers_path;
         if ( $response->{status} == 0 && $http_status >= 200 && $http_status < 300 ) {
+            _record_gitlab_rate_limit_state( $client, $http_status, $headers );
             return undef if !defined $body || $body eq q{};
             return _decode_json_response( $body, $method, $path );
         }
@@ -3780,10 +3903,17 @@ sub _gitlab_request {
             && $attempt < $attempts
           )
         {
-            sleep( $backoff * $attempt );
+            _sleep_seconds(
+                _gitlab_retry_delay_seconds(
+                    $http_status,
+                    $headers,
+                    $backoff * $attempt,
+                )
+            );
             next;
         }
 
+        _record_gitlab_rate_limit_state( $client, $http_status, $headers );
         my $status_label = $http_status || $response->{status};
         my $message = defined $body && length $body ? $body : ( $response->{output} || "unknown error" );
         my $error = "gitlab request failed [$status_label] $method $path: $message\n";
@@ -3962,6 +4092,73 @@ sub _source_read_request_opt {
     return _gitlab_read_request_opt($policy);
 }
 
+sub _current_epoch {
+    return time();
+}
+
+sub _sleep_seconds {
+    my ($seconds) = @_;
+    return 1 unless defined $seconds;
+    return 1 if $seconds <= 0;
+    sleep($seconds);
+    return 1;
+}
+
+sub _wait_for_gitlab_rate_limit_window {
+    my ($client) = @_;
+    return 1 unless ref($client) eq "HASH";
+    my $resume_epoch = $client->{rate_limit_resume_after_epoch} || 0;
+    my $now = _current_epoch();
+    if ( $resume_epoch > $now ) {
+        _sleep_seconds( $resume_epoch - $now );
+    }
+    delete $client->{rate_limit_resume_after_epoch}
+      if ( $client->{rate_limit_resume_after_epoch} || 0 ) <= _current_epoch();
+    return 1;
+}
+
+sub _gitlab_retry_delay_seconds {
+    my ( $http_status, $headers, $fallback_delay ) = @_;
+    if ( $http_status == 429 && ref($headers) eq "HASH" ) {
+        my $retry_after = _positive_int_from_header( $headers->{"retry-after"} );
+        return $retry_after if defined $retry_after && $retry_after > 0;
+        my $reset_epoch = _positive_int_from_header( $headers->{"ratelimit-reset"} );
+        if ( defined $reset_epoch ) {
+            my $delay = $reset_epoch - _current_epoch();
+            return $delay > 0 ? $delay : 1;
+        }
+    }
+    return $fallback_delay;
+}
+
+sub _record_gitlab_rate_limit_state {
+    my ( $client, $http_status, $headers ) = @_;
+    return 1 unless ref($client) eq "HASH";
+    return 1 unless ref($headers) eq "HASH";
+    my $resume_epoch;
+    if ( $http_status == 429 ) {
+        my $retry_after = _positive_int_from_header( $headers->{"retry-after"} );
+        if ( defined $retry_after && $retry_after > 0 ) {
+            $resume_epoch = _current_epoch() + $retry_after;
+        }
+        else {
+            my $reset_epoch = _positive_int_from_header( $headers->{"ratelimit-reset"} );
+            $resume_epoch = $reset_epoch if defined $reset_epoch;
+        }
+    }
+    else {
+        my $remaining = _positive_int_from_header( $headers->{"ratelimit-remaining"} );
+        my $reset_epoch = _positive_int_from_header( $headers->{"ratelimit-reset"} );
+        if ( defined $remaining && defined $reset_epoch && $remaining <= 0 && $reset_epoch > _current_epoch() ) {
+            $resume_epoch = $reset_epoch;
+        }
+    }
+    if ( defined $resume_epoch && $resume_epoch > _current_epoch() ) {
+        $client->{rate_limit_resume_after_epoch} = $resume_epoch;
+    }
+    return 1;
+}
+
 sub _split_curl_response {
     my ($text) = @_;
     defined $text or return ( 0, q{} );
@@ -3972,6 +4169,43 @@ sub _split_curl_response {
         return ( $status, $body );
     }
     return ( 0, $text );
+}
+
+sub _read_http_headers_file {
+    my ($path) = @_;
+    return {} unless defined $path && !ref($path) && length $path && -f $path;
+    open( my $fh, "<:encoding(UTF-8)", $path ) or die "unable to read $path\n";
+    my $text = do { local $/; <$fh> };
+    close $fh;
+    return _parse_http_headers( $text || q{} );
+}
+
+sub _parse_http_headers {
+    my ($text) = @_;
+    my %headers;
+    return \%headers unless defined $text && !ref($text) && length $text;
+    my @blocks = split /\r?\n\r?\n/, $text;
+    for my $block (@blocks) {
+        my @lines = split /\r?\n/, $block;
+        next unless @lines;
+        next unless ( $lines[0] || q{} ) =~ /\AHTTP\/\d/;
+        for my $line ( @lines[ 1 .. $#lines ] ) {
+            next unless defined $line && length $line;
+            my ( $name, $value ) = split /:\s*/, $line, 2;
+            next unless defined $name && defined $value;
+            $headers{ lc $name } = $value;
+        }
+    }
+    return \%headers;
+}
+
+sub _positive_int_from_header {
+    my ($value) = @_;
+    return undef unless defined $value && !ref($value);
+    $value =~ s/\A\s+//;
+    $value =~ s/\s+\z//;
+    return undef unless $value =~ /\A\d+\z/;
+    return 0 + $value;
 }
 
 sub _decode_json_response {
@@ -4166,6 +4400,28 @@ sub _config_exclusion_reason {
           if exists $config->{exclusions}->{$candidate};
     }
     return undef;
+}
+
+sub _source_group_exclusion_reason {
+    my ( $config, $source_group_path ) = @_;
+    return undef unless ref($config) eq "HASH";
+    return undef unless defined $source_group_path && length $source_group_path;
+    return undef unless ref( $config->{source_group_exclusions} ) eq "HASH";
+    return $config->{source_group_exclusions}->{$source_group_path}
+      if exists $config->{source_group_exclusions}->{$source_group_path};
+    return undef;
+}
+
+sub _source_group_notice_entry {
+    my ( $namespace, $base_url, $source_group_path, $reason ) = @_;
+    my $entry = {
+        base_url => $base_url,
+        namespace_name => $namespace->{name},
+        source_group_path => $source_group_path,
+        target_namespace_path => _join_path( $namespace->{target_namespace_path}, $source_group_path ),
+    };
+    $entry->{reason} = $reason if defined $reason && length $reason;
+    return $entry;
 }
 
 sub _gitlab_safe_relative_project_path {
@@ -4591,6 +4847,47 @@ sub _discover_remote_refs_from_urls {
 
     die $last_error if length $last_error;
     die "unable to discover source refs from the configured candidate URLs\n";
+}
+
+sub _discover_remote_refs_if_exists_from_urls {
+    my ( $candidate_urls, $policy, $chosen_source_url_ref ) = @_;
+    ref($candidate_urls) eq "ARRAY" or die "candidate source URLs must be a list\n";
+    my %seen;
+    my @candidates = grep { defined $_ && length $_ && !$seen{$_}++ } @{$candidate_urls};
+    @candidates or die "at least one candidate source URL is required\n";
+
+    my $last_error = q{};
+    for my $candidate (@candidates) {
+        my $available = eval { _discover_remote_refs_if_exists( $candidate, $policy ) };
+        if ($available) {
+            $$chosen_source_url_ref = $candidate if defined $chosen_source_url_ref;
+            return $available;
+        }
+        if ( !$@ ) {
+            $$chosen_source_url_ref = $candidate if defined $chosen_source_url_ref;
+            return undef;
+        }
+        $last_error ||= $@;
+    }
+
+    die $last_error if length $last_error;
+    return undef;
+}
+
+sub _discover_target_remote_refs_if_exists {
+    my ( $target_client, $target_full_path, $policy ) = @_;
+    my $anonymous_url =
+      _project_git_url( $target_client->{base_url}, $target_full_path );
+    my $authenticated_url = _maybe_auth_url(
+        $anonymous_url,
+        $target_client->{read_username},
+        $target_client->{read_token},
+    );
+    return _discover_remote_refs_if_exists_from_urls(
+        [ $anonymous_url, $authenticated_url ],
+        $policy,
+        undef,
+    );
 }
 
 sub _git_output_mentions_lfs {
