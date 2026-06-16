@@ -111,6 +111,25 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("Fetch optional source Git credentials from BWS", text)
         self.assertNotIn("optional-source-secret-list", text)
 
+    def test_bws_fetch_retries_are_explicit_for_discovery_and_mirror(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("Fetch discovery secrets from BWS attempt 1", text)
+        self.assertIn("Fetch discovery secrets from BWS attempt 2", text)
+        self.assertIn("Fetch discovery secrets from BWS attempt 3", text)
+        self.assertIn("steps.fetch_discovery_secrets_attempt_1.outcome == 'failure'", text)
+        self.assertIn("steps.fetch_discovery_secrets_attempt_2.outcome == 'failure'", text)
+        self.assertIn("BWS fetch failed after 3 attempts while loading discovery secrets", text)
+        self.assertIn("Fetch target secrets from BWS attempt 1", text)
+        self.assertIn("Fetch target secrets from BWS attempt 2", text)
+        self.assertIn("Fetch target secrets from BWS attempt 3", text)
+        self.assertIn("steps.fetch_target_secrets_attempt_1.outcome == 'failure'", text)
+        self.assertIn("steps.fetch_target_secrets_attempt_2.outcome == 'failure'", text)
+        self.assertIn("BWS fetch failed after 3 attempts while loading target secrets", text)
+        self.assertEqual(
+            text.count("shared-common/gh-actions-shared/.github/actions/bws-fetch@v0.0.41"),
+            6,
+        )
+
     def test_workflow_runtime_is_capped_below_six_hours(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("Compute workflow deadline", text)

@@ -778,13 +778,13 @@ JSONL
     my $plan = GlabGroups::_build_plan( $config, $inventory, 1 );
     is(
         $plan->{plan}->[0]->{source_group_path},
-        "small-team",
-        "planning schedules smaller source groups before the largest source group",
+        "big-team",
+        "planning schedules the largest source group before smaller groups",
     );
     is(
         $plan->{plan}->[-1]->{source_group_path},
-        "big-team",
-        "planning leaves the largest source group for later mirror batches",
+        "small-team",
+        "planning leaves the smallest source group for later mirror batches",
     );
 }
 
@@ -1616,6 +1616,65 @@ HTML
 
 {
     no warnings 'redefine';
+    local *GlabGroups::_get_group = sub {
+        die "_get_group should not be probed for Gitea owner discovery";
+    };
+    local *GlabGroups::_is_gitea_instance = sub {
+        my ($base_url) = @_;
+        return $base_url eq "https://git.uupdump.net" ? 1 : 0;
+    };
+    local *GlabGroups::_list_gitea_owner_projects = sub {
+        my ( $base_url, $owner_path, $policy ) = @_;
+        return [
+            {
+                archived => JSON::PP::false,
+                default_branch => "master",
+                description => "Standalone converter",
+                empty_repo => JSON::PP::false,
+                http_url_to_repo => "https://git.uupdump.net/uup-dump/standalone.git",
+                id => 7,
+                lfs_enabled => JSON::PP::false,
+                path_with_namespace => "uup-dump/standalone",
+                ssh_url_to_repo => 'ssh://git@git.uupdump.net/uup-dump/standalone.git',
+                updated_at => "2026-06-16T00:00:00Z",
+                visibility => "public",
+            },
+            {
+                archived => JSON::PP::false,
+                default_branch => "master",
+                description => "JSON API",
+                empty_repo => JSON::PP::false,
+                http_url_to_repo => "https://git.uupdump.net/uup-dump/json-api.git",
+                id => 8,
+                lfs_enabled => JSON::PP::false,
+                path_with_namespace => "uup-dump/json-api",
+                ssh_url_to_repo => 'ssh://git@git.uupdump.net/uup-dump/json-api.git',
+                updated_at => "2026-06-15T00:00:00Z",
+                visibility => "public",
+            },
+        ];
+    };
+
+    my $inventory = GlabGroups::_discover_inventory(
+        {
+            defaults => { additional_branches => [], additional_tags => [] },
+            namespaces => [
+                {
+                    name => "uupdump-owner",
+                    source_group_url => "https://git.uupdump.net/uup-dump",
+                    target_namespace_path => "uup-dump",
+                },
+            ],
+        }
+    );
+
+    is( $inventory->{inventory}->[0]->{group_path}, "uup-dump", "Gitea owner discovery keeps the configured owner path" );
+    is( $inventory->{inventory}->[0]->{projects}->[0]->{path_with_namespace}, "uup-dump/standalone", "Gitea owner discovery preserves repository names beneath the source owner path" );
+    is( $inventory->{inventory}->[0]->{projects}->[1]->{http_url_to_repo}, "https://git.uupdump.net/uup-dump/json-api.git", "Gitea owner discovery keeps the repository clone URL for downstream mirroring" );
+}
+
+{
+    no warnings 'redefine';
     local *GlabGroups::_is_gitlab_instance_root = sub {
         die "_is_gitlab_instance_root should not be probed for googlesource roots";
     };
@@ -1623,8 +1682,10 @@ HTML
         return <<'HTML';
 <html>
   <body>
-    <a href="/device/google/akita/">device/google/akita</a>
-    <a href="/platform/frameworks/base/">platform/frameworks/base</a>
+    <a href="/device/google/akita/"><span>device/google/akita</span></a>
+    <a href="/platform/frameworks/base/">
+      <span>platform/frameworks/base</span>
+    </a>
     <a href="/cgit.css">stylesheet</a>
   </body>
 </html>
@@ -2272,6 +2333,44 @@ HTML
     ok( !defined $plan->{plan}->[0]->{skip_reason}, "normalized GitHub repo names no longer carry a skip reason" );
     is( $plan->{counts}->{sync}, 1, "normalized GitHub repo names count as sync rows in the plan" );
     is( $plan->{counts}->{skip}, 0, "normalized GitHub repo names no longer count as skipped rows" );
+}
+
+{
+    my $plan = GlabGroups::_build_plan(
+        {
+            defaults => { additional_branches => [], additional_tags => [], force_lfs => JSON::PP::false },
+            exclusions => {},
+        },
+        {
+            inventory => [
+                {
+                    group_path => "microsoft",
+                    namespace => {
+                        target_owner_path => "glab-forks",
+                        target_namespace_path => "microsoft",
+                    },
+                    projects => [
+                        {
+                            archived => JSON::PP::false,
+                            default_branch => "main",
+                            description => "",
+                            empty_repo => JSON::PP::false,
+                            http_url_to_repo => "https://github.com/microsoft/raw.git",
+                            id => 11,
+                            lfs_enabled => JSON::PP::false,
+                            path_with_namespace => "microsoft/raw",
+                            ssh_url_to_repo => "https://github.com/microsoft/raw.git",
+                            visibility => "public",
+                        },
+                    ],
+                },
+            ],
+        },
+        25,
+    );
+    is( $plan->{plan}->[0]->{target_full_path}, "glab-forks/microsoft/x-726177", "planning rewrites GitLab-reserved repository slugs like raw into a safe target path" );
+    is( $plan->{plan}->[0]->{requested_target_full_path}, "glab-forks/microsoft/raw", "planning preserves the original reserved project slug for reporting and exclusions" );
+    ok( !defined $plan->{plan}->[0]->{skip_reason}, "reserved GitLab project slugs stay syncable after target path normalization" );
 }
 
 {
@@ -3806,6 +3905,49 @@ YAML
     ok( !$create_request->{payload}->{group_runners_enabled}, "project creation disables group runners" );
     ok( !$create_request->{payload}->{shared_runners_enabled}, "project creation disables instance runners" );
     is( $create_request->{payload}->{visibility}, "public", "project creation payload forces public visibility" );
+}
+
+{
+    no warnings 'redefine';
+    my @requests;
+
+    local *GlabGroups::_get_project = sub {
+        return undef;
+    };
+
+    local *GlabGroups::_ensure_group_path = sub {
+        my ( $client, $group_path, $cache ) = @_;
+        return 42;
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        push @requests, { method => $method, path => $path, payload => $payload };
+        return []
+          if $method eq "GET"
+          && (
+            $path eq "/groups/42/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&search=x-2e676974687562&simple=true"
+            || $path eq "/groups/42/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&simple=true"
+          );
+        return { id => 100, archived => JSON::PP::false };
+    };
+
+    my $result = GlabGroups::_ensure_target_project(
+        {},
+        {
+            policy => { force_lfs => JSON::PP::false },
+            source_archived => JSON::PP::false,
+            source_description => "source",
+            source_lfs_enabled => JSON::PP::false,
+            target_full_path => "owner/group/x-2e676974687562",
+            target_namespace_path => "owner/group",
+            target_project_name => ".github",
+        }
+    );
+    ok( $result->{created}, "creates missing target projects even when the original source repo name is not a valid GitLab display name" );
+    my ($create_request) = grep { $_->{method} eq "POST" && $_->{path} eq "/projects" } @requests;
+    is( $create_request->{payload}->{path}, "x-2e676974687562", "project creation keeps the sanitized GitLab path slug" );
+    is( $create_request->{payload}->{name}, "x-2e676974687562", "project creation falls back to the sanitized slug when the original display name is invalid on GitLab" );
 }
 
 {

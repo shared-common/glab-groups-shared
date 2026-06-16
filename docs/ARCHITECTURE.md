@@ -41,8 +41,9 @@ out across a dynamic matrix capped at 250 jobs, merges those discovery shards
 into one deterministic plan, and finally fans mirror execution out again across
 up to 250 jobs. GitHub Actions still runs at most five mirror jobs concurrently.
 Batch construction now rebalances targets across the final mirror shards instead
-of letting a large tail accumulate in the last job, while also leaving the
-largest source groups for the later shards. The mirror stage skips
+of letting a large tail accumulate in the last job, while also scheduling the
+largest source groups in the earlier shards so they start with the most
+remaining workflow budget. The mirror stage skips
 already-synced repositories with `git ls-remote`, retries target
 creation/update only when the target repo is missing or later write steps need
 API-backed reconciliation, and records final per-project outcomes. The final

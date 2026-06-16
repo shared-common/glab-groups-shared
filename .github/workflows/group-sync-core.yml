@@ -312,8 +312,10 @@ jobs:
           path: gh-actions-cfg
           persist-credentials: false
 
-      - name: Fetch discovery secrets from BWS
+      - name: Fetch discovery secrets from BWS attempt 1
+        id: fetch_discovery_secrets_attempt_1
         if: ${{ needs.bootstrap.outputs.discover-secret-list != '' }}
+        continue-on-error: true
         uses: >-
           shared-common/gh-actions-shared/.github/actions/bws-fetch@v0.0.41
         with:
@@ -324,8 +326,67 @@ jobs:
           secrets: ${{ needs.bootstrap.outputs.discover-secret-list }}
           output-dir: .secrets
 
+      - name: Reset discovery secrets directory before BWS retry 2
+        if: ${{ needs.bootstrap.outputs.discover-secret-list != '' && steps.fetch_discovery_secrets_attempt_1.outcome == 'failure' }}
+        shell: bash
+        run: rm -rf .secrets
+
+      - name: Fetch discovery secrets from BWS attempt 2
+        id: fetch_discovery_secrets_attempt_2
+        if: ${{ needs.bootstrap.outputs.discover-secret-list != '' && steps.fetch_discovery_secrets_attempt_1.outcome == 'failure' }}
+        continue-on-error: true
+        uses: >-
+          shared-common/gh-actions-shared/.github/actions/bws-fetch@v0.0.41
+        with:
+          access-token: ${{ secrets.BWS_ACCESS_TOKEN }}
+          project-id: ${{ secrets.BWS_PROJECT_ID }}
+          bws-version: ${{ inputs.bws-version }}
+          bws-sha256: ${{ inputs.bws-sha256 }}
+          secrets: ${{ needs.bootstrap.outputs.discover-secret-list }}
+          output-dir: .secrets
+
+      - name: Reset discovery secrets directory before BWS retry 3
+        if: ${{ needs.bootstrap.outputs.discover-secret-list != '' && steps.fetch_discovery_secrets_attempt_2.outcome == 'failure' }}
+        shell: bash
+        run: rm -rf .secrets
+
+      - name: Fetch discovery secrets from BWS attempt 3
+        id: fetch_discovery_secrets_attempt_3
+        if: ${{ needs.bootstrap.outputs.discover-secret-list != '' && steps.fetch_discovery_secrets_attempt_2.outcome == 'failure' }}
+        continue-on-error: true
+        uses: >-
+          shared-common/gh-actions-shared/.github/actions/bws-fetch@v0.0.41
+        with:
+          access-token: ${{ secrets.BWS_ACCESS_TOKEN }}
+          project-id: ${{ secrets.BWS_PROJECT_ID }}
+          bws-version: ${{ inputs.bws-version }}
+          bws-sha256: ${{ inputs.bws-sha256 }}
+          secrets: ${{ needs.bootstrap.outputs.discover-secret-list }}
+          output-dir: .secrets
+
+      - name: Fail when discovery BWS fetch exhausts retries
+        if: >-
+          ${{
+            needs.bootstrap.outputs.discover-secret-list != ''
+            && steps.fetch_discovery_secrets_attempt_1.outcome != 'success'
+            && steps.fetch_discovery_secrets_attempt_2.outcome != 'success'
+            && steps.fetch_discovery_secrets_attempt_3.outcome != 'success'
+          }}
+        shell: bash
+        run: |
+          printf '%s\n' "BWS fetch failed after 3 attempts while loading discovery secrets" >&2
+          exit 1
+
       - name: Mask fetched discovery secrets
-        if: ${{ needs.bootstrap.outputs.discover-secret-list != '' }}
+        if: >-
+          ${{
+            needs.bootstrap.outputs.discover-secret-list != ''
+            && (
+              steps.fetch_discovery_secrets_attempt_1.outcome == 'success'
+              || steps.fetch_discovery_secrets_attempt_2.outcome == 'success'
+              || steps.fetch_discovery_secrets_attempt_3.outcome == 'success'
+            )
+          }}
         shell: bash
         env:
           SECRET_NAMES: ${{ needs.bootstrap.outputs.discover-secret-list }}
@@ -583,7 +644,9 @@ jobs:
           name: glab-groups-plan-${{ github.run_id }}
           path: .
 
-      - name: Fetch target secrets from BWS
+      - name: Fetch target secrets from BWS attempt 1
+        id: fetch_target_secrets_attempt_1
+        continue-on-error: true
         uses: >-
           shared-common/gh-actions-shared/.github/actions/bws-fetch@v0.0.41
         with:
@@ -594,7 +657,63 @@ jobs:
           secrets: ${{ needs.plan.outputs.mirror-secret-list }}
           output-dir: .secrets
 
+      - name: Reset target secrets directory before BWS retry 2
+        if: ${{ steps.fetch_target_secrets_attempt_1.outcome == 'failure' }}
+        shell: bash
+        run: rm -rf .secrets
+
+      - name: Fetch target secrets from BWS attempt 2
+        id: fetch_target_secrets_attempt_2
+        if: ${{ steps.fetch_target_secrets_attempt_1.outcome == 'failure' }}
+        continue-on-error: true
+        uses: >-
+          shared-common/gh-actions-shared/.github/actions/bws-fetch@v0.0.41
+        with:
+          access-token: ${{ secrets.BWS_ACCESS_TOKEN }}
+          project-id: ${{ secrets.BWS_PROJECT_ID }}
+          bws-version: ${{ inputs.bws-version }}
+          bws-sha256: ${{ inputs.bws-sha256 }}
+          secrets: ${{ needs.plan.outputs.mirror-secret-list }}
+          output-dir: .secrets
+
+      - name: Reset target secrets directory before BWS retry 3
+        if: ${{ steps.fetch_target_secrets_attempt_2.outcome == 'failure' }}
+        shell: bash
+        run: rm -rf .secrets
+
+      - name: Fetch target secrets from BWS attempt 3
+        id: fetch_target_secrets_attempt_3
+        if: ${{ steps.fetch_target_secrets_attempt_2.outcome == 'failure' }}
+        continue-on-error: true
+        uses: >-
+          shared-common/gh-actions-shared/.github/actions/bws-fetch@v0.0.41
+        with:
+          access-token: ${{ secrets.BWS_ACCESS_TOKEN }}
+          project-id: ${{ secrets.BWS_PROJECT_ID }}
+          bws-version: ${{ inputs.bws-version }}
+          bws-sha256: ${{ inputs.bws-sha256 }}
+          secrets: ${{ needs.plan.outputs.mirror-secret-list }}
+          output-dir: .secrets
+
+      - name: Fail when target BWS fetch exhausts retries
+        if: >-
+          ${{
+            steps.fetch_target_secrets_attempt_1.outcome != 'success'
+            && steps.fetch_target_secrets_attempt_2.outcome != 'success'
+            && steps.fetch_target_secrets_attempt_3.outcome != 'success'
+          }}
+        shell: bash
+        run: |
+          printf '%s\n' "BWS fetch failed after 3 attempts while loading target secrets" >&2
+          exit 1
+
       - name: Mask fetched secrets
+        if: >-
+          ${{
+            steps.fetch_target_secrets_attempt_1.outcome == 'success'
+            || steps.fetch_target_secrets_attempt_2.outcome == 'success'
+            || steps.fetch_target_secrets_attempt_3.outcome == 'success'
+          }}
         shell: bash
         env:
           SECRET_NAMES: ${{ needs.plan.outputs.mirror-secret-list }}

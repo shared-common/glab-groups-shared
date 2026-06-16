@@ -1090,6 +1090,23 @@ sub _discover_namespace_inventory {
     my @excluded_source_groups;
 
     if ( $source->{kind} eq "gitlab_group" ) {
+        if ( _is_gitea_instance( $source->{base_url}, $policy ) ) {
+            $source->{root_path} !~ m{/}
+              or die "Gitea source URL must point to exactly one owner path: $namespace->{source_group_url}\n";
+            my $projects = _list_gitea_owner_projects(
+                $source->{base_url},
+                $source->{root_path},
+                $policy,
+            );
+            return [
+                {
+                    namespace => $namespace,
+                    group_path => $source->{root_path},
+                    base_url => $source->{base_url},
+                    projects => $projects,
+                },
+            ];
+        }
         my $exclude_reason = _source_group_exclusion_reason( $config, $source->{root_path} );
         if ($exclude_reason) {
             warn "source group excluded by config: $source->{root_path}; skipping\n";
@@ -1508,9 +1525,9 @@ sub _build_plan {
         $group_target_counts{$group_key}++;
     }
     @plan = sort {
-        $group_target_counts{ _plan_group_priority_key($a) }
+        $group_target_counts{ _plan_group_priority_key($b) }
           <=>
-          $group_target_counts{ _plan_group_priority_key($b) }
+          $group_target_counts{ _plan_group_priority_key($a) }
           || _plan_group_priority_key($a) cmp _plan_group_priority_key($b)
           || ( $a->{target_namespace_path} || q{} ) cmp ( $b->{target_namespace_path} || q{} )
           || $a->{target_full_path} cmp $b->{target_full_path}
@@ -2831,6 +2848,7 @@ sub _ensure_target_project {
       defined $entry->{target_project_name}
       ? _required_string( $entry->{target_project_name}, "target_project_name" )
       : $path_name;
+    my $create_name = _gitlab_safe_project_display_name( $display_name, $path_name );
     my $read_request_opt = _gitlab_read_request_opt( $entry->{policy} );
     my $lookup_existing_project = sub {
         my ( $group_id, $project_full_path, $project_path_name ) = @_;
@@ -3011,9 +3029,9 @@ sub _ensure_target_project {
                 "/projects",
                 {
                     %payload,
-                    name => $display_name,
+                    name => $create_name,
                     namespace_id => $target_group_id,
-                    path => basename($target_full_path),
+                    path => $path_name,
                     visibility => "public",
                 }
             );
@@ -3427,6 +3445,81 @@ sub _list_github_org_projects {
     return \@projects;
 }
 
+sub _list_gitea_owner_projects {
+    my ( $base_url, $owner_path, $policy ) = @_;
+    $owner_path = _required_path_segment( $owner_path, "Gitea owner path" );
+
+    for my $account_kind (qw(orgs users)) {
+        my $endpoint_found = 0;
+        my @projects;
+        my $page = 1;
+        my $page_size = _gitlab_read_page_size($policy);
+        while (1) {
+            my $data = _http_json_request(
+                sprintf(
+                    "%s/api/v1/%s/%s/repos?page=%d&limit=%d",
+                    $base_url,
+                    $account_kind,
+                    uri_escape_utf8($owner_path),
+                    $page,
+                    $page_size,
+                ),
+                {
+                    %{ _source_read_request_opt($policy) },
+                    allow_missing => JSON::PP::true,
+                }
+            );
+            if ( !defined $data ) {
+                @projects = ();
+                last;
+            }
+            $endpoint_found = 1;
+            ref($data) eq "ARRAY" or die "Gitea owner repositories response must be a list\n";
+            last unless @{$data};
+            for my $repo ( @{$data} ) {
+                next unless ref($repo) eq "HASH";
+                my $repo_name = _required_path_segment(
+                    _strip_optional_git_suffix( $repo->{name} ),
+                    "Gitea repository name",
+                );
+                my $full_name =
+                    defined $repo->{full_name} && !ref( $repo->{full_name} ) && length $repo->{full_name}
+                  ? $repo->{full_name}
+                  : _join_path( $owner_path, $repo_name );
+                $full_name = _required_relative_project_path(
+                    $full_name,
+                    "Gitea repository full_name",
+                );
+                my $clone_url =
+                    defined $repo->{clone_url} && !ref( $repo->{clone_url} ) && length $repo->{clone_url}
+                  ? $repo->{clone_url}
+                  : _project_git_url( $base_url, $full_name );
+                push @projects,
+                  {
+                    archived => $repo->{archived} ? JSON::PP::true : JSON::PP::false,
+                    default_branch => defined $repo->{default_branch} ? $repo->{default_branch} : q{},
+                    description => defined $repo->{description} ? $repo->{description} : q{},
+                    empty_repo => $repo->{empty} ? JSON::PP::true : JSON::PP::false,
+                    http_url_to_repo => _required_https_url( $clone_url, "Gitea clone_url" ),
+                    id => $repo->{id},
+                    lfs_enabled => $repo->{has_lfs} ? JSON::PP::true : JSON::PP::false,
+                    last_activity_at => $repo->{updated_at} || $repo->{pushed_at},
+                    path_with_namespace => $full_name,
+                    ssh_url_to_repo => $repo->{ssh_url} || $clone_url,
+                    visibility => defined $repo->{visibility}
+                      ? $repo->{visibility}
+                      : ( $repo->{private} ? "private" : "public" ),
+                  };
+            }
+            last if @{$data} < $page_size;
+            $page++;
+        }
+        return \@projects if $endpoint_found;
+    }
+
+    die "Gitea owner not found or has no repositories at $base_url/$owner_path\n";
+}
+
 sub _list_cgit_root_projects {
     my ( $base_url, $group_path, $policy ) = @_;
     return _list_root_index_projects(
@@ -3443,8 +3536,8 @@ sub _list_root_index_projects {
     my $html = _http_text_request( $base_url, _source_read_request_opt($policy) );
     my @projects;
     my %seen;
-    while ( $html =~ m{<a[^>]+href=(["'])([^"'?#]+)\1[^>]*>([^<]*)</a>}ig ) {
-        my $repo_path = _extract_root_repo_path( $2, $3, $opt );
+    while ( $html =~ m{<a\b[^>]*href\s*=\s*(["'])([^"'?#]+)\1[^>]*>}ig ) {
+        my $repo_path = _extract_root_repo_path( $2, q{}, $opt );
         next unless defined $repo_path;
         next if $seen{$repo_path}++;
         my $repo_url = $base_url . "/" . $repo_path;
@@ -3452,7 +3545,7 @@ sub _list_root_index_projects {
           {
             archived => JSON::PP::false,
             default_branch => q{},
-            description => defined $3 && length $3 ? $3 : $repo_path,
+            description => basename($repo_path),
             empty_repo => JSON::PP::false,
             http_url_to_repo => $repo_url,
             id => "cgit:$repo_url",
@@ -4177,6 +4270,7 @@ sub _http_text_request {
         if ( $response->{status} == 0 && $http_status >= 200 && $http_status < 300 ) {
             return $body;
         }
+        return undef if $opt->{allow_missing} && $http_status == 404;
 
         if (
             (
@@ -4196,6 +4290,16 @@ sub _http_text_request {
         die "HTTP request failed [$status_label] $url: $message\n";
     }
     die "HTTP request exhausted retries for $url\n";
+}
+
+sub _http_json_request {
+    my ( $url, $opt ) = @_;
+    my $text = _http_text_request( $url, $opt );
+    return undef unless defined $text;
+    return undef if $text eq q{};
+    my $decoded = eval { $JSON->decode($text) };
+    $@ and die "HTTP JSON decode failed for $url: $@\n";
+    return $decoded;
 }
 
 sub _gitlab_read_page_size {
@@ -4578,6 +4682,15 @@ sub _gitlab_safe_path_segment {
     return "x-" . unpack( "H*", $segment );
 }
 
+sub _gitlab_safe_project_display_name {
+    my ( $display_name, $path_segment ) = @_;
+    $display_name = _required_string( $display_name, "target project display name" );
+    $path_segment = _required_path_segment( $path_segment, "target project path segment" );
+    return $display_name
+      unless defined _gitlab_invalid_project_name_reason($display_name);
+    return $path_segment;
+}
+
 sub _resolve_explicit_project_target_paths {
     my ( $project, $namespace ) = @_;
     my $requested_target_namespace_path = _required_relative_namespace_path(
@@ -4899,15 +5012,73 @@ sub _gitlab_invalid_target_path_reason {
     return undef;
 }
 
+my %GITLAB_RESERVED_PATH_SEGMENTS = map { ( $_ => 1 ) } qw(
+  -
+  admin
+  api
+  assets
+  badges
+  blame
+  blob
+  builds
+  commits
+  create
+  create_dir
+  dashboard
+  edit
+  explore
+  files
+  find_file
+  groups
+  health_check
+  help
+  import
+  jwt
+  login
+  new
+  oauth
+  preview
+  profile
+  projects
+  public
+  raw
+  refs
+  s
+  search
+  snippets
+  tree
+  update
+  uploads
+  users
+  v2
+  wikis
+);
+
 sub _gitlab_invalid_path_segment_reason {
     my ($segment) = @_;
     $segment = _required_string( $segment, "target path segment" );
     return "path segments may contain only ASCII letters, digits, '_', '-', and '.'"
       if $segment !~ /\A[A-Za-z0-9._-]+\z/;
+    return "path segments must not contain consecutive special characters"
+      if $segment =~ /[._-]{2,}/;
     return "path segments must not start with '-', '_', or '.'"
       if $segment =~ /\A[-_.]/;
     return "path segments must not end with '-', '_', '.', '.git', or '.atom'"
       if $segment =~ /(?:[-_.]|\.(?:git|atom))\z/i;
+    return "path segment is reserved by GitLab routing"
+      if $GITLAB_RESERVED_PATH_SEGMENTS{ lc $segment };
+    return "path segments must not equal '.well-known'"
+      if lc($segment) eq ".well-known";
+    return undef;
+}
+
+sub _gitlab_invalid_project_name_reason {
+    my ($name) = @_;
+    $name = _required_string( $name, "target project display name" );
+    return "project names must start with a letter, digit, or underscore"
+      if $name !~ /\A[0-9A-Za-z_]/;
+    return "project names may contain only ASCII letters, digits, spaces, '_', '-', '.', and '+'"
+      if $name !~ /\A[0-9A-Za-z_. +\-]+\z/;
     return undef;
 }
 
@@ -4960,6 +5131,26 @@ sub _is_gitlab_instance_root {
         1;
     };
     return $ok ? 1 : 0;
+}
+
+sub _is_gitea_instance {
+    my ( $base_url, $policy ) = @_;
+    my $version = eval {
+        _http_json_request(
+            $base_url . "/api/v1/version",
+            {
+                %{ _source_read_request_opt($policy) },
+                allow_missing => JSON::PP::true,
+            }
+        );
+    };
+    return 0 if !$version;
+    return 0 unless ref($version) eq "HASH";
+    return 1
+      if defined $version->{version} && !ref( $version->{version} ) && length $version->{version};
+    return 1
+      if defined $version->{Version} && !ref( $version->{Version} ) && length $version->{Version};
+    return 0;
 }
 
 sub _is_gitiles_host {
