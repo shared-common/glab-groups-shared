@@ -230,13 +230,7 @@ jobs:
           }
           my $batch_size = $config->{defaults}->{batch_size};
           my $max_parallel = $config->{defaults}->{max_parallel};
-          my $discovery_units = scalar( @{ $config->{projects} || [] } );
-          for my $namespace ( @{ $config->{namespaces} || [] } ) {
-              my $source_group_paths = $namespace->{source_group_paths};
-              $discovery_units += ref($source_group_paths) eq "ARRAY" && @{$source_group_paths}
-                ? scalar @{$source_group_paths}
-                : 1;
-          }
+          my $discovery_units = scalar( @{ GlabGroups::_discover_inventory_units($config) } );
           defined $batch_size or die "config defaults.batch_size is required\n";
           defined $max_parallel or die "config defaults.max_parallel is required\n";
 

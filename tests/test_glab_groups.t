@@ -1025,6 +1025,123 @@ JSONL
         return [
             {
                 archived => JSON::PP::false,
+                clone_url => "https://github.com/microsoft/page-one.git",
+                default_branch => "main",
+                description => "page one",
+                full_name => "microsoft/page-one",
+                id => 201,
+                private => JSON::PP::false,
+                pushed_at => "2026-06-09T00:00:00Z",
+                size => 1,
+                ssh_url => 'git@github.com:microsoft/page-one.git',
+                visibility => "public",
+            },
+        ] if $path =~ /page=1\b/;
+        return [
+            {
+                archived => JSON::PP::false,
+                clone_url => "https://github.com/microsoft/page-two.git",
+                default_branch => "main",
+                description => "page two",
+                full_name => "microsoft/page-two",
+                id => 202,
+                private => JSON::PP::false,
+                pushed_at => "2026-06-09T00:00:00Z",
+                size => 1,
+                ssh_url => 'git@github.com:microsoft/page-two.git',
+                visibility => "public",
+            },
+        ] if $path =~ /page=2\b/;
+        return [
+            {
+                archived => JSON::PP::false,
+                clone_url => "https://github.com/microsoft/page-three.git",
+                default_branch => "main",
+                description => "page three",
+                full_name => "microsoft/page-three",
+                id => 203,
+                private => JSON::PP::false,
+                pushed_at => "2026-06-09T00:00:00Z",
+                size => 1,
+                ssh_url => 'git@github.com:microsoft/page-three.git',
+                visibility => "public",
+            },
+        ] if $path =~ /page=3\b/;
+        return [] if $path =~ /page=(?:4|5|6)\b/;
+        die "unexpected GitHub request: $base_url $path";
+    };
+
+    my $config = {
+        defaults => { additional_branches => [], additional_tags => [] },
+        namespaces => [
+            {
+                discovery_shards => 3,
+                name => "microsoft",
+                source_group_url => "https://github.com/microsoft",
+                target_namespace_path => "microsoft",
+            },
+        ],
+    };
+
+    my $units = GlabGroups::_discover_inventory_units($config);
+    is( scalar @{$units}, 3, "GitHub org discovery_shards expands one namespace into multiple discovery units" );
+    is_deeply(
+        [ map { $_->{shard_index} } @{$units} ],
+        [ 0, 1, 2 ],
+        "GitHub org discovery shard units cover every shard index in order",
+    );
+
+    my $shard_zero = GlabGroups::_discover_inventory(
+        $config,
+        {
+            unit_start => 0,
+            unit_stride => 3,
+        }
+    );
+    my $shard_one = GlabGroups::_discover_inventory(
+        $config,
+        {
+            unit_start => 1,
+            unit_stride => 3,
+        }
+    );
+    my $shard_two = GlabGroups::_discover_inventory(
+        $config,
+        {
+            unit_start => 2,
+            unit_stride => 3,
+        }
+    );
+
+    is_deeply(
+        [ map { $_->{path_with_namespace} } @{ $shard_zero->{inventory}->[0]->{projects} } ],
+        ["microsoft/page-one"],
+        "GitHub org discovery shard zero reads only its assigned page slice",
+    );
+    is_deeply(
+        [ map { $_->{path_with_namespace} } @{ $shard_one->{inventory}->[0]->{projects} } ],
+        ["microsoft/page-two"],
+        "GitHub org discovery shard one reads the next assigned page slice",
+    );
+    is_deeply(
+        [ map { $_->{path_with_namespace} } @{ $shard_two->{inventory}->[0]->{projects} } ],
+        ["microsoft/page-three"],
+        "GitHub org discovery shard two reads the final assigned page slice",
+    );
+}
+
+{
+    no warnings 'redefine';
+
+    local *GlabGroups::_load_source_auth = sub { return { github_app => { app_id => "123", pem => "unused" }, github_installation_tokens => {} }; };
+    local *GlabGroups::_github_installation_source_auth = sub {
+        return { token => "ghs_install_token", username => "x-access-token" };
+    };
+    local *GlabGroups::_github_request = sub {
+        my ( $base_url, $path, $payload, $opt ) = @_;
+        return [
+            {
+                archived => JSON::PP::false,
                 clone_url => "https://github.com/crowdsecurity/.github.git",
                 default_branch => "main",
                 description => "Community health files",

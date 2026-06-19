@@ -60,6 +60,7 @@ my %GITLAB_READ_DEFAULTS = (
 my $GROUP_PROJECT_CREATION_LEVEL = "maintainer";
 my $GROUP_SHARED_RUNNERS_SETTING = "disabled_and_unoverridable";
 my $GROUP_SUBGROUP_CREATION_LEVEL = "maintainer";
+my $DISCOVERY_MAX_SHARDS = 250;
 my $TARGET_NAMESPACE_STATE_CACHE_MIN_TARGETS = 3;
 
 sub run_cli {
@@ -920,8 +921,9 @@ sub _discover_inventory {
         last if ( $opt->{unit_limit} || 0 ) > 0 && $processed_units >= $opt->{unit_limit};
         my $unit = $units[$unit_index];
         next unless ref($unit) eq "HASH";
-        if ( $unit->{type} eq "namespace" || $unit->{type} eq "namespace_source_group_path" ) {
+        if ( $unit->{type} eq "namespace" || $unit->{type} eq "namespace_source_group_path" || $unit->{type} eq "namespace_shard" ) {
             my $namespace = $config->{namespaces}->[ $unit->{index} ];
+            my %discover_opt;
             if ( $unit->{type} eq "namespace_source_group_path" ) {
                 my $source_group_paths = $namespace->{source_group_paths};
                 ref($source_group_paths) eq "ARRAY"
@@ -934,9 +936,15 @@ sub _discover_inventory {
                     source_group_paths => [$source_group_path],
                 };
             }
+            elsif ( $unit->{type} eq "namespace_shard" ) {
+                %discover_opt = (
+                    page_shard_count => $unit->{shard_count},
+                    page_shard_index => $unit->{shard_index},
+                );
+            }
             my $policy = _merge_policy( $config->{defaults}, $namespace, {} );
             my $namespace_inventory =
-              _discover_namespace_inventory( $namespace, $policy, $source_auth, $config );
+              _discover_namespace_inventory( $namespace, $policy, $source_auth, $config, \%discover_opt );
             my $namespace_buckets =
                 ref($namespace_inventory) eq "HASH"
               ? $namespace_inventory->{inventory}
@@ -1013,12 +1021,35 @@ sub _discover_inventory_units {
             }
             next;
         }
+        my $discovery_shards = _namespace_discovery_shard_count($namespace);
+        if ( $discovery_shards > 1 ) {
+            for my $shard_index ( 0 .. $discovery_shards - 1 ) {
+                push @units,
+                  {
+                    index => $index,
+                    shard_count => $discovery_shards,
+                    shard_index => $shard_index,
+                    type => "namespace_shard",
+                  };
+            }
+            next;
+        }
         push @units, { index => $index, type => "namespace" };
     }
     for my $index ( 0 .. $#{ $config->{projects} || [] } ) {
         push @units, { index => $index, type => "project" };
     }
     return \@units;
+}
+
+sub _namespace_discovery_shard_count {
+    my ($namespace) = @_;
+    return 1 unless ref($namespace) eq "HASH";
+    my $source_group_url = $namespace->{source_group_url};
+    return 1 unless defined $source_group_url && !ref($source_group_url) && length $source_group_url;
+    my $source = _parse_source_url( $source_group_url, undef );
+    return 1 unless ref($source) eq "HASH" && ( $source->{kind} || q{} ) eq "github_org";
+    return $namespace->{discovery_shards} || 1;
 }
 
 sub _matching_namespace_for_explicit_project {
@@ -1075,7 +1106,8 @@ sub _merge_discover_payloads {
 }
 
 sub _discover_namespace_inventory {
-    my ( $namespace, $policy, $source_auth, $config ) = @_;
+    my ( $namespace, $policy, $source_auth, $config, $opt ) = @_;
+    $opt ||= {};
     my $source = _parse_source_url(
         $namespace->{source_group_url},
         sub {
@@ -1217,6 +1249,10 @@ sub _discover_namespace_inventory {
             $source->{root_path},
             $policy,
             $github_source_auth,
+            {
+                page_shard_count => $opt->{page_shard_count},
+                page_shard_index => $opt->{page_shard_index},
+            },
         );
         return [
             {
@@ -2270,6 +2306,7 @@ sub _normalize_namespace {
         force_lfs => _optional_bool( $payload->{force_lfs} ),
         git_timeout_seconds => $payload->{git_timeout_seconds},
         gitlab_source_include_subgroups => _optional_bool( $payload->{gitlab_source_include_subgroups} ),
+        discovery_shards => _optional_bounded_positive_int( $payload->{discovery_shards}, $DISCOVERY_MAX_SHARDS, "$label.discovery_shards" ),
         name => _required_string( $payload->{name}, "$label.name" ),
         read_retry_attempts => _optional_positive_int( $payload->{read_retry_attempts}, "$label.read_retry_attempts" ),
         read_retry_backoff_seconds => _optional_positive_int( $payload->{read_retry_backoff_seconds}, "$label.read_retry_backoff_seconds" ),
@@ -3419,9 +3456,11 @@ sub _get_github_account_installation {
 }
 
 sub _list_github_org_projects {
-    my ( $base_url, $org_path, $policy, $source_auth ) = @_;
+    my ( $base_url, $org_path, $policy, $source_auth, $opt ) = @_;
+    $opt ||= {};
     my @projects;
-    my $page = 1;
+    my $page = ( $opt->{page_shard_index} || 0 ) + 1;
+    my $page_stride = $opt->{page_shard_count} || 1;
     my $page_size = 100;
     while (1) {
         my $path = sprintf(
@@ -3459,7 +3498,7 @@ sub _list_github_org_projects {
               };
         }
         last if @{$data} < $page_size;
-        $page++;
+        $page += $page_stride;
     }
     return \@projects;
 }

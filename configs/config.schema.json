@@ -241,6 +241,11 @@
             "source_group_url": {
               "$ref": "#/$defs/httpsUrl"
             },
+            "discovery_shards": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 250
+            },
             "target_owner_path": {
               "$ref": "#/$defs/namespacePath"
             },
