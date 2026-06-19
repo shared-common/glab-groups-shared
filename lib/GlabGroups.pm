@@ -2497,8 +2497,11 @@ sub _managed_group_settings_payload {
 }
 
 sub _ensure_group_path {
-    my ( $client, $group_path, $cache ) = @_;
-    return $cache->{$group_path} if exists $cache->{$group_path};
+    my ( $client, $group_path, $cache, $opt ) = @_;
+    my $prefer_parent_lookup =
+      ref($opt) eq "HASH" && $opt->{prefer_parent_lookup};
+    return $cache->{$group_path}
+      if !$prefer_parent_lookup && exists $cache->{$group_path};
     my @parts = split m{/}, _required_relative_namespace_path( $group_path, "group_path" ), -1;
     @parts or die "group_path must contain at least one segment\n";
 
@@ -2506,11 +2509,16 @@ sub _ensure_group_path {
     my $parent_id;
     for my $part (@parts) {
         $current = length $current ? "$current/$part" : $part;
-        if ( exists $cache->{$current} ) {
+        if ( !$prefer_parent_lookup && exists $cache->{$current} ) {
             $parent_id = $cache->{$current};
             next;
         }
-        my $group = _get_group( $client, $current );
+        my $group =
+            $prefer_parent_lookup
+          ? _find_group_by_parent_and_path( $client, $parent_id, $current, $part )
+          : _get_group( $client, $current );
+        $group ||= _get_group( $client, $current )
+          if !$group && $prefer_parent_lookup;
         if ( !$group ) {
             my %payload = (
                 name => $part,
@@ -2540,8 +2548,16 @@ sub _ensure_group_path {
                     );
                 }
                 if ( _is_gitlab_path_conflict_error($create_error) ) {
-                    $group = _get_group( $client, $current )
-                      || _find_group_by_parent_and_path( $client, $parent_id, $current, $part );
+                    if ($prefer_parent_lookup) {
+                        $group =
+                             _find_group_by_parent_and_path( $client, $parent_id, $current, $part )
+                          || _get_group( $client, $current );
+                    }
+                    else {
+                        $group =
+                             _get_group( $client, $current )
+                          || _find_group_by_parent_and_path( $client, $parent_id, $current, $part );
+                    }
                     die "gitlab group path conflict for $current: $create_error" unless $group;
                 }
                 die $create_error unless $group;
@@ -3072,6 +3088,9 @@ sub _ensure_target_project {
                         $client,
                         $target_namespace_path,
                         $group_cache,
+                        {
+                            prefer_parent_lookup => JSON::PP::true,
+                        },
                     );
                     $refreshed_namespace = 1;
                     if ($path_conflict_error) {

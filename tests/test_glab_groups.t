@@ -4424,6 +4424,79 @@ YAML
 
 {
     no warnings 'redefine';
+    my @requests;
+
+    local *GlabGroups::_get_project = sub {
+        return undef;
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        push @requests, { method => $method, path => $path, payload => $payload };
+        return { id => 66, full_path => "glab-forks", path => "glab-forks" }
+          if $method eq "GET" && $path eq "/groups/glab-forks";
+        return { id => 42, full_path => "glab-forks/google", path => "google" }
+          if $method eq "GET" && $path eq "/groups/glab-forks%2Fgoogle";
+        return []
+          if $method eq "GET"
+          && (
+            $path eq "/groups/42/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&search=user-recovery-tools&simple=true"
+            || $path eq "/groups/42/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&simple=true"
+            || $path eq "/groups/77/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&search=user-recovery-tools&simple=true"
+            || $path eq "/groups/77/projects?include_subgroups=false&with_shared=false&per_page=100&page=1&simple=true"
+          );
+        die "gitlab request failed [400] POST /projects: {\"message\":{\"namespace\":[\"is not valid\"]}}\n"
+          if $method eq "POST"
+          && $path eq "/projects"
+          && $payload->{namespace_id} == 42;
+        return [
+            {
+                id => 66,
+                full_path => "glab-forks",
+                path => "glab-forks",
+            },
+        ] if $method eq "GET"
+          && $path eq "/groups?top_level_only=true&per_page=100&page=1&search=glab-forks";
+        return [
+            {
+                id => 77,
+                full_path => "glab-forks/google",
+                path => "google",
+            },
+        ] if $method eq "GET"
+          && $path eq "/groups/66/subgroups?per_page=100&page=1&search=google";
+        return { id => 124, archived => JSON::PP::false }
+          if $method eq "POST"
+          && $path eq "/projects"
+          && $payload->{namespace_id} == 77;
+        die "unexpected request $method $path";
+    };
+
+    my $result = GlabGroups::_ensure_target_project(
+        {},
+        {
+            policy => { force_lfs => JSON::PP::false },
+            source_archived => JSON::PP::false,
+            source_description => "source",
+            source_lfs_enabled => JSON::PP::false,
+            target_full_path => "glab-forks/google/user-recovery-tools",
+            target_namespace_path => "glab-forks/google",
+        }
+    );
+    ok( $result->{created}, "invalid namespace retry refreshes through parent-scoped group discovery when the direct group lookup is stale" );
+    is_deeply(
+        [ map { $_->{payload}->{namespace_id} } grep { $_->{method} eq "POST" && $_->{path} eq "/projects" } @requests ],
+        [ 42, 77 ],
+        "invalid namespace refresh retries project creation with the live subgroup id from parent search",
+    );
+    ok(
+        scalar( grep { $_->{path} eq "/groups/66/subgroups?per_page=100&page=1&search=google" } @requests ),
+        "invalid namespace refresh falls back to parent-scoped subgroup search",
+    );
+}
+
+{
+    no warnings 'redefine';
     my $dir = tempdir( CLEANUP => 1 );
     my $plan_path = File::Spec->catfile( $dir, "plan.json" );
     my $output_path = File::Spec->catfile( $dir, "results.json" );
