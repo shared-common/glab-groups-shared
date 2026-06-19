@@ -309,8 +309,8 @@ sub classify_plan_action {
 sub analyze_selected_refs {
     my ( $repo_dir, $refs, $max_blob_bytes ) = @_;
     my @rev_args = (
-        map { "refs/heads/$_" } @{ $refs->{branches} || [] },
-        map { "refs/tags/$_" } @{ $refs->{tags} || [] },
+        ( map { "refs/heads/$_" } @{ $refs->{branches} || [] } ),
+        ( map { "refs/tags/$_" } @{ $refs->{tags} || [] } ),
     );
     @rev_args or return { total_bytes => 0, oversized_blobs => [] };
 

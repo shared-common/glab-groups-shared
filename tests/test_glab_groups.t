@@ -3028,6 +3028,34 @@ YAML
 
 {
     my $dir = tempdir( CLEANUP => 1 );
+
+    my ( $status, $output ) = run_cmd( "git", "init", "-b", "main", $dir );
+    is( $status, 0, "tag analysis repo init succeeds" ) or diag($output);
+    ( $status, $output ) = run_cmd( "git", "-C", $dir, "config", "user.email", 'tests@example.invalid' );
+    is( $status, 0, "tag analysis git config email succeeds" ) or diag($output);
+    ( $status, $output ) = run_cmd( "git", "-C", $dir, "config", "user.name", "Tests" );
+    is( $status, 0, "tag analysis git config name succeeds" ) or diag($output);
+    open( my $fh, ">:encoding(UTF-8)", File::Spec->catfile( $dir, "README.md" ) ) or die "unable to write tag analysis source file";
+    print {$fh} "source\n";
+    close $fh;
+    ( $status, $output ) = run_cmd( "git", "-C", $dir, "add", "README.md" );
+    is( $status, 0, "tag analysis git add succeeds" ) or diag($output);
+    ( $status, $output ) = run_cmd( "git", "-C", $dir, "commit", "-m", "source" );
+    is( $status, 0, "tag analysis git commit succeeds" ) or diag($output);
+    ( $status, $output ) = run_cmd( "git", "-C", $dir, "tag", "debian/1.9.0-3" );
+    is( $status, 0, "tag analysis git tag succeeds" ) or diag($output);
+
+    my $analysis = analyze_selected_refs(
+        $dir,
+        { branches => ["main"], tags => ["debian/1.9.0-3"] },
+        64,
+    );
+    cmp_ok( $analysis->{total_bytes}, ">", 0, "counts selected refs when tag names include slashes" );
+    is( scalar @{ $analysis->{oversized_blobs} }, 0, "slash-bearing tag refs do not break selected ref analysis" );
+}
+
+{
+    my $dir = tempdir( CLEANUP => 1 );
     my $source = File::Spec->catdir( $dir, "source" );
     my $mirror = File::Spec->catdir( $dir, "mirror" );
 
