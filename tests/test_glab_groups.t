@@ -4891,6 +4891,9 @@ YAML
     local *GlabGroups::analyze_selected_refs = sub {
         return { oversized_blobs => [], total_bytes => 1 };
     };
+    local *GlabGroups::_ensure_target_branch_allows_force_push = sub {
+        return 1;
+    };
     local *GlabGroups::_push_selected_refs = sub {
         die "git push failed for managed sync branch managed/sync: remote: batch response: Your push to this repository cannot be completed as it would exceed the allocated storage for your project. Contact your GitLab administrator for more information.\n";
     };
@@ -5028,6 +5031,55 @@ YAML
     my @project_put_requests = grep { $_->{method} eq "PUT" && $_->{path} eq "/projects/99" } @requests;
     is( scalar @project_put_requests, 1, "finalize does not emit extra project update calls when only branch protection is needed" );
     ok( !exists $project_put_requests[-1]->{payload}->{visibility}, "project update payload does not set visibility" );
+}
+
+{
+    no warnings 'redefine';
+    my @requests;
+    my %branches = (
+        "managed/sync" => {
+            allow_force_push => JSON::PP::false,
+            name => "managed/sync",
+            protected => JSON::PP::true,
+        },
+    );
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        push @requests, { method => $method, path => $path, payload => $payload };
+        if ( $method eq "GET" && $path =~ m{\A/projects/99/protected_branches/(.+)\z} ) {
+            my ($branch_name) = $path =~ m{\A/projects/99/protected_branches/(.+)\z};
+            $branch_name =~ s/%2F/\//g;
+            return undef if !exists $branches{$branch_name} || !$branches{$branch_name}->{protected};
+            return { %{ $branches{$branch_name} } };
+        }
+        if ( $method eq "PATCH" && $path =~ m{\A/projects/99/protected_branches/(.+)\?allow_force_push=true\z} ) {
+            my ($branch_name) = $path =~ m{\A/projects/99/protected_branches/(.+)\?allow_force_push=true\z};
+            $branch_name =~ s/%2F/\//g;
+            $branches{$branch_name}->{allow_force_push} = JSON::PP::true;
+            return { %{ $branches{$branch_name} } };
+        }
+        die "unexpected request: $method $path";
+    };
+
+    GlabGroups::_ensure_target_branch_allows_force_push( {}, 99, "managed/sync" );
+    ok( $branches{"managed/sync"}->{allow_force_push}, "managed sync branch helper enables force push on an already-protected branch" );
+    is_deeply(
+        \@requests,
+        [
+            {
+                method => "GET",
+                path => "/projects/99/protected_branches/managed%2Fsync",
+                payload => undef,
+            },
+            {
+                method => "PATCH",
+                path => "/projects/99/protected_branches/managed%2Fsync?allow_force_push=true",
+                payload => undef,
+            },
+        ],
+        "managed sync branch helper reads existing protection state and enables force push only when needed",
+    );
 }
 
 {
@@ -5322,6 +5374,33 @@ YAML
 {
     no warnings 'redefine';
     my @requests;
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        push @requests, { method => $method, path => $path, payload => $payload };
+        return undef
+          if $method eq "GET"
+          && $path eq "/projects/99/protected_branches/managed%2Fsync";
+        die "unexpected request: $method $path";
+    };
+
+    GlabGroups::_ensure_target_branch_allows_force_push( {}, 99, "managed/sync" );
+    is_deeply(
+        \@requests,
+        [
+            {
+                method => "GET",
+                path => "/projects/99/protected_branches/managed%2Fsync",
+                payload => undef,
+            },
+        ],
+        "managed sync branch helper is a no-op when the branch is not protected",
+    );
+}
+
+{
+    no warnings 'redefine';
+    my @requests;
     my @resolved_namespaces;
 
     local *GlabGroups::_get_project = sub {
@@ -5568,6 +5647,7 @@ OUT
 {
     no warnings 'redefine';
     my $initial_lfs_syncs = 0;
+    my $managed_sync_force_push_checks = 0;
     my $lfs_repushes = 0;
     my $lfs_enable_calls = 0;
 
@@ -5631,6 +5711,13 @@ OUT
         $lfs_repushes++;
         return 1;
     };
+    local *GlabGroups::_ensure_target_branch_allows_force_push = sub {
+        my ( $client, $project_id, $branch_name ) = @_;
+        $managed_sync_force_push_checks++;
+        is( $project_id, 99, "mirror entry enables force push on the resolved target project id" );
+        is( $branch_name, "managed/sync", "mirror entry enables force push on the managed sync branch" );
+        return 1;
+    };
     local *GlabGroups::_push_selected_refs = sub {
         my ( $repo_dir, $selected, $policy, $default_branch, $target_sync_branch, $opt ) = @_;
         $opt->{on_missing_lfs}->();
@@ -5676,6 +5763,7 @@ OUT
     is( $initial_lfs_syncs, 1, "mirror entry performs the initial LFS sync exactly once" );
     is( $lfs_repushes, 1, "mirror entry reruns git lfs push --all when the later Git push reports missing LFS objects" );
     is( $lfs_enable_calls, 2, "mirror entry re-checks target LFS enablement before the remediation push-all retry" );
+    is( $managed_sync_force_push_checks, 1, "mirror entry enables managed sync branch force push before pushing refs" );
 }
 
 {

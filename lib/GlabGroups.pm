@@ -1987,6 +1987,17 @@ sub _mirror_entry {
     if ($needs_lfs) {
         $sync_lfs_objects->();
     }
+    if ( $default_branch && grep { $_ eq $default_branch } @{ $refs_to_sync->{branches} || [] } ) {
+        if ( !$prepared->{project_id} ) {
+            my $ensured = _ensure_target_project( $target_client, $entry );
+            %{$prepared} = ( %{$prepared}, %{$ensured} );
+        }
+        _ensure_target_branch_allows_force_push(
+            $target_client,
+            $prepared->{project_id},
+            $target_client->{sync_branch},
+        );
+    }
 
     my $push_ok = eval {
         _push_selected_refs(
@@ -3370,6 +3381,20 @@ sub _ensure_target_branch_protected {
     my $protect_error = $@ || "unknown protected branch error\n";
     return 1 if _is_gitlab_already_exists_error($protect_error);
     die $protect_error;
+}
+
+sub _ensure_target_branch_allows_force_push {
+    my ( $client, $project_id, $branch_name ) = @_;
+    my $protected = _get_protected_branch( $client, $project_id, $branch_name );
+    return 1 unless $protected;
+    return 1 if $protected->{allow_force_push};
+    _gitlab_request(
+        $client,
+        "PATCH",
+        "/projects/$project_id/protected_branches/" . _encode_path($branch_name) . "?allow_force_push=true",
+        undef,
+    );
+    return 1;
 }
 
 sub _list_gitlab_top_level_groups {
