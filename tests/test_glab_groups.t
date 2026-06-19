@@ -3699,6 +3699,63 @@ YAML
 {
     no warnings 'redefine';
     my %cache = ( owner => 6, "owner/precreated" => 7 );
+    my @sleeps;
+    my $leaf_search_attempts = 0;
+
+    local *GlabGroups::_sleep_seconds = sub {
+        my ($seconds) = @_;
+        push @sleeps, $seconds;
+        return 1;
+    };
+
+    local *GlabGroups::_gitlab_request = sub {
+        my ( $client, $method, $path, $payload, $opt ) = @_;
+        if ( $method eq "POST" && $path eq "/groups" ) {
+            die "gitlab request failed [400] POST /groups: {\"message\":\"Failed to save group {:path=>[\\\"has already been taken\\\"]}\"}\n";
+        }
+        return [
+            {
+                id => 6,
+                full_path => "owner",
+                path => "owner",
+            },
+        ] if $method eq "GET"
+          && $path eq "/groups?top_level_only=true&per_page=100&page=1&search=owner";
+        return [
+            {
+                id => 7,
+                full_path => "owner/precreated",
+                path => "precreated",
+            },
+        ] if $method eq "GET"
+          && $path eq "/groups/6/subgroups?per_page=100&page=1&search=precreated";
+        if ( $method eq "GET" && $path eq "/groups/7/subgroups?per_page=100&page=1&search=support" ) {
+            $leaf_search_attempts++;
+            return [] if $leaf_search_attempts < 3;
+            return [
+                {
+                    id => 77,
+                    full_path => "owner/precreated/support",
+                    path => "support",
+                },
+            ];
+        }
+        return []
+          if $method eq "GET" && $path eq "/groups/7/subgroups?per_page=100&page=1&all_available=true";
+        return undef
+          if $method eq "GET" && $path eq "/groups/owner%2Fprecreated%2Fsupport";
+        die "unexpected gitlab request: $method $path";
+    };
+
+    my $group_id = GlabGroups::_ensure_group_path( {}, "owner/precreated/support", \%cache );
+    is( $group_id, 77, "reuses an existing target group after path-conflict visibility lag" );
+    is( $cache{"owner/precreated/support"}, 77, "caches a group that becomes visible during conflict retries" );
+    is_deeply( \@sleeps, [1], "conflict recovery waits between repeated existing-group lookups" );
+}
+
+{
+    no warnings 'redefine';
+    my %cache = ( owner => 6, "owner/precreated" => 7 );
 
     local *GlabGroups::_ensure_main_user_group_membership_owner = sub { return 1; };
     local *GlabGroups::_ensure_service_user_group_membership_owner = sub { return 1; };
@@ -3714,12 +3771,30 @@ YAML
         if ( $method eq "POST" && $path eq "/groups" ) {
             die "gitlab request failed [400] POST /groups: {\"message\":\"Failed to save group {:base=>[\\\"path has already been taken\\\"]}\"}\n";
         }
+        return [
+            {
+                id => 6,
+                full_path => "owner",
+                path => "owner",
+            },
+        ] if $method eq "GET"
+          && $path eq "/groups?top_level_only=true&per_page=100&page=1&search=owner";
+        return [
+            {
+                id => 7,
+                full_path => "owner/precreated",
+                path => "precreated",
+            },
+        ] if $method eq "GET"
+          && $path eq "/groups/6/subgroups?per_page=100&page=1&search=precreated";
         if ( $method eq "GET" && $path eq "/groups/7/subgroups?per_page=100&page=1&search=Missing-team" ) {
             return [];
         }
         if ( $method eq "GET" && $path eq "/groups/7/subgroups?per_page=100&page=1&all_available=true" ) {
             return [];
         }
+        return undef
+          if $method eq "GET" && $path eq "/groups/owner%2Fprecreated%2FMissing-team";
         die "unexpected gitlab request: $method $path";
     };
 
@@ -4699,6 +4774,68 @@ YAML
 
     is( $result->{status}, "skipped", "mirror skips sources that reject anonymous git ls-remote access" );
     is( $result->{failure_context}, "source-ls-remote", "source auth skips record the source ls-remote failure context" );
+}
+
+{
+    no warnings 'redefine';
+
+    local *GlabGroups::_discover_remote_refs_from_urls = sub {
+        return {
+            branches => {},
+            default_branch => q{},
+            tags => {},
+        };
+    };
+    local *GlabGroups::_discover_target_remote_refs_if_exists = sub {
+        return undef;
+    };
+    local *GlabGroups::_ensure_target_project = sub {
+        return {
+            created => JSON::PP::true,
+            project_id => 88,
+            requested_target_full_path => "glab-forks/chromium/aosp/platform/system/keymaster",
+            resolved_target_full_path => "glab-forks/chromium/aosp/platform/system/keymaster",
+            resolved_target_namespace_path => "glab-forks/chromium/aosp/platform/system",
+            updated => JSON::PP::false,
+        };
+    };
+
+    my $result = GlabGroups::_mirror_entry(
+        {
+            base_url => "https://gitlab.example.invalid",
+            sync_branch => "managed/sync",
+            token => "target-token",
+            username => "0auth",
+        },
+        {},
+        {
+            action => "sync",
+            policy => {
+                additional_branches => [],
+                additional_tags => [],
+                allow_blob_rewrite => JSON::PP::true,
+                force_lfs => JSON::PP::false,
+                git_timeout_seconds => 1800,
+                max_blob_bytes => 100 * 1024 * 1024,
+                mirror_pristine_tar => JSON::PP::true,
+                read_retry_attempts => 2,
+                read_retry_backoff_seconds => 2,
+                retry_attempts => 2,
+                retry_backoff_seconds => 2,
+                size_limit_bytes => 9 * 1024 * 1024 * 1024,
+                target_branches_protect => [],
+            },
+            source_empty_repo => JSON::PP::false,
+            source_full_path => "chromium.googlesource.com/aosp/platform/system/keymaster",
+            source_group_path => "chromium.googlesource.com",
+            source_http_url => "https://chromium.googlesource.com/aosp/platform/system/keymaster",
+            source_lfs_enabled => JSON::PP::false,
+            target_full_path => "glab-forks/chromium/aosp/platform/system/keymaster",
+            target_namespace_path => "glab-forks/chromium/aosp/platform/system",
+        },
+    );
+
+    is( $result->{status}, "created_empty", "mirror treats a live zero-ref source as an empty repository instead of failing for missing branches" );
 }
 
 {

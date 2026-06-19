@@ -61,6 +61,8 @@ my $GROUP_PROJECT_CREATION_LEVEL = "maintainer";
 my $GROUP_SHARED_RUNNERS_SETTING = "disabled_and_unoverridable";
 my $GROUP_SUBGROUP_CREATION_LEVEL = "maintainer";
 my $DISCOVERY_MAX_SHARDS = 250;
+my $GROUP_PATH_CONFLICT_RESOLUTION_ATTEMPTS = 4;
+my $GROUP_PATH_CONFLICT_RESOLUTION_BACKOFF_SECONDS = 1;
 my $TARGET_NAMESPACE_STATE_CACHE_MIN_TARGETS = 3;
 
 sub run_cli {
@@ -1760,8 +1762,14 @@ sub _mirror_entry {
         die $source_error =~ /\n\z/ ? $source_error : $source_error . "\n";
     }
     my $default_branch = $entry->{source_default_branch} || $available->{default_branch} || "";
+    my $source_empty_repo =
+         $entry->{source_empty_repo}
+      || !(
+            scalar( keys %{ $available->{branches} || {} } )
+         || scalar( keys %{ $available->{tags} || {} } )
+      );
     my $selected = resolve_selected_refs( $default_branch, $entry->{policy}, $available );
-    @{ $selected->{branches} } || $entry->{source_empty_repo}
+    @{ $selected->{branches} } || $source_empty_repo
       or die "no source branches resolved for $entry->{source_full_path}\n";
 
     my $prepared_from_override = ref($prepared_override) eq "HASH";
@@ -1774,7 +1782,7 @@ sub _mirror_entry {
             $entry->{policy},
         );
 
-    if ( $entry->{source_empty_repo} && $target_remote_refs ) {
+    if ( $source_empty_repo && $target_remote_refs ) {
         return {
             target_full_path => $entry->{target_full_path},
             (
@@ -1865,7 +1873,7 @@ sub _mirror_entry {
         $prepared->{created} ? "create_project"
       : $prepared->{updated} ? "update_project"
       : "mirror_only";
-    if ( $entry->{source_empty_repo} ) {
+    if ( $source_empty_repo ) {
         return {
             target_full_path => $resolved_target_full_path,
             (
@@ -2535,6 +2543,8 @@ sub _managed_group_settings_payload {
 
 sub _ensure_group_path {
     my ( $client, $group_path, $cache, $opt ) = @_;
+    my $allow_create =
+      !( ref($opt) eq "HASH" && exists $opt->{allow_create} && !$opt->{allow_create} );
     my $prefer_parent_lookup =
       ref($opt) eq "HASH" && $opt->{prefer_parent_lookup};
     return $cache->{$group_path}
@@ -2556,6 +2566,7 @@ sub _ensure_group_path {
           : _get_group( $client, $current );
         $group ||= _get_group( $client, $current )
           if !$group && $prefer_parent_lookup;
+        return undef if !$group && !$allow_create;
         if ( !$group ) {
             my %payload = (
                 name => $part,
@@ -2579,10 +2590,10 @@ sub _ensure_group_path {
                         );
                     }
                     die sprintf(
-                        "unable to create required target group %s: target token lacks permission to create this top-level group; pre-create it or grant top-level group creation rights: %s",
-                        $current,
-                        $create_error,
-                    );
+                            "unable to create required target group %s: target token lacks permission to create this top-level group; pre-create it or grant top-level group creation rights: %s",
+                            $current,
+                            $create_error,
+                        );
                 }
                 if ( _is_gitlab_path_conflict_error($create_error) ) {
                     if ($prefer_parent_lookup) {
@@ -2595,6 +2606,11 @@ sub _ensure_group_path {
                              _get_group( $client, $current )
                           || _find_group_by_parent_and_path( $client, $parent_id, $current, $part );
                     }
+                    $group ||= _resolve_existing_group_path_after_conflict(
+                        $client,
+                        $current,
+                        $cache,
+                    );
                     die "gitlab group path conflict for $current: $create_error" unless $group;
                 }
                 die $create_error unless $group;
@@ -2604,6 +2620,25 @@ sub _ensure_group_path {
         $cache->{$current} = $parent_id;
     }
     return $cache->{$group_path};
+}
+
+sub _resolve_existing_group_path_after_conflict {
+    my ( $client, $group_path, $cache ) = @_;
+    for my $attempt ( 1 .. $GROUP_PATH_CONFLICT_RESOLUTION_ATTEMPTS ) {
+        my $group_id = _ensure_group_path(
+            $client,
+            $group_path,
+            $cache,
+            {
+                allow_create => JSON::PP::false,
+                prefer_parent_lookup => JSON::PP::true,
+            },
+        );
+        return { id => $group_id } if defined $group_id;
+        next if $attempt >= $GROUP_PATH_CONFLICT_RESOLUTION_ATTEMPTS;
+        _sleep_seconds( $GROUP_PATH_CONFLICT_RESOLUTION_BACKOFF_SECONDS * $attempt );
+    }
+    return undef;
 }
 
 sub _target_namespace_state {
