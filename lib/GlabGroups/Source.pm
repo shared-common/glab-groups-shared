@@ -97,8 +97,8 @@ sub _parse_source_project_url {
         my $fallback_clone_url = $url =~ /\.git\z/ ? undef : $url . ".git";
 
         if ( $host eq "hg.sr.ht" ) {
-            $clone_url = "https://git.sr.ht/" . $path_with_namespace;
-            $fallback_clone_url = $clone_url . ".git";
+            $clone_url = "hg::" . $url;
+            $fallback_clone_url = undef;
         }
 
         return {

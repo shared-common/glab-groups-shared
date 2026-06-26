@@ -73,8 +73,8 @@ Config `source_project_url` values can point at:
 - a SourceHut Git-over-HTTPS repository URL, such as
   `https://git.sr.ht/~kennylevinsen/seatd`
 - a SourceHut Mercurial repository URL, such as
-  `https://hg.sr.ht/~scoopta/wofi`; the runtime resolves the matching
-  SourceHut Git transport for mirror operations
+  `https://hg.sr.ht/~scoopta/wofi`; the runtime mirrors it through a
+  Mercurial Git remote helper
 - a public Git-over-HTTPS repository URL, such as
   `https://chromium.googlesource.com/chromiumos/user-recovery-tools`
 - a public cgit-style repository URL, such as

@@ -388,6 +388,17 @@ jobs:
           set -euo pipefail
           python3 shared/.github/scripts/mask_secret_files.py
 
+      - name: Install Mercurial source bridge when needed for discovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          projects_file="gh-actions-cfg/${{ inputs.config-path }}/projects.yml"
+          if [ ! -f "${projects_file}" ] || ! grep -Eq 'source_project_url:[[:space:]]+https://hg\.sr\.ht/' "${projects_file}"; then
+            exit 0
+          fi
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y git-remote-hg mercurial
+
       - name: Discover source inventory shard
         shell: bash
         env:
@@ -714,6 +725,16 @@ jobs:
         run: |
           set -euo pipefail
           python3 shared/.github/scripts/mask_secret_files.py
+
+      - name: Install Mercurial source bridge when needed for mirror
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! grep -q '"source_http_url":"hg::https://hg\.sr\.ht/' plan.json; then
+            exit 0
+          fi
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y git-remote-hg mercurial
 
       - name: Mirror selected repositories for batch
         shell: bash

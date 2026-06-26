@@ -3950,6 +3950,7 @@ sub _infer_default_branch_from_heads {
     return q{} unless $branches && ref($branches) eq "HASH";
     return "main" if $branches->{main};
     return "master" if $branches->{master};
+    return "default" if $branches->{default};
     my @names = sort keys %{$branches};
     return $names[0] if @names == 1;
     return q{};

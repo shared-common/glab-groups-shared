@@ -1956,10 +1956,10 @@ HTML
         my ( $source_url, $policy ) = @_;
         push @seen_source_urls, $source_url;
         return {
-            branches => { master => 1 },
-            default_branch => "master",
+            branches => { default => 1 },
+            default_branch => "default",
             tags => {},
-        } if $source_url eq "https://git.sr.ht/~scoopta/wofi";
+        } if $source_url eq "hg::https://hg.sr.ht/~scoopta/wofi";
         die "unexpected source url: $source_url";
     };
 
@@ -1978,11 +1978,12 @@ HTML
     );
 
     is( $inventory->{inventory}->[0]->{group_path}, "~scoopta", "explicit SourceHut Mercurial project discovery keeps the tilde-prefixed owner path" );
-    is( $inventory->{inventory}->[0]->{projects}->[0]->{http_url_to_repo}, "https://git.sr.ht/~scoopta/wofi", "explicit SourceHut Mercurial project discovery stores the Git transport clone URL" );
+    is( $inventory->{inventory}->[0]->{projects}->[0]->{default_branch}, "default", "explicit SourceHut Mercurial project discovery records the Mercurial default branch" );
+    is( $inventory->{inventory}->[0]->{projects}->[0]->{http_url_to_repo}, "hg::https://hg.sr.ht/~scoopta/wofi", "explicit SourceHut Mercurial project discovery stores the Mercurial git-remote helper URL" );
     is_deeply(
         \@seen_source_urls,
-        ["https://git.sr.ht/~scoopta/wofi"],
-        "explicit SourceHut Mercurial project discovery probes the SourceHut Git transport instead of the Mercurial endpoint",
+        ["hg::https://hg.sr.ht/~scoopta/wofi"],
+        "explicit SourceHut Mercurial project discovery probes the Mercurial source through the git-remote helper URL",
     );
 }
 
@@ -2012,7 +2013,7 @@ HTML
         "https://hg.sr.ht/~scoopta/wofi",
         "wofi",
     );
-    is( $parsed->{clone_url}, "https://git.sr.ht/~scoopta/wofi", "SourceHut Mercurial project URLs normalize to the Git transport clone URL" );
+    is( $parsed->{clone_url}, "hg::https://hg.sr.ht/~scoopta/wofi", "SourceHut Mercurial project URLs normalize to the Mercurial git-remote helper URL" );
     is( $parsed->{group_path}, "~scoopta", "SourceHut Mercurial project URLs preserve the tilde-prefixed owner path" );
     is( $parsed->{path_with_namespace}, "~scoopta/wofi", "SourceHut Mercurial project URLs preserve the owner and project path" );
 
