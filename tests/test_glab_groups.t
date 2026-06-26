@@ -2027,6 +2027,64 @@ HTML
 
 {
     no warnings 'redefine';
+    my @commands;
+
+    local *GlabGroups::_run_command = sub {
+        my ( $cmd, $opt ) = @_;
+        push @commands, [ @{$cmd} ];
+
+        return { output => "Initialized empty Git repository\n", status => 0 }
+          if $cmd->[0] eq "git" && $cmd->[1] eq "init";
+
+        return { output => q{}, status => 0 }
+          if $cmd->[0] eq "git"
+          && $cmd->[3] eq "remote"
+          && $cmd->[4] eq "add";
+
+        return { output => "From hg::https://hg.sr.ht/~scoopta/wofi\n", status => 0 }
+          if $cmd->[0] eq "git"
+          && $cmd->[3] eq "fetch";
+
+        return {
+            output => join(
+                "\n",
+                "refs/remotes/source/HEAD\t1111111111111111111111111111111111111111\trefs/remotes/source/master",
+                "refs/remotes/source/master\t1111111111111111111111111111111111111111\t",
+                "refs/remotes/source/branches/default\t1111111111111111111111111111111111111111\t",
+                "refs/remotes/source/branches/stable\t2222222222222222222222222222222222222222\t",
+                "refs/tags/v0.1\t3333333333333333333333333333333333333333",
+            ),
+            status => 0,
+        } if $cmd->[0] eq "git"
+          && $cmd->[3] eq "for-each-ref";
+
+        die "unexpected command: " . join( q{ }, @{$cmd} );
+    };
+
+    my $available = GlabGroups::_discover_remote_refs(
+        "hg::https://hg.sr.ht/~scoopta/wofi",
+        {
+            git_timeout_seconds => 1800,
+            retry_attempts => 2,
+            retry_backoff_seconds => 2,
+        },
+    );
+
+    is( $available->{default_branch}, "master", "Mercurial source discovery resolves the default branch from fetched remote HEAD" );
+    is_deeply(
+        [ sort keys %{ $available->{branches} } ],
+        [ "branches/default", "branches/stable", "master" ],
+        "Mercurial source discovery records fetched branch refs from the temporary Git repository",
+    );
+    is( $available->{tags}->{q{v0.1}}, "3333333333333333333333333333333333333333", "Mercurial source discovery records fetched tags from the temporary Git repository" );
+    ok(
+        !grep( { join( q{ }, @{$_} ) =~ /\bls-remote\b/ } @commands ),
+        "Mercurial source discovery no longer calls git ls-remote",
+    );
+}
+
+{
+    no warnings 'redefine';
     my $dir = tempdir( CLEANUP => 1 );
     my $plan_path = File::Spec->catfile( $dir, "plan.json" );
     my $discover_path = File::Spec->catfile( $dir, "discover.json" );

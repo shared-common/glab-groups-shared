@@ -3882,12 +3882,52 @@ sub _index_prepared_payload {
 
 sub _discover_remote_refs {
     my ( $source_url, $policy ) = @_;
+    return _discover_mercurial_remote_refs( $source_url, $policy )
+      if defined $source_url && !ref($source_url) && $source_url =~ /\Ahg::/;
     my $result = _run_command(
         [ "git", "ls-remote", "--heads", "--tags", "--symref", $source_url ],
         _git_command_options( $policy, JSON::PP::true )
     );
     $result->{status} == 0 or die "git ls-remote failed: $result->{output}\n";
     return _parse_remote_refs_output( $result->{output} );
+}
+
+sub _discover_mercurial_remote_refs {
+    my ( $source_url, $policy ) = @_;
+    my $workdir = tempdir( CLEANUP => 1 );
+    my $repo_dir = File::Spec->catdir( $workdir, "repo" );
+
+    my $result = _run_command( [ "git", "init", $repo_dir ], { timeout => 120 } );
+    $result->{status} == 0
+      or die "git init failed during Mercurial source discovery: $result->{output}\n";
+
+    $result = _run_command(
+        [ "git", "-C", $repo_dir, "remote", "add", "source", $source_url ],
+        { timeout => 60 }
+    );
+    $result->{status} == 0
+      or die "git remote add source failed during Mercurial source discovery: $result->{output}\n";
+
+    $result = _run_command(
+        [ "git", "-C", $repo_dir, "fetch", "--prune", "--tags", "source" ],
+        _git_command_options( $policy, JSON::PP::true )
+    );
+    $result->{status} == 0
+      or die "git fetch failed during Mercurial source discovery: $result->{output}\n";
+
+    $result = _run_command(
+        [
+            "git", "-C", $repo_dir, "for-each-ref",
+            "--format=%(refname)\t%(objectname)\t%(symref)",
+            "refs/remotes/source",
+            "refs/tags",
+        ],
+        { timeout => 120 }
+    );
+    $result->{status} == 0
+      or die "git for-each-ref failed during Mercurial source discovery: $result->{output}\n";
+
+    return _parse_fetched_remote_refs_output( $result->{output} );
 }
 
 sub _parse_remote_refs_output {
@@ -3914,6 +3954,46 @@ sub _parse_remote_refs_output {
     if ( !$default_branch ) {
         $default_branch = _infer_default_branch_from_heads( \%branches );
     }
+    return {
+        branches => \%branches,
+        default_branch => $default_branch,
+        tags => \%tags,
+    };
+}
+
+sub _parse_fetched_remote_refs_output {
+    my ($output) = @_;
+    my %branches;
+    my %tags;
+    my $default_branch = q{};
+
+    for my $line ( split /\n/, $output || q{} ) {
+        next unless length $line;
+        my ( $refname, $objectname, $symref ) = split /\t/, $line, 3;
+        next unless defined $refname && length $refname;
+
+        if ( $refname eq "refs/remotes/source/HEAD" ) {
+            if ( defined $symref && $symref =~ /\Arefs\/remotes\/source\/(.+)\z/ ) {
+                $default_branch = $1;
+            }
+            next;
+        }
+
+        if ( $refname =~ /\Arefs\/remotes\/source\/(.+)\z/ ) {
+            $branches{$1} = $objectname if defined $objectname && length $objectname;
+            next;
+        }
+
+        if ( $refname =~ /\Arefs\/tags\/(.+)\z/ ) {
+            $tags{$1} = $objectname if defined $objectname && length $objectname;
+            next;
+        }
+    }
+
+    if ( !$default_branch ) {
+        $default_branch = _infer_default_branch_from_heads( \%branches );
+    }
+
     return {
         branches => \%branches,
         default_branch => $default_branch,
@@ -3951,6 +4031,7 @@ sub _infer_default_branch_from_heads {
     return "main" if $branches->{main};
     return "master" if $branches->{master};
     return "default" if $branches->{default};
+    return "branches/default" if $branches->{"branches/default"};
     my @names = sort keys %{$branches};
     return $names[0] if @names == 1;
     return q{};
