@@ -72,6 +72,9 @@ Config `source_project_url` values can point at:
   `https://gitlab.com/WhyNotHugo/darkman`
 - a SourceHut Git-over-HTTPS repository URL, such as
   `https://git.sr.ht/~kennylevinsen/seatd`
+- a SourceHut Mercurial repository URL, such as
+  `https://hg.sr.ht/~scoopta/wofi`; the runtime resolves the matching
+  SourceHut Git transport for mirror operations
 - a public Git-over-HTTPS repository URL, such as
   `https://chromium.googlesource.com/chromiumos/user-recovery-tools`
 - a public cgit-style repository URL, such as

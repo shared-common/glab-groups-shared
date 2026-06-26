@@ -1949,6 +1949,44 @@ HTML
 }
 
 {
+    no warnings 'redefine';
+    my @seen_source_urls;
+
+    local *GlabGroups::_discover_remote_refs = sub {
+        my ( $source_url, $policy ) = @_;
+        push @seen_source_urls, $source_url;
+        return {
+            branches => { master => 1 },
+            default_branch => "master",
+            tags => {},
+        } if $source_url eq "https://git.sr.ht/~scoopta/wofi";
+        die "unexpected source url: $source_url";
+    };
+
+    my $inventory = GlabGroups::_discover_inventory(
+        {
+            defaults => { additional_branches => [], additional_tags => [] },
+            namespaces => [],
+            projects => [
+                {
+                    name => "wofi",
+                    source_project_url => "https://hg.sr.ht/~scoopta/wofi",
+                    target_group_path => "glab-forks/other",
+                },
+            ],
+        }
+    );
+
+    is( $inventory->{inventory}->[0]->{group_path}, "~scoopta", "explicit SourceHut Mercurial project discovery keeps the tilde-prefixed owner path" );
+    is( $inventory->{inventory}->[0]->{projects}->[0]->{http_url_to_repo}, "https://git.sr.ht/~scoopta/wofi", "explicit SourceHut Mercurial project discovery stores the Git transport clone URL" );
+    is_deeply(
+        \@seen_source_urls,
+        ["https://git.sr.ht/~scoopta/wofi"],
+        "explicit SourceHut Mercurial project discovery probes the SourceHut Git transport instead of the Mercurial endpoint",
+    );
+}
+
+{
     my $parsed = GlabGroups::_parse_source_project_url(
         "https://github.com/labwc/labwc",
         "labwc",
@@ -1969,6 +2007,14 @@ HTML
     is( $parsed->{clone_url}, "https://git.sr.ht/~kennylevinsen/seatd", "SourceHut project URLs preserve the Git-over-HTTPS clone URL" );
     is( $parsed->{group_path}, "~kennylevinsen", "SourceHut project URLs preserve the tilde-prefixed owner path" );
     is( $parsed->{path_with_namespace}, "~kennylevinsen/seatd", "SourceHut project URLs preserve the owner and project path" );
+
+    $parsed = GlabGroups::_parse_source_project_url(
+        "https://hg.sr.ht/~scoopta/wofi",
+        "wofi",
+    );
+    is( $parsed->{clone_url}, "https://git.sr.ht/~scoopta/wofi", "SourceHut Mercurial project URLs normalize to the Git transport clone URL" );
+    is( $parsed->{group_path}, "~scoopta", "SourceHut Mercurial project URLs preserve the tilde-prefixed owner path" );
+    is( $parsed->{path_with_namespace}, "~scoopta/wofi", "SourceHut Mercurial project URLs preserve the owner and project path" );
 
     $parsed = GlabGroups::_parse_source_project_url(
         "https://github.com/crowdsecurity/.github",

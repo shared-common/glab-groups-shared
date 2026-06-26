@@ -91,13 +91,23 @@ sub _parse_source_project_url {
 
     if ( @segments >= 2 && _strip_optional_git_suffix( $segments[-1] ) eq $project_name ) {
         my $normalized_name = _strip_optional_git_suffix( $segments[-1] );
+        my $group_path = join( "/", @segments[ 0 .. $#segments - 1 ] );
+        my $path_with_namespace = join( "/", @segments[ 0 .. $#segments - 1 ], $normalized_name );
+        my $clone_url = $url;
+        my $fallback_clone_url = $url =~ /\.git\z/ ? undef : $url . ".git";
+
+        if ( $host eq "hg.sr.ht" ) {
+            $clone_url = "https://git.sr.ht/" . $path_with_namespace;
+            $fallback_clone_url = $clone_url . ".git";
+        }
+
         return {
             base_url => $base_url,
-            clone_url => $url,
-            fallback_clone_url => $url =~ /\.git\z/ ? undef : $url . ".git",
-            group_path => join( "/", @segments[ 0 .. $#segments - 1 ] ),
+            clone_url => $clone_url,
+            fallback_clone_url => $fallback_clone_url,
+            group_path => $group_path,
             kind => "git_project",
-            path_with_namespace => join( "/", @segments[ 0 .. $#segments - 1 ], $normalized_name ),
+            path_with_namespace => $path_with_namespace,
         };
     }
 
