@@ -5186,6 +5186,13 @@ YAML
     is( $result->{id}, 99, "gitlab request returns the successful retry payload" );
 }
 
+ok(
+    GlabGroups::_is_retryable_git_error(
+        "git ls-remote failed: fatal: unable to access 'https://salsa.debian.org/swaywm-team/wofi/': Failed to connect to salsa.debian.org port 443 after 96 ms: Couldn't connect to server\n"
+    ),
+    "git retry classification treats transient connect failures as retryable",
+);
+
 {
     no warnings 'redefine';
     my @calls;

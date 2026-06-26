@@ -5601,6 +5601,9 @@ sub _run_shell_command {
 sub _is_retryable_git_error {
     my ($text) = @_;
     return 1 if $text =~ /timed out/i;
+    return 1 if $text =~ /failed to connect to .* port \d+/i;
+    return 1 if $text =~ /couldn't connect to server/i;
+    return 1 if $text =~ /connection refused/i;
     return 1 if $text =~ /connection reset/i;
     return 1 if $text =~ /\bHTTP 5\d\d\b/i;
     return 1 if $text =~ /TLS/i;
