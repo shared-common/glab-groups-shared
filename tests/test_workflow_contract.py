@@ -128,6 +128,11 @@ class SharedWorkflowContractTests(unittest.TestCase):
             text.count("shared-common/gh-actions-shared/.github/actions/bws-fetch@v0.0.41"),
             6,
         )
+        self.assertIn("Install Mercurial source bridge when needed for discovery", text)
+        self.assertIn("Install Mercurial source bridge when needed for mirror", text)
+        self.assertIn("python3 -m pip install --user --disable-pip-version-check git-remote-hg==1.0.5", text)
+        self.assertIn("sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mercurial python3-pip", text)
+        self.assertIn('printf \'%s\\n\' "${HOME}/.local/bin" >> "${GITHUB_PATH}"', text)
 
     def test_workflow_runtime_is_capped_below_six_hours(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")

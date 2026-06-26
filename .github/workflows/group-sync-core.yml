@@ -397,7 +397,9 @@ jobs:
             exit 0
           fi
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y git-remote-hg mercurial
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mercurial python3-pip
+          python3 -m pip install --user --disable-pip-version-check git-remote-hg==1.0.5
+          printf '%s\n' "${HOME}/.local/bin" >> "${GITHUB_PATH}"
 
       - name: Discover source inventory shard
         shell: bash
@@ -734,7 +736,9 @@ jobs:
             exit 0
           fi
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y git-remote-hg mercurial
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mercurial python3-pip
+          python3 -m pip install --user --disable-pip-version-check git-remote-hg==1.0.5
+          printf '%s\n' "${HOME}/.local/bin" >> "${GITHUB_PATH}"
 
       - name: Mirror selected repositories for batch
         shell: bash
