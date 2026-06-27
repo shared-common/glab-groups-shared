@@ -133,6 +133,8 @@ class SharedWorkflowContractTests(unittest.TestCase):
         self.assertIn("python3 -m pip install --user --disable-pip-version-check git-remote-hg==1.0.5", text)
         self.assertIn("sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mercurial python3-pip", text)
         self.assertIn('printf \'%s\\n\' "${HOME}/.local/bin" >> "${GITHUB_PATH}"', text)
+        self.assertIn('grep -Eq "source_project_url:[[:space:]]*[\'\\"]?https://hg\\\\.sr\\\\.ht/"', text)
+        self.assertIn('grep -Eq \'"source_http_url"[[:space:]]*:[[:space:]]*"hg::https://hg\\.sr\\.ht/\' plan.json', text)
 
     def test_workflow_runtime_is_capped_below_six_hours(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")

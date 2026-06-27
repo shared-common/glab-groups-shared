@@ -2016,6 +2016,7 @@ HTML
     is( $parsed->{clone_url}, "hg::https://hg.sr.ht/~scoopta/wofi", "SourceHut Mercurial project URLs normalize to the Mercurial git-remote helper URL" );
     is( $parsed->{group_path}, "~scoopta", "SourceHut Mercurial project URLs preserve the tilde-prefixed owner path" );
     is( $parsed->{path_with_namespace}, "~scoopta/wofi", "SourceHut Mercurial project URLs preserve the owner and project path" );
+    is( GlabGroups::Source::_fallback_clone_url("hg::https://hg.sr.ht/~scoopta/wofi"), undef, "Mercurial helper URLs do not invent a .git fallback clone URL" );
 
     $parsed = GlabGroups::_parse_source_project_url(
         "https://github.com/crowdsecurity/.github",

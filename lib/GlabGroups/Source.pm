@@ -158,6 +158,7 @@ sub _project_git_url {
 sub _fallback_clone_url {
     my ($url) = @_;
     return undef unless defined $url && length $url;
+    return undef if $url =~ /\Ahg::/;
     return undef if $url =~ /\.git\z/;
     return $url . ".git";
 }

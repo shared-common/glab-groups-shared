@@ -393,7 +393,7 @@ jobs:
         run: |
           set -euo pipefail
           projects_file="gh-actions-cfg/${{ inputs.config-path }}/projects.yml"
-          if [ ! -f "${projects_file}" ] || ! grep -Eq 'source_project_url:[[:space:]]+https://hg\.sr\.ht/' "${projects_file}"; then
+          if [ ! -f "${projects_file}" ] || ! grep -Eq "source_project_url:[[:space:]]*['\"]?https://hg\\.sr\\.ht/" "${projects_file}"; then
             exit 0
           fi
           sudo apt-get update
@@ -732,7 +732,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if ! grep -q '"source_http_url":"hg::https://hg\.sr\.ht/' plan.json; then
+          if ! grep -Eq '"source_http_url"[[:space:]]*:[[:space:]]*"hg::https://hg\.sr\.ht/' plan.json; then
             exit 0
           fi
           sudo apt-get update
