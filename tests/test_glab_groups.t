@@ -1024,6 +1024,101 @@ JSONL
         my ( $base_url, $path, $payload, $opt ) = @_;
         return [
             {
+                archived => JSON::PP::true,
+                clone_url => "https://github.com/TechnitiumSoftware/BitChatClient.git",
+                default_branch => "master",
+                description => "Archived Bit Chat client",
+                full_name => "TechnitiumSoftware/BitChatClient",
+                id => 103,
+                private => JSON::PP::false,
+                pushed_at => "2018-12-30T00:00:00Z",
+                size => 1,
+                ssh_url => 'git@github.com:TechnitiumSoftware/BitChatClient.git',
+                visibility => "public",
+            },
+            {
+                archived => JSON::PP::false,
+                clone_url => "https://github.com/TechnitiumSoftware/DnsServer.git",
+                default_branch => "master",
+                description => "Active DNS server",
+                full_name => "TechnitiumSoftware/DnsServer",
+                id => 104,
+                private => JSON::PP::false,
+                pushed_at => "2026-08-30T00:00:00Z",
+                size => 1,
+                ssh_url => 'git@github.com:TechnitiumSoftware/DnsServer.git',
+                visibility => "public",
+            },
+        ] if $path =~ /page=1/;
+        return [] if $path =~ /page=2/;
+        die "unexpected GitHub request: $base_url $path";
+    };
+
+    my $config = {
+        defaults => {
+            additional_branches => [],
+            additional_tags => [],
+            force_lfs => JSON::PP::false,
+        },
+        exclusions => {},
+        namespaces => [
+            {
+                name => "github-technitium",
+                source_group_url => "https://github.com/technitiumsoftware",
+                target_owner_path => "glab-forks",
+                target_namespace_path => "technitiumsoftware",
+            },
+        ],
+    };
+    my $inventory = GlabGroups::_discover_inventory($config);
+    is_deeply(
+        [ map { $_->{path_with_namespace} } @{ $inventory->{inventory}->[0]->{projects} } ],
+        [ "technitiumsoftware/BitChatClient", "technitiumsoftware/DnsServer" ],
+        "GitHub org discovery normalizes API owner casing for archived and active repositories",
+    );
+
+    my $plan;
+    my $plan_ok = eval {
+        $plan = GlabGroups::_build_plan( $config, $inventory, 25 );
+        1;
+    };
+    ok( $plan_ok, "archived GitHub repositories with canonical API owner casing do not abort planning" )
+      or diag($@);
+    SKIP: {
+        skip "plan construction failed", 5 unless $plan_ok;
+        my ($archived_entry) = grep { $_->{source_full_path} =~ m{/BitChatClient\z} } @{ $plan->{plan} };
+        my ($active_entry) = grep { $_->{source_full_path} =~ m{/DnsServer\z} } @{ $plan->{plan} };
+        is( $archived_entry->{action}, "skip", "archived GitHub repositories are planned as skipped" );
+        is(
+            $archived_entry->{skip_reason},
+            "Archived source repository is excluded from mirroring.",
+            "archived GitHub repositories retain the shared archive skip reason",
+        );
+        is(
+            $archived_entry->{target_full_path},
+            "glab-forks/technitiumsoftware/BitChatClient",
+            "archived GitHub repositories retain a deterministic target path for reporting",
+        );
+        is( $active_entry->{action}, "sync", "planning continues with active repositories from the same GitHub organization" );
+        is_deeply(
+            $plan->{counts},
+            { fail => 0, skip => 1, sync => 1 },
+            "mixed archived and active GitHub repositories do not create plan failures",
+        );
+    }
+}
+
+{
+    no warnings 'redefine';
+
+    local *GlabGroups::_load_source_auth = sub { return { github_app => { app_id => "123", pem => "unused" }, github_installation_tokens => {} }; };
+    local *GlabGroups::_github_installation_source_auth = sub {
+        return { token => "ghs_install_token", username => "x-access-token" };
+    };
+    local *GlabGroups::_github_request = sub {
+        my ( $base_url, $path, $payload, $opt ) = @_;
+        return [
+            {
                 archived => JSON::PP::false,
                 clone_url => "https://github.com/microsoft/page-one.git",
                 default_branch => "main",

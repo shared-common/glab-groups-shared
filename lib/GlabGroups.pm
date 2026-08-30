@@ -3540,6 +3540,12 @@ sub _list_github_org_projects {
                 $repo->{full_name},
                 "GitHub repository full_name",
             );
+            my ( $full_name_owner, $repository_name ) = split m{/}, $full_name, 2;
+            lc($full_name_owner) eq lc($org_path)
+              or die "GitHub repository full_name is outside requested organization: $full_name\n";
+            # GitHub account paths are case-insensitive; keep the configured spelling so
+            # the planner's strict source-group containment check remains deterministic.
+            $full_name = _join_path( $org_path, $repository_name );
             push @projects,
               {
                 archived => $repo->{archived} ? JSON::PP::true : JSON::PP::false,
